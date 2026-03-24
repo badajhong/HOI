@@ -64,7 +64,11 @@ if [[ ! -f $SENTINEL_FILE ]]; then
     git clone https://github.com/isaac-sim/IsaacLab.git --branch v2.3.0 $WORKSPACE_DIR/IsaacLab
   fi
 
-  sudo apt install -y cmake build-essential
+  # Origin
+  # sudo apt install -y cmake build-essential
+  # New
+  conda install -c conda-forge -y cmake compilers
+  
   cd $WORKSPACE_DIR/IsaacLab
   # setuptools 81 removes pkg_resoures, a dep needs that
   # see https://github.com/isaac-sim/IsaacLab/pull/4585
