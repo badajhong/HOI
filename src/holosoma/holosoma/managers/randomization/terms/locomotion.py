@@ -52,6 +52,19 @@ def _get_joint_action_term(env: Any) -> JointPositionActionTerm | None:
     return None
 
 
+def _get_object_scene_entity_names(simulator: Any) -> list[str]:
+    """Resolve object entity names for both single-object and multi-object scenes."""
+    scene_keys = list(simulator.scene.keys())
+    if "object" in scene_keys:
+        return ["object"]
+
+    object_names = sorted(name for name in scene_keys if name.startswith("object_"))
+    if object_names:
+        return object_names
+
+    return []
+
+
 def _isaacsim_randomize_rigid_body_mass(
     simulator: IsaacSim,
     env_ids_cpu: torch.Tensor,
@@ -1016,19 +1029,25 @@ def randomize_object_rigid_body_material_startup(
     if env_ids_cpu.numel() == 0:
         return
 
-    asset_cfg = SceneEntityCfg("object", body_names=".*")
-    asset_cfg.resolve(simulator.scene)
+    object_names = _get_object_scene_entity_names(simulator)
+    if not object_names:
+        logger.warning("No object scene entities found for material randomization. Skipping.")
+        return
 
     num_buckets = 64
-    _isaacsim_randomize_rigid_body_material(
-        simulator,
-        env_ids_cpu,
-        asset_cfg,
-        static_friction_range=(static_friction_range[0], static_friction_range[1]),
-        dynamic_friction_range=(dynamic_friction_range[0], dynamic_friction_range[1]),
-        restitution_range=(restitution_range[0], restitution_range[1]),
-        num_buckets=num_buckets,
-    )
+    for object_name in object_names:
+        asset_cfg = SceneEntityCfg(object_name, body_names=".*")
+        asset_cfg.resolve(simulator.scene)
+
+        _isaacsim_randomize_rigid_body_material(
+            simulator,
+            env_ids_cpu,
+            asset_cfg,
+            static_friction_range=(static_friction_range[0], static_friction_range[1]),
+            dynamic_friction_range=(dynamic_friction_range[0], dynamic_friction_range[1]),
+            restitution_range=(restitution_range[0], restitution_range[1]),
+            num_buckets=num_buckets,
+        )
 
 
 def randomize_object_rigid_body_mass_startup(
@@ -1063,16 +1082,22 @@ def randomize_object_rigid_body_mass_startup(
     if env_ids_cpu.numel() == 0:
         return
 
-    asset_cfg = SceneEntityCfg("object", body_names=".*")
-    asset_cfg.resolve(simulator.scene)
+    object_names = _get_object_scene_entity_names(simulator)
+    if not object_names:
+        logger.warning("No object scene entities found for mass randomization. Skipping.")
+        return
 
-    _isaacsim_randomize_rigid_body_mass(
-        simulator,
-        env_ids_cpu,
-        asset_cfg,
-        (mass_distribution_params[0], mass_distribution_params[1]),
-        operation="add",
-    )
+    for object_name in object_names:
+        asset_cfg = SceneEntityCfg(object_name, body_names=".*")
+        asset_cfg.resolve(simulator.scene)
+
+        _isaacsim_randomize_rigid_body_mass(
+            simulator,
+            env_ids_cpu,
+            asset_cfg,
+            (mass_distribution_params[0], mass_distribution_params[1]),
+            operation="add",
+        )
 
 
 def randomize_object_rigid_body_inertia_startup(
@@ -1108,22 +1133,28 @@ def randomize_object_rigid_body_inertia_startup(
     if env_ids_cpu.numel() == 0:
         return
 
-    asset_cfg = SceneEntityCfg("object", body_names=".*")
-    asset_cfg.resolve(simulator.scene)
+    object_names = _get_object_scene_entity_names(simulator)
+    if not object_names:
+        logger.warning("No object scene entities found for inertia randomization. Skipping.")
+        return
 
     ordering = ["Ixx", "Iyy", "Izz", "Ixy", "Iyz", "Ixz"]
     lower_bounds = [inertia_distribution_params_dict[key][0] for key in ordering]
     upper_bounds = [inertia_distribution_params_dict[key][1] for key in ordering]
     inertia_distribution_params = (torch.tensor(lower_bounds, device="cpu"), torch.tensor(upper_bounds, device="cpu"))
 
-    randomize_rigid_body_inertia(
-        simulator,
-        env_ids_cpu,
-        asset_cfg,
-        inertia_distribution_params,
-        operation="scale",
-        distribution="uniform",
-    )
+    for object_name in object_names:
+        asset_cfg = SceneEntityCfg(object_name, body_names=".*")
+        asset_cfg.resolve(simulator.scene)
+
+        randomize_rigid_body_inertia(
+            simulator,
+            env_ids_cpu,
+            asset_cfg,
+            inertia_distribution_params,
+            operation="scale",
+            distribution="uniform",
+        )
 
 
 def configure_torque_rfi(

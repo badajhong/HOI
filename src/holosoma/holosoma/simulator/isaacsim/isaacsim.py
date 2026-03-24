@@ -67,6 +67,10 @@ class IsaacSim(BaseSimulator):
         # Add device attribute for base simulator compatibility
         self.device = device
 
+        # Scale GPU rigid patch buffer with env count to avoid PhysX patch-buffer overflow
+        # in large batched scenes (e.g., 24k+ envs with rich contacts).
+        gpu_max_rigid_patch_count = max(10 * 2**15, int(self.training_config.num_envs) * 32)
+
         sim_config: SimulationCfg = SimulationCfg(
             dt=1.0 / self.simulator_config.sim.fps,
             render_interval=self.simulator_config.sim.render_interval,
@@ -76,7 +80,7 @@ class IsaacSim(BaseSimulator):
                 solver_type=self.simulator_config.sim.physx.solver_type,
                 max_position_iteration_count=self.simulator_config.sim.physx.num_position_iterations,
                 max_velocity_iteration_count=self.simulator_config.sim.physx.num_velocity_iterations,
-                gpu_max_rigid_patch_count=10 * 2**15,
+                gpu_max_rigid_patch_count=gpu_max_rigid_patch_count,
             ),
             # Global physics material, can be overridden by the individual articulation
             # Can be inspected by:
@@ -396,16 +400,13 @@ class IsaacSim(BaseSimulator):
         self.scene.filter_collisions(global_prim_paths=global_collision_prims)
 
         # add objects if object is provided
-        if self.robot_config.object.object_urdf_path:
-            # Resolve the object asset urdf path using importlib.resources
-            object_asset_urdf_path = resolve_data_file_path(self.robot_config.object.object_urdf_path)
-            object_name = "object"  # hardcoded object name
-            object_cfg = RigidObjectCfg(
-                prim_path=f"/World/envs/env_.*/Object",
+        def _build_object_cfg(actor_name: str, urdf_path: str) -> RigidObjectCfg:
+            return RigidObjectCfg(
+                prim_path=f"/World/envs/env_.*/{actor_name}",
                 spawn=sim_utils.UrdfFileCfg(
                     fix_base=False,
                     replace_cylinders_with_capsules=True,
-                    asset_path=object_asset_urdf_path,
+                    asset_path=urdf_path,
                     activate_contact_sensors=True,
                     rigid_props=sim_utils.RigidBodyPropertiesCfg(
                         disable_gravity=False,
@@ -429,8 +430,20 @@ class IsaacSim(BaseSimulator):
                     pos=(0.0, 0.0, 0.5),
                 ),
             )
-            self._object = RigidObject(object_cfg)
-            self.scene.rigid_objects[object_name] = self._object
+
+        object_cfg = self.robot_config.object
+        object_name_to_path = object_cfg.object_urdf_name_to_path or {}
+
+        if object_name_to_path:
+            for object_key, urdf_path in sorted(object_name_to_path.items()):
+                actor_name = f"object_{object_key}"
+                resolved_urdf_path = resolve_data_file_path(urdf_path)
+                self.scene.rigid_objects[actor_name] = RigidObject(_build_object_cfg(actor_name, resolved_urdf_path))
+            logger.info(f"Loaded {len(object_name_to_path)} object URDFs for multi-object motion training")
+        elif object_cfg.object_urdf_path:
+            object_name = "object"
+            resolved_urdf_path = resolve_data_file_path(object_cfg.object_urdf_path)
+            self.scene.rigid_objects[object_name] = RigidObject(_build_object_cfg(object_name, resolved_urdf_path))
 
         # add lights
         # light_config = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.98, 0.95, 0.88))

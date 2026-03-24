@@ -27,3 +27,5 @@ src/holosoma/holosoma/data/robots/converted_rank*/
 # other
 *.egg-info
 __pycache__
+train/
+./train/

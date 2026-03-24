@@ -179,11 +179,62 @@ g1_29dof_wbt_fast_sac_w_object = replace(
     ),
 )
 
+# Multi-file variant for training on concatenated motion clips
+g1_29dof_wbt_w_object_multi = replace(
+    g1_29dof_wbt_w_object,
+    command=command.g1_29dof_wbt_command_w_object_multi,
+    robot=replace(
+        robot.g1_29dof_w_object_multi,
+        asset=replace(
+            robot.g1_29dof_w_object_multi.asset,
+            enable_self_collisions=True,
+        ),
+        object=replace(
+            robot.g1_29dof_w_object_multi.object,
+            object_urdf_path="holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf",
+        ),
+        init_state=replace(robot.g1_29dof_w_object_multi.init_state, pos=[0.0, 0.0, 0.76]),
+    ),
+    randomization=randomization.g1_29dof_wbt_randomization_w_object,
+    observation=observation.g1_29dof_wbt_observation_w_object_multi,
+    reward=reward.g1_29dof_wbt_reward_w_object_multi,
+    simulator=replace(
+        simulator.isaacsim,
+        config=replace(simulator.isaacsim.config, scene=replace(simulator.isaacsim.config.scene, env_spacing=0.0)),
+    ),
+)
+
+g1_29dof_wbt_w_object_multi_teacher = replace(
+    g1_29dof_wbt_w_object,
+    command=command.g1_29dof_wbt_command_w_object_multi,
+    robot=replace(
+        robot.g1_29dof_w_object_multi_teacher,
+        asset=replace(
+            robot.g1_29dof_w_object_multi_teacher.asset,
+            enable_self_collisions=True,
+        ),
+        object=replace(
+            robot.g1_29dof_w_object_multi_teacher.object,
+            object_urdf_path="holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf",
+        ),
+        init_state=replace(robot.g1_29dof_w_object_multi_teacher.init_state, pos=[0.0, 0.0, 0.76]),
+    ),
+    randomization=randomization.g1_29dof_wbt_randomization_w_object,
+    observation=observation.g1_29dof_wbt_observation_w_object_multi_teacher,
+    reward=reward.g1_29dof_wbt_reward_w_object_multi_teacher,
+    simulator=replace(
+        simulator.isaacsim,
+        config=replace(simulator.isaacsim.config, scene=replace(simulator.isaacsim.config.scene, env_spacing=0.0)),
+    ),
+)
+
 __all__ = [
     "g1_29dof_wbt",
     "g1_29dof_wbt_fast_sac",
     "g1_29dof_wbt_fast_sac_w_object",
     "g1_29dof_wbt_w_object",
+    "g1_29dof_wbt_w_object_multi",
+    "g1_29dof_wbt_w_object_multi_teacher",
 ]
 
 """

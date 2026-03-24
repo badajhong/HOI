@@ -111,6 +111,11 @@ critic_obs_w_object_terms.update(
             scale=1.0,
             noise=0.0,
         ),
+        "obj_type_one_hot": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:obj_type_one_hot",
+            scale=1.0,
+            noise=0.0,
+        ),
     }
 )
 
@@ -138,4 +143,168 @@ g1_29dof_wbt_observation_w_object = ObservationManagerCfg(
     },
 )
 
-__all__ = ["g1_29dof_wbt_observation", "g1_29dof_wbt_observation_w_object"]
+actor_obs_w_object_terms = ObsGroupCfg(
+    concatenate=True,
+    enable_noise=True,
+    history_length=1,
+    terms={
+        "motion_command": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:motion_command",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "motion_ref_ori_b": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:motion_ref_ori_b",
+            scale=1.0,
+            noise=0.05,
+        ),
+        "base_ang_vel": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:base_ang_vel",
+            scale=1.0,
+            noise=0.2,
+        ),
+        "dof_pos": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:dof_pos",
+            scale=1.0,
+            noise=0.01,
+        ),
+        "dof_vel": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:dof_vel",
+            scale=1.0,
+            noise=0.5,
+        ),
+        "actions": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:actions",
+            scale=1.0,
+            noise=0.0,
+        ),
+        # Object-related observation terms
+        "obj_pos_b": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:obj_pos_b",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "obj_ori_b": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:obj_ori_b",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "obj_lin_vel_b": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:obj_lin_vel_b",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "obj_type_one_hot": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:obj_type_one_hot",
+            scale=1.0,
+            noise=0.0,
+        ),
+    },
+)
+
+g1_29dof_wbt_observation_w_object_multi = ObservationManagerCfg(
+    groups={
+        "actor_obs": actor_obs_w_object_terms,
+        "critic_obs": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=critic_obs_w_object_terms,
+        ),
+    },
+)
+
+"""The teacher observation configuration includes all the terms from the multi-object observation, but with reduced noise for the actor observation terms to provide a clearer learning signal during training."""
+
+obs_teacher = {
+    "motion_command": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:motion_command",
+        scale=1.0,
+        noise=0.0,
+    ),
+    "motion_ref_pos_b": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:motion_ref_pos_b",
+        scale=1.0,
+        noise=0.25,
+    ),
+    "motion_ref_ori_b": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:motion_ref_ori_b",
+        scale=1.0,
+        noise=0.05,
+    ),
+    "robot_body_pos_b": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:robot_body_pos_b",
+        scale=1.0,
+        noise=0.0,
+    ),
+    "robot_body_ori_b": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:robot_body_ori_b",
+        scale=1.0,
+        noise=0.0,
+    ),
+    "base_lin_vel": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:base_lin_vel",
+        scale=1.0,
+        noise=0.0,
+    ),
+    "base_ang_vel": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:base_ang_vel",
+        scale=1.0,
+        noise=0.2,
+    ),
+    "dof_pos": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:dof_pos",
+        scale=1.0,
+        noise=0.01,
+    ),
+    "dof_vel": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:dof_vel",
+        scale=1.0,
+        noise=0.5,
+    ),
+    "actions": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:actions",
+        scale=1.0,
+        noise=0.0,
+    ),
+    # Object-related observation terms
+    "obj_pos_b": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:obj_pos_b",
+        scale=1.0,
+        noise=0.0,
+    ),
+    "obj_ori_b": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:obj_ori_b",
+        scale=1.0,
+        noise=0.0,
+    ),
+    "obj_lin_vel_b": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:obj_lin_vel_b",
+        scale=1.0,
+        noise=0.0,
+    ),
+    "obj_type_one_hot": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:obj_type_one_hot",
+        scale=1.0,
+        noise=0.0,
+    ),
+}
+
+g1_29dof_wbt_observation_w_object_multi_teacher = ObservationManagerCfg(
+    groups={
+        "actor_obs": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=3,
+            terms=obs_teacher,
+        ),
+        "critic_obs": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=3,
+            terms=obs_teacher,
+        ),
+    },
+)
+
+__all__ = ["g1_29dof_wbt_observation", "g1_29dof_wbt_observation_w_object", "g1_29dof_wbt_observation_w_object_multi", "g1_29dof_wbt_observation_w_object_multi_teacher"]

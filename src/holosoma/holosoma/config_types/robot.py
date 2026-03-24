@@ -74,6 +74,9 @@ class RobotForceControlConfig:
 @dataclass(frozen=True)
 class ObjectConfig:
     object_urdf_path: str | None = None
+    object_urdf_asset: str | None = None
+    object_urdf_folder: str | None = None
+    object_urdf_name_to_path: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

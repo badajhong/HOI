@@ -87,13 +87,17 @@ class MotionConfig:
       If the motion clip assumes a terrain, the terrain has to be specified in holosoma/config/terrain/terrain_wbt.yaml
     """
 
-    motion_file: str
-    """Motion file (.npz) that contains motion_clips to track. """
 
     body_name_ref: list[str]
     """Body name of the reference frame (in general, torso_link). """
     body_names_to_track: list[str]
     """Key body names to track, used for reward/termination computation."""
+
+    motion_file: str = ""
+    """Motion file (.npz) that contains motion_clips to track. Either motion_file or motion_folder must be provided."""
+
+    motion_folder: str = ""
+    """Motion folder containing multiple .npz files to concatenate. Either motion_file or motion_folder must be provided."""
 
     # motion sampling related
     use_adaptive_timesteps_sampler: bool = False

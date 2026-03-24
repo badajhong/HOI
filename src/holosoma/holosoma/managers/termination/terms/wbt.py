@@ -22,6 +22,9 @@ from holosoma.utils.safe_torch_import import torch
 def motion_ends(env, **_) -> torch.Tensor:
     """Terminate if the motion ends."""
     motion_command = env.command_manager.get_state("motion_command")
+    clip_end_steps = getattr(motion_command, "clip_end_steps", None)
+    if clip_end_steps is not None:
+        return motion_command.time_steps >= (clip_end_steps - 2)
     return motion_command.time_steps >= motion_command.motion.time_step_total - 2
 
 

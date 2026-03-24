@@ -219,3 +219,9 @@ def obj_lin_vel_b(env: WholeBodyTrackingManager) -> torch.Tensor:
         unit_quat,
     )
     return vel_b.view(env.num_envs, -1)
+
+
+def obj_type_one_hot(env: WholeBodyTrackingManager) -> torch.Tensor:
+    motion_command = _get_motion_command_and_assert_type(env)
+    num_classes = max(int(getattr(motion_command, "num_object_types", 1)), 1)
+    return torch.nn.functional.one_hot(motion_command.object_type_ids, num_classes=num_classes).float()

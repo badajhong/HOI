@@ -116,8 +116,8 @@ def create_task_constants(
     elif task_type == "object_interaction":
         obj_name = task_config.object_name or "largebox"
         task_constants.OBJECT_NAME = obj_name
-        task_constants.OBJECT_URDF_FILE = f"models/{obj_name}/{obj_name}.urdf"
-        task_constants.OBJECT_MESH_FILE = f"models/{obj_name}/{obj_name}.obj"
+        task_constants.OBJECT_URDF_FILE = f"models/objects/{obj_name}/{obj_name}.urdf"
+        task_constants.OBJECT_MESH_FILE = f"models/objects/{obj_name}/{obj_name}.obj"
         task_constants.OBJECT_URDF_TEMPLATE = f"models/templates/{obj_name}.urdf.jinja"
     elif task_type == "climbing":
         obj_name = task_config.object_name or "multi_boxes"

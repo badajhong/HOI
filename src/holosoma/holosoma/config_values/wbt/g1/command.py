@@ -42,6 +42,13 @@ motion_config_w_object = replace(
     motion_file="holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj_w_obj.npz",
 )
 
+# Motion config with motion_folder for multi-clip training
+motion_config_w_object_multi = replace(
+    motion_config,
+    motion_file="",
+    motion_folder="",  # Will be overridden at runtime via command line
+)
+
 g1_29dof_wbt_command = CommandManagerCfg(
     params={},
     setup_terms={
@@ -76,7 +83,34 @@ g1_29dof_wbt_command_w_object = replace(
     },
 )
 
+g1_29dof_wbt_command_w_object_multi = replace(
+    g1_29dof_wbt_command,
+    setup_terms={
+        "motion_command": CommandTermCfg(
+            func="holosoma.managers.command.terms.wbt:MotionCommand",
+            params={
+                "motion_config": motion_config_w_object_multi,
+            },
+        )
+    },
+)
+
+g1_29dof_wbt_command_w_object_multi_teacher = replace(
+    g1_29dof_wbt_command,
+    setup_terms={
+        "motion_command": CommandTermCfg(
+            func="holosoma.managers.command.terms.wbt:MotionCommand",
+            params={
+                "motion_config": motion_config_w_object_multi,
+            },
+        )
+    },
+)
+
+
 __all__ = [
     "g1_29dof_wbt_command",
     "g1_29dof_wbt_command_w_object",
+    "g1_29dof_wbt_command_w_object_multi",
+    "g1_29dof_wbt_command_w_object_multi_teacher",
 ]
