@@ -22,7 +22,7 @@ from isaaclab.envs import ViewerCfg, mdp
 from isaaclab.managers import EventManager, SceneEntityCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
-from isaaclab.sensors import ContactSensor, ContactSensorCfg, RayCaster, RayCasterCfg, patterns
+from isaaclab.sensors import Camera, CameraCfg, ContactSensor, ContactSensorCfg, RayCaster, RayCasterCfg, patterns
 from isaaclab.sim import PhysxCfg, SimulationCfg, SimulationContext
 from isaaclab.terrains import TerrainGeneratorCfg, TerrainImporterCfg
 from isaaclab.terrains.utils import create_prim_from_mesh
@@ -66,6 +66,11 @@ class IsaacSim(BaseSimulator):
 
         # Add device attribute for base simulator compatibility
         self.device = device
+
+        self.robot_depth_camera: Camera | None = None
+        self.robot_depth_camera_link_name = "realsense_d435_depth_optical_frame"
+        self.robot_depth_camera_prim_name = "realsense_d435_depth"
+        self.robot_depth_camera_resolution = (80, 60)
 
         # Scale GPU rigid patch buffer with env count to avoid PhysX patch-buffer overflow
         # in large batched scenes (e.g., 24k+ envs with rich contacts).
@@ -390,6 +395,8 @@ class IsaacSim(BaseSimulator):
             self._height_scanner = RayCaster(height_scanner_config)
             self.scene.sensors["height_scanner"] = self._height_scanner
 
+        self._maybe_create_robot_depth_camera()
+
         # clone, filter, and replicate
         self.scene.clone_environments(copy_from_source=False)
 
@@ -454,6 +461,60 @@ class IsaacSim(BaseSimulator):
             color=(0.98, 0.95, 0.88),
         )
         light_config1.func("/World/DomeLight", light_config1, translation=(1, 0, 10))
+
+    def _maybe_create_robot_depth_camera(self) -> None:
+        from isaacsim.core.utils.prims import is_prim_path_valid
+
+        source_optical_frame_prim = f"/World/envs/env_0/Robot/{self.robot_depth_camera_link_name}"
+        if not is_prim_path_valid(source_optical_frame_prim):
+            return
+
+        camera_cfg = CameraCfg(
+            prim_path=f"/World/envs/env_.*/Robot/{self.robot_depth_camera_link_name}/{self.robot_depth_camera_prim_name}",
+            update_period=0.0,
+            height=self.robot_depth_camera_resolution[1],
+            width=self.robot_depth_camera_resolution[0],
+            data_types=["distance_to_image_plane"],
+            update_latest_camera_pose=True,
+            spawn=sim_utils.PinholeCameraCfg(
+                focal_length=24.0,
+                focus_distance=400.0,
+                horizontal_aperture=20.955,
+                clipping_range=(0.05, 20.0),
+            ),
+            offset=CameraCfg.OffsetCfg(
+                pos=(0.0, 0.0, 0.0),
+                rot=(1.0, 0.0, 0.0, 0.0),
+                convention="ros",
+            ),
+        )
+        self.robot_depth_camera = Camera(camera_cfg)
+        self.scene.sensors["robot_depth_camera"] = self.robot_depth_camera
+        logger.info(
+            "IsaacSim: registered robot-mounted depth camera sensor at "
+            f"{camera_cfg.prim_path} from URDF link '{self.robot_depth_camera_link_name}' with "
+            f"resolution={self.robot_depth_camera_resolution}"
+        )
+
+    def get_robot_depth_frame(self, env_id: int) -> torch.Tensor:
+        if self.robot_depth_camera is None:
+            raise RuntimeError("Robot depth camera is not available in IsaacSim.")
+
+        depth_output = self.robot_depth_camera.data.output.get("distance_to_image_plane")
+        if depth_output is None:
+            raise RuntimeError("Robot depth camera has no 'distance_to_image_plane' output.")
+
+        depth_frame = depth_output[env_id]
+        if depth_frame.ndim == 3 and depth_frame.shape[-1] == 1:
+            depth_frame = depth_frame[..., 0]
+        return depth_frame
+
+    def get_robot_depth_camera_pose(self, env_id: int) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.robot_depth_camera is None:
+            raise RuntimeError("Robot depth camera is not available in IsaacSim.")
+
+        camera_data = self.robot_depth_camera.data
+        return camera_data.pos_w[env_id], camera_data.quat_w_ros[env_id]
 
     def _get_base_body_name(self, preference_order: list[str]) -> str:
         """Get the base body name with fallback logic.
