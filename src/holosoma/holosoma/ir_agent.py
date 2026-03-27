@@ -29,7 +29,7 @@ from holosoma.utils.experiment_paths import get_experiment_dir, get_timestamp
 from holosoma.utils.helpers import get_class
 from holosoma.utils.module_utils import get_holosoma_root
 from holosoma.utils.object_urdf import resolve_multi_object_urdf_config
-from holosoma.utils.pelvis_surface_features import PelvisSurfaceFeatureComputer
+from holosoma.utils.rotations import quaternion_to_matrix
 from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.sim_utils import close_simulation_app, setup_simulation_environment
 from holosoma.utils.tyro_utils import TYRO_CONIFG
@@ -41,6 +41,23 @@ REALSENSE_CAMERA_BODY_LINK = "realsense_d435_link"
 DEPTH_CAMERA_FRAME_LINK = "realsense_d435_depth_optical_frame"
 DEPTH_CAMERA_PRIM_NAME = "realsense_d435_depth"
 DEPTH_RESOLUTION = (80, 60)
+IR_U_T_MODE = "object_centric_hybrid_v1"
+IR_U_T_COMPONENT_NAMES = (
+    "r_obj_x",
+    "r_obj_y",
+    "r_obj_z",
+    "v_close_obj",
+    "v_orbit_obj_x",
+    "v_orbit_obj_y",
+    "v_orbit_obj_z",
+    "obj_ori_6d_0",
+    "obj_ori_6d_1",
+    "obj_ori_6d_2",
+    "obj_ori_6d_3",
+    "obj_ori_6d_4",
+    "obj_ori_6d_5",
+)
+IR_FEATURE_EPS = 1e-6
 
 
 @dataclass(frozen=True)
@@ -55,13 +72,13 @@ class IRCheckpointConfig:
     """Total number of episodes to collect before ending the IR run. None means keep running until manually stopped."""
 
     pelvis_surface_feature_log_env_ids: tuple[int, ...] = (0,)
-    """Environment ids to print for live pelvis-based surface features during playback."""
+    """Environment ids to print for live IR u_t features during playback."""
 
     pelvis_body_name: str = "pelvis"
     """Rigid body name from the simulated robot to use as x_t."""
 
     pelvis_surface_feature_mesh_mode: str = "box"
-    """How to treat mesh collision geometry for live pelvis surface features: 'box' or 'full'."""
+    """Deprecated. Surface-mesh mode is ignored; IR u_t now uses object-centric kinematic features."""
 
     show_camera_marker: bool = True
     """Deprecated. Camera marker visualization was removed from ir_agent.py and this flag has no effect."""
@@ -181,6 +198,51 @@ def _to_numpy_float32(value) -> np.ndarray:
     return np.asarray(value, dtype=np.float32)
 
 
+def _rotation_matrix_to_6d(rotation_matrix: torch.Tensor) -> torch.Tensor:
+    return rotation_matrix[..., :2].reshape(rotation_matrix.shape[0], -1)
+
+
+def _safe_normalize_vectors(vectors: torch.Tensor, eps: float = IR_FEATURE_EPS) -> tuple[torch.Tensor, torch.Tensor]:
+    norms = torch.linalg.norm(vectors, dim=-1, keepdim=True)
+    normalized = torch.where(norms > eps, vectors / norms.clamp_min(eps), torch.zeros_like(vectors))
+    return normalized, norms
+
+
+def _compute_object_centric_ir_features(
+    pelvis_pos_w: torch.Tensor,
+    pelvis_lin_vel_w: torch.Tensor,
+    object_pos_w: torch.Tensor,
+    object_quat_w: torch.Tensor,
+    object_lin_vel_w: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    object_rotation = quaternion_to_matrix(object_quat_w, w_last=True)
+    object_rotation_inv = object_rotation.transpose(1, 2)
+
+    rel_pos_w = pelvis_pos_w - object_pos_w
+    rel_vel_w = pelvis_lin_vel_w - object_lin_vel_w
+
+    r_obj = torch.bmm(object_rotation_inv, rel_pos_w.unsqueeze(-1)).squeeze(-1)
+    v_rel_obj = torch.bmm(object_rotation_inv, rel_vel_w.unsqueeze(-1)).squeeze(-1)
+
+    n_obj, d_center = _safe_normalize_vectors(r_obj)
+    radial_velocity_obj = torch.sum(v_rel_obj * n_obj, dim=-1, keepdim=True)
+    v_close = -radial_velocity_obj
+    v_orbit_obj = v_rel_obj - radial_velocity_obj * n_obj
+    obj_ori_6d = _rotation_matrix_to_6d(object_rotation)
+    u_t = torch.cat([r_obj, v_close, v_orbit_obj, obj_ori_6d], dim=-1)
+
+    return {
+        "r_obj": r_obj,
+        "d_center": d_center,
+        "n_obj": n_obj,
+        "v_rel_obj": v_rel_obj,
+        "v_close": v_close,
+        "v_orbit_obj": v_orbit_obj,
+        "obj_ori_6d": obj_ori_6d,
+        "u_t": u_t,
+    }
+
+
 def _compose_local_transform(
     xyz_a: tuple[float, float, float],
     rpy_a: tuple[float, float, float],
@@ -291,14 +353,15 @@ class IRTelemetryRecorder:
         self.window_size = 5
         self.log_env_ids = set(ir_cfg.pelvis_surface_feature_log_env_ids)
         self.pelvis_body_name = ir_cfg.pelvis_body_name
-        self.mesh_mode = ir_cfg.pelvis_surface_feature_mesh_mode
         self.max_eval_steps = ir_cfg.max_eval_steps
         self.num_eval_episodes = ir_cfg.num_eval_episodes
         self.depth_resolution = DEPTH_RESOLUTION
         self.depth_camera_mount = depth_camera_mount
         self.show_camera_marker = ir_cfg.show_camera_marker
+        self.u_t_mode = IR_U_T_MODE
+        self.u_t_component_names = list(IR_U_T_COMPONENT_NAMES)
+        self.deprecated_mesh_mode = ir_cfg.pelvis_surface_feature_mesh_mode
 
-        self._feature_computer: PelvisSurfaceFeatureComputer | None = None
         self._pelvis_body_index: int | None = None
         self._run_complete = False
 
@@ -434,7 +497,10 @@ class IRTelemetryRecorder:
             "max_eval_steps": self.max_eval_steps,
             "num_eval_episodes": self.num_eval_episodes,
             "pelvis_body_name": self.pelvis_body_name,
-            "mesh_mode": self.mesh_mode,
+            "u_t_mode": self.u_t_mode,
+            "u_t_components": self.u_t_component_names,
+            "u_t_dim": len(self.u_t_component_names),
+            "deprecated_mesh_mode": self.deprecated_mesh_mode,
             "depth_resolution": list(self.depth_resolution),
             "depth_camera_prim_name": DEPTH_CAMERA_PRIM_NAME,
             "depth_camera_mount": self.depth_camera_mount.to_json_dict(),
@@ -484,10 +550,6 @@ class IRTelemetryRecorder:
             raise RuntimeError(
                 f"Simulator depth camera prims were not found on the live stage: {missing_prim_paths}"
             )
-        self._feature_computer = PelvisSurfaceFeatureComputer.from_object_config(
-            self.env.robot_config.object,
-            mesh_mode=self.mesh_mode,
-        )
         self.telemetry_dir.mkdir(parents=True, exist_ok=True)
         self.depth_image_dir.mkdir(parents=True, exist_ok=True)
 
@@ -503,7 +565,8 @@ class IRTelemetryRecorder:
 
         logger.info(
             f"IR telemetry enabled for body '{self.pelvis_body_name}' with window_size={self.window_size}, "
-            f"mesh_mode={self.mesh_mode}, max_eval_steps={self.max_eval_steps}, "
+            f"u_t_mode={self.u_t_mode}, u_t_dim={len(self.u_t_component_names)}, "
+            f"deprecated_mesh_mode={self.deprecated_mesh_mode}, max_eval_steps={self.max_eval_steps}, "
             f"num_eval_episodes={self.num_eval_episodes}, depth_resolution={self.depth_resolution}."
         )
         logger.info(
@@ -517,11 +580,16 @@ class IRTelemetryRecorder:
         logger.info(
             f"IR depth camera is managed by IsaacSim scene sensor at URDF optical-frame prim: {self._camera_parent_prim_path(0)}"
         )
+        if self.deprecated_mesh_mode:
+            logger.info(
+                "pelvis_surface_feature_mesh_mode is deprecated and ignored; "
+                "IR telemetry now saves object-centric hybrid u_t features."
+            )
         if self.show_camera_marker:
             logger.info("show_camera_marker is deprecated and ignored; marker visualization was removed from ir_agent.py.")
 
     def on_pre_eval_env_step(self, actor_state: dict) -> dict:
-        if self._feature_computer is None or self._pelvis_body_index is None or self._run_complete:
+        if self._pelvis_body_index is None or self._run_complete:
             return actor_state
 
         motion_command = self.env.command_manager.get_state("motion_command")
@@ -531,15 +599,15 @@ class IRTelemetryRecorder:
         pelvis_pos_w = self.env.simulator._rigid_body_pos[:, self._pelvis_body_index, :]
         pelvis_lin_vel_w = self.env.simulator._rigid_body_vel[:, self._pelvis_body_index, :]
         object_keys = self._object_keys_for_envs(motion_command, self.env.num_envs)
-        features = self._feature_computer.compute_batch(
+        features = _compute_object_centric_ir_features(
             pelvis_pos_w=pelvis_pos_w,
             pelvis_lin_vel_w=pelvis_lin_vel_w,
             object_pos_w=motion_command.simulator_object_pos_w,
             object_quat_w=motion_command.simulator_object_quat_w,
-            object_keys=object_keys,
+            object_lin_vel_w=motion_command.simulator_object_lin_vel_w,
         )
 
-        actor_state["pelvis_surface_features"] = features
+        actor_state["ir_u_features"] = features
         actor_state["ir_object_keys"] = object_keys
         global_step = int(actor_state.get("step", -1))
 
@@ -560,10 +628,13 @@ class IRTelemetryRecorder:
                 "episode_step": self._episode_steps[env_id],
                 "env_id": env_id,
                 "object_key": object_keys[env_id],
-                "phi": float(features["phi"][env_id, 0].item()),
-                "grad_phi": [float(v) for v in features["grad_phi"][env_id].tolist()],
-                "v_norm": [float(v) for v in features["v_norm"][env_id].tolist()],
-                "v_tan": [float(v) for v in features["v_tan"][env_id].tolist()],
+                "r_obj": [float(v) for v in features["r_obj"][env_id].tolist()],
+                "d_center": float(features["d_center"][env_id, 0].item()),
+                "n_obj": [float(v) for v in features["n_obj"][env_id].tolist()],
+                "v_rel_obj": [float(v) for v in features["v_rel_obj"][env_id].tolist()],
+                "v_close": float(features["v_close"][env_id, 0].item()),
+                "v_orbit_obj": [float(v) for v in features["v_orbit_obj"][env_id].tolist()],
+                "obj_ori_6d": [float(v) for v in features["obj_ori_6d"][env_id].tolist()],
                 "u_t": current_u_t,
                 "u_window": current_u_window,
                 "depth_window": current_depth_window,
@@ -574,7 +645,11 @@ class IRTelemetryRecorder:
             if env_id in self.log_env_ids:
                 logger.info(
                     f"[ir_u_window] step={global_step} env={env_id} episode={self._episode_indices[env_id]} "
-                    f"episode_step={self._episode_steps[env_id]} depth_shape={self.depth_resolution}"
+                    f"episode_step={self._episode_steps[env_id]} object={object_keys[env_id]} "
+                    f"r_obj={[round(float(v), 4) for v in features['r_obj'][env_id].tolist()]} "
+                    f"v_close={float(features['v_close'][env_id, 0].item()):.4f} "
+                    f"v_orbit_obj={[round(float(v), 4) for v in features['v_orbit_obj'][env_id].tolist()]} "
+                    f"depth_shape={self.depth_resolution}"
                 )
 
         return actor_state
