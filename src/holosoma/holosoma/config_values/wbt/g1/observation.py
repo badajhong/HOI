@@ -307,4 +307,35 @@ g1_29dof_wbt_observation_w_object_multi_teacher = ObservationManagerCfg(
     },
 )
 
-__all__ = ["g1_29dof_wbt_observation", "g1_29dof_wbt_observation_w_object", "g1_29dof_wbt_observation_w_object_multi", "g1_29dof_wbt_observation_w_object_multi_teacher"]
+g1_29dof_wbt_observation_w_object_multi_student = ObservationManagerCfg(
+    groups={
+        "actor_obs": actor_obs_w_object_terms,
+        "teacher_obs": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=3,
+            terms=obs_teacher,
+        ),
+        "ir_cvae_latent": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms={
+                "ir_cvae_latent": ObsTermCfg(
+                    func="holosoma.managers.observation.terms.wbt:IRCVAELatent",
+                    params={},
+                    scale=1.0,
+                    noise=0.0,
+                )
+            },
+        ),
+    },
+)
+
+__all__ = [
+    "g1_29dof_wbt_observation",
+    "g1_29dof_wbt_observation_w_object",
+    "g1_29dof_wbt_observation_w_object_multi",
+    "g1_29dof_wbt_observation_w_object_multi_teacher",
+    "g1_29dof_wbt_observation_w_object_multi_student",
+]

@@ -19,7 +19,7 @@ from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.wandb import get_wandb
 
 
-DEFAULT_DATA_DIR = "/home/rllab/haechan/holosoma/logs/WholeBodyTracking/20260327_121916-g1_29dof_wbt_manager-ir/telemetry/"
+DEFAULT_DATA_DIR = "/home/rllab/haechan/holosoma/logs/WholeBodyTracking/20260327_150430-g1_29dof_wbt_manager-ir/telemetry"
 DEFAULT_OUTPUT_ROOT = "/home/rllab/haechan/holosoma/logs/CVAE/"
 DEFAULT_CONDITION_TEXT = "Push the suitcase, and set it back down."
 DEFAULT_CLIP_MODEL_ID = "openai/clip-vit-base-patch32"
@@ -34,8 +34,8 @@ class TrainConfig:
     latent_dim: int = 32
     hidden_dims: tuple[int, int] = (256, 128)
     condition_dim: int = 64
-    batch_size: int = 256
-    epochs: int = 1000
+    batch_size: int = 512
+    epochs: int = 5000
     learning_rate: float = 1e-3
     kl_weight: float = 1e-4
     weight_decay: float = 1e-6
@@ -1077,9 +1077,9 @@ def train_encoder(config: TrainConfig) -> Path:
             prefix="test",
         )
 
+        test_differences = compute_metric_differences(last_test_metrics, best_test_metrics)
         best_test_metrics_named = rename_metric_prefix(best_test_metrics, "test_", "best_test_")
         last_test_metrics_named = rename_metric_prefix(last_test_metrics, "test_", "last_test_")
-        test_differences = compute_metric_differences(last_test_metrics_named, best_test_metrics_named)
 
         summary = {
             "seed": config.seed,
@@ -1113,7 +1113,7 @@ def train_encoder(config: TrainConfig) -> Path:
         logger.info(
             f"Test comparison: best_mae={best_test_metrics_named['best_test_value_mae']:.6f}, "
             f"last_mae={last_test_metrics_named['last_test_value_mae']:.6f}, "
-            f"delta(last-best)={test_differences['last_test_value_mae_last_minus_best']:.6f}"
+            f"delta(last-best)={test_differences['test_value_mae_last_minus_best']:.6f}"
         )
 
         if wandb is not None and wandb.run is not None:
@@ -1131,8 +1131,8 @@ def train_encoder(config: TrainConfig) -> Path:
                 "last_test/total_loss": last_test_metrics_named["last_test_loss_total"],
                 "last_test/value_mae": last_test_metrics_named["last_test_value_mae"],
                 "last_test/value_rmse": last_test_metrics_named["last_test_value_rmse"],
-                "compare/test_total_loss_last_minus_best": test_differences.get("last_test_loss_total_last_minus_best", float("nan")),
-                "compare/test_value_mae_last_minus_best": test_differences.get("last_test_value_mae_last_minus_best", float("nan")),
+                "compare/test_total_loss_last_minus_best": test_differences.get("test_loss_total_last_minus_best", float("nan")),
+                "compare/test_value_mae_last_minus_best": test_differences.get("test_value_mae_last_minus_best", float("nan")),
                 **best_test_metrics_named,
                 **last_test_metrics_named,
                 **test_differences,

@@ -103,6 +103,10 @@ class ExperimentConfig:
     """Top-level experiment configuration used by the Tyro CLI."""
 
     env_class: str = "holosoma.envs.locomotion.locomotion_manager.LeggedRobotLocomotionManager"
+    teacher: str | None = None
+    """Optional teacher checkpoint for student distillation runs."""
+    ir_cvae: str | None = None
+    """Optional frozen IR-CVAE checkpoint used to build latent observations."""
 
     training: TrainingConfig = TrainingConfig()
     algo: Annotated[

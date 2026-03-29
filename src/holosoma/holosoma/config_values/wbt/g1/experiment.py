@@ -228,6 +228,35 @@ g1_29dof_wbt_w_object_multi_teacher = replace(
     ),
 )
 
+g1_29dof_wbt_w_object_multi_student = replace(
+    g1_29dof_wbt_w_object_multi_teacher,
+    training=replace(
+        g1_29dof_wbt_w_object_multi_teacher.training,
+        name="g1_29dof_wbt_manager-ir-student",
+        num_envs=16384,
+    ),
+    algo=replace(
+        algo.dagger_student,
+        config=replace(
+            algo.dagger_student.config,
+            num_learning_iterations=50000,
+            save_interval=1000,
+            fifo_buffer=6_400_000,
+            module_dict=replace(
+                algo.dagger_student.config.module_dict,
+                actor=replace(
+                    algo.dagger_student.config.module_dict.actor,
+                    layer_config=replace(
+                        algo.dagger_student.config.module_dict.actor.layer_config,
+                        hidden_dims=[512, 256, 128],
+                    ),
+                ),
+            ),
+        ),
+    ),
+    observation=observation.g1_29dof_wbt_observation_w_object_multi_student,
+)
+
 __all__ = [
     "g1_29dof_wbt",
     "g1_29dof_wbt_fast_sac",
@@ -235,6 +264,7 @@ __all__ = [
     "g1_29dof_wbt_w_object",
     "g1_29dof_wbt_w_object_multi",
     "g1_29dof_wbt_w_object_multi_teacher",
+    "g1_29dof_wbt_w_object_multi_student",
 ]
 
 """

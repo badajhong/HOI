@@ -105,6 +105,14 @@ class PPOModuleDictConfig:
 
 
 @dataclass(frozen=True)
+class ActorOnlyModuleDictConfig:
+    """Configuration for actor-only policies."""
+
+    actor: ModuleConfig
+    """Actor module configuration."""
+
+
+@dataclass(frozen=True)
 class PPOConfig:
     """Configuration for PPO algorithm."""
 
@@ -307,6 +315,53 @@ class FastSACConfig:
 
 
 @dataclass(frozen=True)
+class DaggerStudentConfig:
+    """Configuration for DAgger-style student distillation."""
+
+    module_dict: ActorOnlyModuleDictConfig
+    """Student actor module configuration."""
+
+    actor_learning_rate: float = 3e-4
+    """Learning rate for the student actor."""
+
+    actor_optimizer: OptimizerConfig = field(default_factory=lambda: OptimizerConfig(_target_="torch.optim.AdamW"))
+    """Actor optimizer configuration."""
+
+    batch_size: int = 16384
+    """Number of samples per supervised update."""
+
+    num_updates_per_iteration: int = 32
+    """Number of supervised gradient updates after each rollout collection phase."""
+
+    num_steps_per_env: int = 24
+    """Number of rollout steps to collect per environment before training."""
+
+    save_interval: int = 1000
+    """Interval for saving model checkpoints."""
+
+    load_optimizer: bool = True
+    """Whether to restore optimizer state when resuming from a checkpoint."""
+
+    num_learning_iterations: int = 50000
+    """Total number of DAgger iterations."""
+
+    fifo_buffer: int = 6_400_000
+    """Maximum number of samples kept in the FIFO replay buffer."""
+
+    max_grad_norm: float = 1.0
+    """Maximum gradient norm for clipping."""
+
+    init_noise_std: float = 1.0
+    """Unused by inference, but kept for actor-module compatibility."""
+
+    teacher_obs_group: str = "teacher_obs"
+    """Observation group used to query the frozen teacher policy."""
+
+    max_actor_learning_rate: float | None = None
+    min_actor_learning_rate: float | None = None
+
+
+@dataclass(frozen=True)
 class PPOAlgoConfig:
     """Configuration for algorithm wrapper."""
 
@@ -334,6 +389,20 @@ class FastSACAlgoConfig:
     """Algorithm-specific configuration."""
 
 
-AlgoInitConfig = Union[PPOConfig, FastSACConfig]
+@dataclass(frozen=True)
+class DaggerStudentAlgoConfig:
+    """Configuration for algorithm wrapper."""
 
-AlgoConfig = Union[PPOAlgoConfig, FastSACAlgoConfig]
+    _target_: str
+    """Target algorithm class."""
+
+    _recursive_: bool
+    """Whether to recursively instantiate."""
+
+    config: DaggerStudentConfig
+    """Algorithm-specific configuration."""
+
+
+AlgoInitConfig = Union[PPOConfig, FastSACConfig, DaggerStudentConfig]
+
+AlgoConfig = Union[PPOAlgoConfig, FastSACAlgoConfig, DaggerStudentAlgoConfig]

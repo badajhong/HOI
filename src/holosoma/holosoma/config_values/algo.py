@@ -1,4 +1,7 @@
 from holosoma.config_types.algo import (
+    ActorOnlyModuleDictConfig,
+    DaggerStudentAlgoConfig,
+    DaggerStudentConfig,
     FastSACAlgoConfig,
     FastSACConfig,
     LayerConfig,
@@ -100,7 +103,35 @@ fast_sac = FastSACAlgoConfig(
     ),
 )
 
+dagger_student = DaggerStudentAlgoConfig(
+    _target_="holosoma.agents.dagger_student.dagger_student.DaggerStudent",
+    _recursive_=False,
+    config=DaggerStudentConfig(
+        actor_learning_rate=3e-4,
+        actor_optimizer=OptimizerConfig(_target_="torch.optim.AdamW", weight_decay=0.001),
+        batch_size=16384,
+        num_updates_per_iteration=32,
+        num_steps_per_env=24,
+        save_interval=1000,
+        load_optimizer=True,
+        num_learning_iterations=50000,
+        fifo_buffer=6_400_000,
+        max_grad_norm=1.0,
+        init_noise_std=1.0,
+        teacher_obs_group="teacher_obs",
+        module_dict=ActorOnlyModuleDictConfig(
+            actor=ModuleConfig(
+                type="MLP",
+                input_dim=["actor_obs", "ir_cvae_latent"],
+                output_dim=["robot_action_dim"],
+                layer_config=LayerConfig(hidden_dims=[512, 256, 128], activation="ELU"),
+            )
+        ),
+    ),
+)
+
 DEFAULTS = {
     "ppo": ppo,
     "fast_sac": fast_sac,
+    "dagger_student": dagger_student,
 }

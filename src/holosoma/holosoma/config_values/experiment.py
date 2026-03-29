@@ -10,6 +10,7 @@ from holosoma.config_values.wbt.g1.experiment import (
     g1_29dof_wbt_fast_sac_w_object,
     g1_29dof_wbt_w_object,
     g1_29dof_wbt_w_object_multi,
+    g1_29dof_wbt_w_object_multi_student,
     g1_29dof_wbt_w_object_multi_teacher,
 )
 
@@ -24,6 +25,7 @@ DEFAULTS = {
     "g1_29dof_wbt_fast_sac_w_object": g1_29dof_wbt_fast_sac_w_object,
     "g1_29dof_wbt_w_object_multi": g1_29dof_wbt_w_object_multi,
     "g1_29dof_wbt_w_object_multi_teacher": g1_29dof_wbt_w_object_multi_teacher,
+    "g1_29dof_wbt_w_object_multi_student": g1_29dof_wbt_w_object_multi_student,
 }
 
 AnnotatedExperimentConfig = Annotated[
