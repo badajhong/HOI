@@ -27,10 +27,10 @@ from holosoma.utils.inference_helpers import (
 )
 
 
-class FIFODaggerBuffer:
+class StackDaggerBuffer:
     def __init__(self, capacity: int, obs_dim: int, action_dim: int):
         if capacity <= 0:
-            raise ValueError(f"FIFO buffer capacity must be positive, got {capacity}")
+            raise ValueError(f"Stack buffer capacity must be positive, got {capacity}")
         self.capacity = int(capacity)
         self.obs = torch.empty((self.capacity, obs_dim), dtype=torch.float32, device="cpu")
         self.actions = torch.empty((self.capacity, action_dim), dtype=torch.float32, device="cpu")
@@ -185,9 +185,9 @@ class DaggerStudent(BaseAlgo):
 
     def _setup_buffer(self) -> None:
         actor_obs_dim = self._get_obs_dim(self.actor_obs_keys)
-        self.buffer = FIFODaggerBuffer(self.config.fifo_buffer, actor_obs_dim, self.num_act)
+        self.buffer = StackDaggerBuffer(self.config.stack_buffer, actor_obs_dim, self.num_act)
         logger.info(
-            f"Allocated FIFO DAgger buffer with capacity={self.config.fifo_buffer}, "
+            f"Allocated DAgger stack buffer with capacity={self.config.stack_buffer}, "
             f"actor_obs_dim={actor_obs_dim}, action_dim={self.num_act}"
         )
 

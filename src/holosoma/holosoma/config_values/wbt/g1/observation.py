@@ -307,9 +307,47 @@ g1_29dof_wbt_observation_w_object_multi_teacher = ObservationManagerCfg(
     },
 )
 
+student_obs_w_object_terms = ObsGroupCfg(
+    concatenate=True,
+    enable_noise=False,
+    history_length=1,
+    terms={
+        "motion_command_joint_pos": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:motion_command_joint_pos",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "base_ang_vel": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:base_ang_vel",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "dof_pos": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:dof_pos",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "dof_vel": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:dof_vel",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "actions": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:student_actions",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "obj_type_one_hot": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:obj_type_one_hot",
+            scale=1.0,
+            noise=0.0,
+        ),
+    },
+)
+
 g1_29dof_wbt_observation_w_object_multi_student = ObservationManagerCfg(
     groups={
-        "actor_obs": actor_obs_w_object_terms,
+        "actor_obs": student_obs_w_object_terms,
         "teacher_obs": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
@@ -332,10 +370,41 @@ g1_29dof_wbt_observation_w_object_multi_student = ObservationManagerCfg(
     },
 )
 
+g1_29dof_wbt_observation_w_object_multi_res = ObservationManagerCfg(
+    groups={
+        "student_actor_obs": student_obs_w_object_terms,
+        "critic_obs": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=critic_obs_w_object_terms,
+        ),
+        "student_base_action": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms={
+                "student_base_action": ObsTermCfg(
+                    func="holosoma.managers.observation.terms.wbt:FrozenStudentBaseAction",
+                    params={
+                        "student_obs_group": "student_actor_obs",
+                        "debug_save_depth_images": False,
+                        "debug_depth_save_interval": 200,
+                        "debug_depth_env_ids": (0,),
+                    },
+                    scale=1.0,
+                    noise=0.0,
+                )
+            },
+        ),
+    },
+)
+
 __all__ = [
     "g1_29dof_wbt_observation",
     "g1_29dof_wbt_observation_w_object",
     "g1_29dof_wbt_observation_w_object_multi",
     "g1_29dof_wbt_observation_w_object_multi_teacher",
     "g1_29dof_wbt_observation_w_object_multi_student",
+    "g1_29dof_wbt_observation_w_object_multi_res",
 ]

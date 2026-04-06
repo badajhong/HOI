@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from loguru import logger
 import torch
 
-from holosoma.cvae_ir_train import CLIPTextFeatureExtractor, load_encoder
+from holosoma.agents.modules.module_utils import setup_ppo_actor_module
+from holosoma.cvae_di_train import load_encoder as load_depth_encoder
+from holosoma.cvae_ir_train import CLIPTextFeatureExtractor, load_encoder as load_ir_encoder
 from holosoma.managers.command.terms.wbt import MotionCommand
 from holosoma.managers.observation.base import ObservationTermBase
+from holosoma.utils.eval_utils import CheckpointConfig, load_saved_experiment_config
 from holosoma.utils.rotations import quat_rotate_inverse, quaternion_to_matrix, subtract_frame_transforms
 from holosoma.utils.torch_utils import get_axis_params, to_torch
 
@@ -124,6 +128,11 @@ def actions(env: WholeBodyTrackingManager) -> torch.Tensor:
     return env.action_manager.action
 
 
+def student_actions(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Last frozen-student base actions used as the student's action history."""
+    return env.student_prev_actions
+
+
 #########################################################################################################
 ## terms specific to Whole Body Tracking
 #########################################################################################################
@@ -140,6 +149,9 @@ def motion_command(env: WholeBodyTrackingManager) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     return motion_command.command
 
+def motion_command_joint_pos(env: WholeBodyTrackingManager) -> torch.Tensor:
+    motion_command_joint_pos = _get_motion_command_and_assert_type(env)
+    return motion_command_joint_pos.joint_pos
 
 def motion_ref_pos_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
@@ -287,7 +299,7 @@ class IRCVAELatent(ObservationTermBase):
         self.device = env.device
         self.pelvis_body_name = pelvis_body_name
         self.pelvis_body_index = env.body_names.index(pelvis_body_name)
-        self.encoder, payload = load_encoder(str(checkpoint_path), device=self.device)
+        self.encoder, payload = load_ir_encoder(str(checkpoint_path), device=self.device)
 
         input_shape = tuple(int(v) for v in payload["input_shape"])
         if len(input_shape) != 2:
@@ -329,6 +341,7 @@ class IRCVAELatent(ObservationTermBase):
 
     @torch.no_grad()
     def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:
+        modify_history = bool(kwargs.pop("modify_history", True))
         motion_command = _get_motion_command_and_assert_type(env)
         if not getattr(motion_command.motion, "has_object", False):
             return torch.zeros(env.num_envs, self.latent_dim, device=self.device)
@@ -347,22 +360,369 @@ class IRCVAELatent(ObservationTermBase):
                 f"IR feature dim mismatch: checkpoint expects {self.u_t_dim}, got {current_u_t.shape[1]}"
             )
 
-        new_mask = ~self.is_initialized
-        if torch.any(new_mask):
-            repeated = current_u_t[new_mask].unsqueeze(1).repeat(1, self.window_size, 1)
-            self.u_window_history[new_mask] = repeated
+        if modify_history:
+            new_mask = ~self.is_initialized
+            if torch.any(new_mask):
+                repeated = current_u_t[new_mask].unsqueeze(1).repeat(1, self.window_size, 1)
+                self.u_window_history[new_mask] = repeated
 
-        existing_mask = self.is_initialized
-        if torch.any(existing_mask):
-            existing_history = self.u_window_history[existing_mask].clone()
-            existing_history[:, :-1] = existing_history[:, 1:].clone()
-            existing_history[:, -1] = current_u_t[existing_mask]
-            self.u_window_history[existing_mask] = existing_history
+            existing_mask = self.is_initialized
+            if torch.any(existing_mask):
+                existing_history = self.u_window_history[existing_mask].clone()
+                existing_history[:, :-1] = existing_history[:, 1:].clone()
+                existing_history[:, -1] = current_u_t[existing_mask]
+                self.u_window_history[existing_mask] = existing_history
 
-        self.is_initialized[:] = True
+            self.is_initialized[:] = True
+            effective_window = self.u_window_history
+        else:
+            effective_window = torch.cat([self.u_window_history[:, 1:], current_u_t.unsqueeze(1)], dim=1)
+            new_mask = ~self.is_initialized
+            if torch.any(new_mask):
+                effective_window[new_mask] = current_u_t[new_mask].unsqueeze(1).repeat(1, self.window_size, 1)
 
-        flat_window = self.u_window_history.reshape(env.num_envs, -1)
+        flat_window = effective_window.reshape(env.num_envs, -1)
         normalized_window = (flat_window - self.feature_mean.unsqueeze(0)) / self.feature_std.unsqueeze(0)
         text_features = self.text_features.expand(env.num_envs, -1)
         mu, _ = self.encoder(normalized_window, text_features)
         return mu
+
+
+class FrozenStudentBaseAction(ObservationTermBase):
+    """Frozen depth-CVAE + frozen student actor that produces a base action."""
+
+    def __init__(self, cfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+
+        student_checkpoint = cfg.params.get("student_checkpoint") or getattr(env, "student", None)
+        if not student_checkpoint:
+            raise ValueError(
+                "Frozen student base-action observation requires a student checkpoint. "
+                "Pass `--student=/path/to/model.pt` or set observation term param `student_checkpoint`."
+            )
+        di_checkpoint = cfg.params.get("checkpoint_path") or getattr(env, "di_cvae", None)
+        if not di_checkpoint:
+            raise ValueError(
+                "Frozen student base-action observation requires a depth-image CVAE checkpoint. "
+                "Pass `--di_cvae=/path/to/best.pt` or set observation term param `checkpoint_path`."
+            )
+
+        self.device = env.device
+        self.student_obs_group = str(cfg.params.get("student_obs_group", "student_actor_obs"))
+        self.student_checkpoint = str(student_checkpoint)
+        self.di_checkpoint = str(di_checkpoint)
+        self.debug_save_depth_images = bool(cfg.params.get("debug_save_depth_images", False))
+        self.debug_depth_save_interval = max(int(cfg.params.get("debug_depth_save_interval", 200)), 1)
+        debug_depth_env_ids = cfg.params.get("debug_depth_env_ids", (0,))
+        if debug_depth_env_ids is None:
+            self.debug_depth_env_ids: tuple[int, ...] = (0,)
+        elif isinstance(debug_depth_env_ids, int):
+            self.debug_depth_env_ids = (int(debug_depth_env_ids),)
+        else:
+            self.debug_depth_env_ids = tuple(int(env_id) for env_id in debug_depth_env_ids)
+        self.debug_depth_env_id_set = set(self.debug_depth_env_ids)
+        self.debug_depth_dir = self._resolve_debug_depth_dir(env) if self.debug_save_depth_images else None
+        self._debug_episode_indices = torch.full((env.num_envs,), -1, device=self.device, dtype=torch.long)
+        self._debug_last_saved_episode_steps = torch.full((env.num_envs,), -1, device=self.device, dtype=torch.long)
+        self._debug_invalid_env_ids_logged = False
+        self._debug_save_disabled_logged = False
+
+        self.depth_encoder, payload = load_depth_encoder(self.di_checkpoint, device=self.device)
+        for parameter in self.depth_encoder.parameters():
+            parameter.requires_grad_(False)
+
+        input_shape = tuple(int(v) for v in payload["input_shape"])
+        if len(input_shape) != 3:
+            raise ValueError(f"Depth-CVAE checkpoint input_shape must have length 3, got {input_shape}")
+        self.window_size, self.depth_height, self.depth_width = input_shape
+        self.latent_dim = int(payload["config"]["latent_dim"])
+        self.depth_feature_mean = payload["feature_mean"].to(device=self.device, dtype=torch.float32)
+        self.depth_feature_std = payload["feature_std"].to(device=self.device, dtype=torch.float32).clamp_min(1e-6)
+
+        target_latent_mean = payload.get("target_latent_mean")
+        target_latent_std = payload.get("target_latent_std")
+        self.target_latent_mean = (
+            target_latent_mean.to(device=self.device, dtype=torch.float32) if target_latent_mean is not None else None
+        )
+        self.target_latent_std = (
+            target_latent_std.to(device=self.device, dtype=torch.float32).clamp_min(1e-6)
+            if target_latent_std is not None
+            else None
+        )
+
+        condition_text = str(cfg.params.get("condition_text") or payload["condition_text"])
+        clip_cfg = payload["clip"]
+        text_extractor = CLIPTextFeatureExtractor(
+            model_id=clip_cfg["model_id"],
+            device=self.device,
+            cache_dir=clip_cfg["cache_dir"],
+            local_files_only=clip_cfg["local_files_only"],
+            quiet_load=True,
+        )
+        self.depth_text_features = text_extractor.encode([condition_text]).to(device=self.device, dtype=torch.float32)
+
+        self.depth_window_history = torch.zeros(
+            env.num_envs,
+            self.window_size,
+            self.depth_height,
+            self.depth_width,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self.depth_is_initialized = torch.zeros(env.num_envs, dtype=torch.bool, device=self.device)
+
+        self.student_actor = None
+        self.student_input_keys: list[str] = []
+        self.student_obs_dim: int | None = None
+        self.num_actions = env.robot_config.actions_dim
+
+        logger.info(
+            f"Loaded frozen depth-CVAE encoder from {self.di_checkpoint} with "
+            f"window_size={self.window_size}, depth_shape=({self.depth_height}, {self.depth_width}), latent_dim={self.latent_dim}"
+        )
+        if self.debug_depth_dir is not None:
+            self.debug_depth_dir.mkdir(parents=True, exist_ok=True)
+            debug_targets = "all envs" if not self.debug_depth_env_ids else f"env_ids={list(self.debug_depth_env_ids)}"
+            logger.info(
+                f"Depth debug image saving enabled: dir={self.debug_depth_dir}, "
+                f"interval={self.debug_depth_save_interval}, targets={debug_targets}"
+            )
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        if env_ids is None:
+            self.depth_window_history.zero_()
+            self.depth_is_initialized.zero_()
+            self._debug_episode_indices += 1
+            self._debug_last_saved_episode_steps.fill_(-1)
+            return
+
+        env_ids_tensor = env_ids.to(device=self.device, dtype=torch.long)
+        if env_ids_tensor.numel() == 0:
+            return
+        self.depth_window_history[env_ids_tensor] = 0.0
+        self.depth_is_initialized[env_ids_tensor] = False
+        self._debug_episode_indices[env_ids_tensor] += 1
+        self._debug_last_saved_episode_steps[env_ids_tensor] = -1
+
+    def _resolve_debug_depth_dir(self, env: WholeBodyTrackingManager) -> Path | None:
+        save_dir = getattr(getattr(env.simulator, "video_config", None), "save_dir", None)
+        if save_dir is None:
+            logger.warning("Depth debug image saving requested, but simulator video_config.save_dir is not available.")
+            return None
+        return Path(save_dir).resolve().parent / "depth_debug"
+
+    def _save_depth_preview(self, depth_frame: torch.Tensor, output_path: Path) -> None:
+        from PIL import Image  # noqa: PLC0415
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        depth_array = depth_frame.detach().cpu()
+        finite_mask = torch.isfinite(depth_array) & (depth_array > 0.0)
+        preview = torch.zeros_like(depth_array, dtype=torch.uint8)
+        if torch.any(finite_mask):
+            valid = depth_array[finite_mask]
+            lo = float(valid.min().item())
+            hi = float(torch.quantile(valid, 0.99).item())
+            if hi <= lo:
+                hi = lo + 1e-6
+            normalized = torch.clamp((depth_array - lo) / (hi - lo), 0.0, 1.0)
+            preview = (normalized * 255.0).to(torch.uint8)
+        Image.fromarray(preview.numpy(), mode="L").save(output_path)
+
+    def _maybe_save_debug_depth_frames(self, env: WholeBodyTrackingManager, depth_frames: torch.Tensor) -> None:
+        if not self.debug_save_depth_images or self.debug_depth_dir is None:
+            return
+
+        episode_steps = env.episode_length_buf.detach()
+        for env_id in range(env.num_envs):
+            if self.debug_depth_env_id_set and env_id not in self.debug_depth_env_id_set:
+                continue
+
+            episode_step = int(episode_steps[env_id].item())
+            if episode_step <= 0:
+                continue
+            if episode_step != 1 and episode_step % self.debug_depth_save_interval != 0:
+                continue
+            if int(self._debug_last_saved_episode_steps[env_id].item()) == episode_step:
+                continue
+
+            episode_index = int(self._debug_episode_indices[env_id].item())
+            if episode_index < 0:
+                episode_index = 0
+            output_path = (
+                self.debug_depth_dir
+                / f"env_{env_id:03d}"
+                / f"episode_{episode_index:03d}"
+                / f"step_{episode_step:06d}_depth.png"
+            )
+            try:
+                self._save_depth_preview(depth_frames[env_id], output_path)
+            except Exception as exc:  # pragma: no cover - debug path best effort
+                if not self._debug_save_disabled_logged:
+                    logger.warning(
+                        f"Disabling depth debug image saving after failure writing {output_path}: {type(exc).__name__}: {exc}"
+                    )
+                    self._debug_save_disabled_logged = True
+                self.debug_save_depth_images = False
+                return
+            self._debug_last_saved_episode_steps[env_id] = episode_step
+
+        if not self._debug_invalid_env_ids_logged and self.debug_depth_env_ids:
+            invalid_env_ids = [env_id for env_id in self.debug_depth_env_ids if env_id < 0 or env_id >= env.num_envs]
+            if invalid_env_ids:
+                logger.warning(
+                    f"Ignoring out-of-range debug_depth_env_ids={invalid_env_ids}; available env ids are [0, {env.num_envs - 1}]."
+                )
+                self._debug_invalid_env_ids_logged = True
+
+    def _get_student_actor_obs(self, env: WholeBodyTrackingManager) -> torch.Tensor:
+        student_obs = env.observation_manager.compute_group(self.student_obs_group, modify_history=False)
+        if not isinstance(student_obs, torch.Tensor):
+            raise ValueError(f"Observation group '{self.student_obs_group}' must be concatenated for frozen student input.")
+        return student_obs
+
+    def _setup_student_actor(self, student_obs_dim: int) -> None:
+        if self.student_actor is not None:
+            if self.student_obs_dim != student_obs_dim:
+                raise ValueError(
+                    f"Frozen student obs dim changed from {self.student_obs_dim} to {student_obs_dim}; "
+                    "this likely means the observation preset no longer matches the student checkpoint."
+                )
+            return
+
+        student_config, _ = load_saved_experiment_config(CheckpointConfig(checkpoint=self.student_checkpoint))
+        student_payload = torch.load(self.student_checkpoint, map_location=self.device)
+        student_algo_config = getattr(student_config.algo, "config", None)
+        if student_algo_config is None or not hasattr(student_algo_config, "module_dict"):
+            raise ValueError("Student checkpoint must contain a PPO-style actor module configuration.")
+
+        student_actor_cfg = student_algo_config.module_dict.actor
+        self.student_input_keys = list(student_actor_cfg.input_dim)
+        expected_keys = {"actor_obs", "ir_cvae_latent"}
+        if set(self.student_input_keys) != expected_keys:
+            raise ValueError(
+                f"Frozen student actor expects inputs {self.student_input_keys}; supported inputs are {sorted(expected_keys)}."
+            )
+
+        self.student_actor = setup_ppo_actor_module(
+            obs_dim_dict={"actor_obs": student_obs_dim, "ir_cvae_latent": self.latent_dim},
+            module_config=student_actor_cfg,
+            num_actions=self.num_actions,
+            init_noise_std=getattr(student_algo_config, "init_noise_std", 1.0),
+            device=self.device,
+            history_length={"actor_obs": 1, "ir_cvae_latent": 1},
+        )
+        self.student_actor.load_state_dict(student_payload["actor_model_state_dict"])
+        self.student_actor.eval()
+        for parameter in self.student_actor.parameters():
+            parameter.requires_grad_(False)
+        if hasattr(self.student_actor, "std"):
+            self.student_actor.std.requires_grad_(False)
+
+        self.student_obs_dim = student_obs_dim
+        logger.info(
+            f"Loaded frozen student actor from {self.student_checkpoint} with "
+            f"student_obs_dim={student_obs_dim}, latent_dim={self.latent_dim}"
+        )
+
+    def _read_depth_frames(self, env: WholeBodyTrackingManager) -> torch.Tensor:
+        depth_camera = getattr(env.simulator, "robot_depth_camera", None)
+        if depth_camera is None:
+            raise RuntimeError(
+                "Simulator did not create a robot-mounted depth camera. "
+                "Expected IsaacSim to register 'robot_depth_camera' from the URDF optical frame."
+            )
+
+        depth_output = depth_camera.data.output.get("distance_to_image_plane")
+        if depth_output is None:
+            raise RuntimeError("Robot depth camera has no 'distance_to_image_plane' output.")
+
+        depth_frames = depth_output.to(device=self.device, dtype=torch.float32)
+        if depth_frames.ndim == 4 and depth_frames.shape[-1] == 1:
+            depth_frames = depth_frames[..., 0]
+        if depth_frames.ndim != 3:
+            raise RuntimeError(
+                f"Unexpected robot depth batch shape {tuple(depth_frames.shape)}; expected [num_envs, H, W] or [num_envs, H, W, 1]."
+            )
+        if depth_frames.shape[1:] == (self.depth_width, self.depth_height):
+            depth_frames = depth_frames.transpose(1, 2)
+        if depth_frames.shape[1:] != (self.depth_height, self.depth_width):
+            raise RuntimeError(
+                f"Unexpected robot depth spatial shape {tuple(depth_frames.shape[1:])}; "
+                f"expected {(self.depth_height, self.depth_width)}."
+            )
+
+        return torch.nan_to_num(depth_frames, nan=0.0, posinf=0.0, neginf=0.0)
+
+    def _build_depth_window(self, depth_frames: torch.Tensor, *, modify_history: bool) -> torch.Tensor:
+        if modify_history:
+            new_mask = ~self.depth_is_initialized
+            if torch.any(new_mask):
+                repeated = depth_frames[new_mask].unsqueeze(1).repeat(1, self.window_size, 1, 1)
+                self.depth_window_history[new_mask] = repeated
+
+            existing_mask = self.depth_is_initialized
+            if torch.any(existing_mask):
+                existing_history = self.depth_window_history[existing_mask].clone()
+                existing_history[:, :-1] = existing_history[:, 1:].clone()
+                existing_history[:, -1] = depth_frames[existing_mask]
+                self.depth_window_history[existing_mask] = existing_history
+
+            self.depth_is_initialized[:] = True
+            return self.depth_window_history
+
+        effective_window = torch.cat([self.depth_window_history[:, 1:], depth_frames.unsqueeze(1)], dim=1)
+        new_mask = ~self.depth_is_initialized
+        if torch.any(new_mask):
+            effective_window[new_mask] = depth_frames[new_mask].unsqueeze(1).repeat(1, self.window_size, 1, 1)
+        return effective_window
+
+    def _encode_depth_latent(self, depth_window: torch.Tensor) -> torch.Tensor:
+        normalized_window = (depth_window - self.depth_feature_mean.unsqueeze(0)) / self.depth_feature_std.unsqueeze(0)
+        text_features = self.depth_text_features.expand(depth_window.shape[0], -1)
+        mu, _ = self.depth_encoder(normalized_window, text_features)
+        if self.target_latent_mean is not None and self.target_latent_std is not None:
+            mu = mu * self.target_latent_std.unsqueeze(0) + self.target_latent_mean.unsqueeze(0)
+        return mu
+
+    def _build_student_input(self, student_obs: torch.Tensor, depth_latent: torch.Tensor) -> torch.Tensor:
+        inputs = []
+        for key in self.student_input_keys:
+            if key == "actor_obs":
+                inputs.append(student_obs)
+            elif key == "ir_cvae_latent":
+                inputs.append(depth_latent)
+            else:
+                raise ValueError(f"Unsupported frozen student input key '{key}'.")
+        return torch.cat(inputs, dim=1)
+
+    @torch.no_grad()
+    def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:
+        modify_history = bool(kwargs.pop("modify_history", True))
+        motion_command = _get_motion_command_and_assert_type(env)
+        if not getattr(motion_command.motion, "has_object", False):
+            zero_actions = torch.zeros(env.num_envs, self.num_actions, device=self.device)
+            if modify_history:
+                env.student_prev_actions.zero_()
+                env.student_base_actions.zero_()
+            return zero_actions
+
+        student_obs = self._get_student_actor_obs(env)
+        self._setup_student_actor(student_obs.shape[1])
+        try:
+            depth_frames = self._read_depth_frames(env)
+        except RuntimeError:
+            if not modify_history:
+                return torch.zeros(env.num_envs, self.num_actions, device=self.device)
+            raise
+        if modify_history:
+            self._maybe_save_debug_depth_frames(env, depth_frames)
+        depth_window = self._build_depth_window(depth_frames, modify_history=modify_history)
+        depth_latent = self._encode_depth_latent(depth_window)
+        student_input = self._build_student_input(student_obs, depth_latent)
+        base_action = self.student_actor.act_inference({"actor_obs": student_input})
+
+        if modify_history:
+            env.student_prev_actions[:] = base_action
+            env.student_base_actions[:] = base_action
+
+        return base_action

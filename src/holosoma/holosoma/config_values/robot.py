@@ -1130,10 +1130,25 @@ g1_29dof_w_object_multi_teacher = replace(
     ),
 )
 
+g1_29dof_w_object_multi_realsense = replace(
+    g1_29dof,
+    asset=replace(
+        g1_29dof.asset,
+        urdf_file="g1/g1_29dof_realsense.urdf",
+        xml_file="g1/g1_29dof_realsense.xml",
+    ),
+    control=replace(
+        g1_29dof.control,
+        action_scales_by_effort_limit_over_p_gain=True,
+        action_scale=0.25,
+    ),
+)
+
 DEFAULTS = {
     "g1_29dof": g1_29dof,
     "t1_29dof_waist_wrist": t1_29dof_waist_wrist,
     "g1_29dof_w_object": g1_29dof_w_object,
     "g1_29dof_w_object_multi": g1_29dof_w_object_multi,
     "g1_29dof_w_object_multi_teacher": g1_29dof_w_object_multi_teacher,
+    "g1_29dof_w_object_multi_realsense": g1_29dof_w_object_multi_realsense,
 }

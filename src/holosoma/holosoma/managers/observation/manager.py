@@ -115,7 +115,7 @@ class ObservationManager:
 
         for term_name, term_cfg in group_cfg.terms.items():
             # 1. Compute base observation
-            obs = self._compute_term(group_name, term_name, term_cfg)
+            obs = self._compute_term(group_name, term_name, term_cfg, modify_history=modify_history)
 
             # 2. Apply noise (matches direct: noise before scaling)
             if group_cfg.enable_noise and term_cfg.noise > 0:
@@ -142,7 +142,14 @@ class ObservationManager:
             return torch.cat([obs_tensors[key] for key in sorted_keys], dim=-1)
         return obs_tensors
 
-    def _compute_term(self, group_name: str, term_name: str, term_cfg: ObsTermCfg) -> torch.Tensor:
+    def _compute_term(
+        self,
+        group_name: str,
+        term_name: str,
+        term_cfg: ObsTermCfg,
+        *,
+        modify_history: bool = True,
+    ) -> torch.Tensor:
         """Compute a single observation term.
 
         Parameters
@@ -163,7 +170,7 @@ class ObservationManager:
         if term_name in self._term_instances[group_name]:
             # Stateful term
             instance = self._term_instances[group_name][term_name]
-            obs = instance(self.env, **term_cfg.params)
+            obs = instance(self.env, modify_history=modify_history, **term_cfg.params)
         else:
             # Stateless function
             func = self._term_funcs[group_name][term_name]
@@ -313,7 +320,7 @@ class ObservationManager:
                 total_dim = 0
                 for term_name, term_cfg in group_cfg.terms.items():
                     # Compute term once to get its dimension
-                    obs = self._compute_term(group_name, term_name, term_cfg)
+                    obs = self._compute_term(group_name, term_name, term_cfg, modify_history=False)
                     term_dim = obs.shape[1]
 
                     # Account for history at group level
@@ -325,7 +332,7 @@ class ObservationManager:
             else:
                 # Return dict of individual dimensions
                 term_dims: dict[str, int] = {
-                    term_name: self._compute_term(group_name, term_name, term_cfg).shape[1]
+                    term_name: self._compute_term(group_name, term_name, term_cfg, modify_history=False).shape[1]
                     for term_name, term_cfg in group_cfg.terms.items()
                 }
                 dims[group_name] = term_dims

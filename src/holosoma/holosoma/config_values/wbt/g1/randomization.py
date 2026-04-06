@@ -59,6 +59,28 @@ object_state_dr_at_setup = {
     ),
 }
 
+additional_object_dr_at_setup = {
+    "randomize_object_scale_startup": RandomizationTermCfg(
+        func="holosoma.managers.randomization.terms.locomotion:randomize_object_scale_startup",
+        params={
+            "scale_range": (0.8, 1.2),
+            # Optional fixed scale for debugging. Example: 2.0 or [1.0, 1.0, 2.0].
+            # "scale_value": 2.0,
+            # Optional manual height fallback. Non-positive values trigger URDF-based auto bounds.
+            "object_height": 0.0,
+            "enabled": True,
+        },
+    ),
+    "set_object_init_pose_noise": RandomizationTermCfg(
+        func="holosoma.managers.randomization.terms.locomotion:set_object_init_pose_noise",
+        params={
+            "object_pos_noise": [0.2, 0.2, 0.0],
+            "overall_noise_scale": 1.0,
+            "enabled": True,
+        },
+    ),
+}
+
 base_setup_terms = {
     "push_randomizer_state": RandomizationTermCfg(
         func="holosoma.managers.randomization.terms.locomotion:PushRandomizerState",
@@ -141,4 +163,18 @@ g1_29dof_wbt_randomization_w_object = RandomizationManagerCfg(
     },
 )
 
-__all__ = ["g1_29dof_wbt_randomization", "g1_29dof_wbt_randomization_w_object"]
+g1_29dof_wbt_randomization_w_object_multi_res = RandomizationManagerCfg(
+    setup_terms={
+        **base_setup_terms,
+        **object_state_dr_at_setup,
+        **additional_object_dr_at_setup,
+    },
+    reset_terms={
+        **base_reset_terms,
+    },
+    step_terms={
+        **base_step_terms,
+    },
+)
+
+__all__ = ["g1_29dof_wbt_randomization", "g1_29dof_wbt_randomization_w_object", "g1_29dof_wbt_randomization_w_object_multi_res"]

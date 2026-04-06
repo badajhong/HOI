@@ -154,13 +154,25 @@ class WholeBodyTrackingManager(BaseTask):
             real_object_pos_xyz = motion_command.simulator_object_pos_w.clone()
             real_object_quat_xyzw = motion_command.simulator_object_quat_w.clone()
             real_object_quat_wxyz = real_object_quat_xyzw[:, [3, 0, 1, 2]]
-            motion_command.visualization_markers["real_object"].visualize(real_object_pos_xyz, real_object_quat_wxyz)
+            object_scales = None
+            if hasattr(self, "object_scale_factors"):
+                # Frame markers look distorted under anisotropic scaling, so visualize
+                # only the overall scale magnitude with a uniform marker scale.
+                uniform_scale = self.object_scale_factors.amax(dim=1, keepdim=True)
+                object_scales = uniform_scale.repeat(1, 3).clone()
+            motion_command.visualization_markers["real_object"].visualize(
+                real_object_pos_xyz,
+                real_object_quat_wxyz,
+                scales=object_scales,
+            )
 
             motion_object_pos_xyz = motion_command.object_pos_w.clone()
             motion_object_quat_xyzw = motion_command.object_quat_w.clone()
             motion_object_quat_wxyz = motion_object_quat_xyzw[:, [3, 0, 1, 2]]
             motion_command.visualization_markers["motion_object"].visualize(
-                motion_object_pos_xyz, motion_object_quat_wxyz
+                motion_object_pos_xyz,
+                motion_object_quat_wxyz,
+                scales=object_scales,
             )
 
     def _draw_debug_vis_isaacgym(self):

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
 from holosoma.config_types.env import EnvConfig
@@ -17,6 +19,55 @@ from holosoma.simulator.base_simulator.base_simulator import BaseSimulator
 from holosoma.utils.helpers import get_class
 from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.torch_utils import to_torch
+
+
+def _is_object_scale_randomization_enabled(randomization_config) -> bool:
+    """Return True when startup object scale randomization is enabled."""
+    if randomization_config is None:
+        return False
+
+    setup_terms = getattr(randomization_config, "setup_terms", {}) or {}
+    for term_cfg in setup_terms.values():
+        func = getattr(term_cfg, "func", "")
+        if not isinstance(func, str) or not func.endswith(":randomize_object_scale_startup"):
+            continue
+
+        params = getattr(term_cfg, "params", {}) or {}
+        if params.get("enabled", True):
+            return True
+
+    return False
+
+
+def _get_fixed_object_scale_value(randomization_config) -> tuple[float, float, float] | None:
+    """Return fixed object scale override when configured for startup scale randomization."""
+    if randomization_config is None:
+        return None
+
+    setup_terms = getattr(randomization_config, "setup_terms", {}) or {}
+    for term_cfg in setup_terms.values():
+        func = getattr(term_cfg, "func", "")
+        if not isinstance(func, str) or not func.endswith(":randomize_object_scale_startup"):
+            continue
+
+        params = getattr(term_cfg, "params", {}) or {}
+        if not params.get("enabled", True):
+            continue
+
+        scale_value = params.get("scale_value")
+        if scale_value is None:
+            return None
+        if isinstance(scale_value, (int, float)):
+            scale = float(scale_value)
+            return (scale, scale, scale)
+        if len(scale_value) != 3:
+            raise ValueError(
+                "randomize_object_scale_startup.params.scale_value must be a scalar or 3-element sequence, "
+                f"got {scale_value!r}"
+            )
+        return (float(scale_value[0]), float(scale_value[1]), float(scale_value[2]))
+
+    return None
 
 
 # Base class for RL tasks built around the manager-based architecture.
@@ -54,7 +105,9 @@ class BaseTask:
         self.training_config = training_config
         self.robot_config = robot_config
         self.teacher = tyro_config.teacher
+        self.student = tyro_config.student
         self.ir_cvae = tyro_config.ir_cvae
+        self.di_cvae = tyro_config.di_cvae
 
         # Validate configs: manager workflow requires all manager configs to be provided
         if observation_config is None:
@@ -74,6 +127,17 @@ class BaseTask:
         if terrain_config is None:
             raise ValueError("terrain_config must be provided for manager-based environments.")
 
+        if _is_object_scale_randomization_enabled(randomization_config):
+            scene_cfg = simulator_config.config.scene
+            if getattr(scene_cfg, "replicate_physics", False):
+                simulator_config = replace(
+                    simulator_config,
+                    config=replace(
+                        simulator_config.config,
+                        scene=replace(scene_cfg, replicate_physics=False),
+                    ),
+                )
+
         # optimization flags for pytorch JIT
         torch._C._jit_set_profiling_mode(False)
         torch._C._jit_set_profiling_executor(False)
@@ -85,6 +149,7 @@ class BaseTask:
         experiment_dir = get_experiment_dir(
             tyro_config.logger, tyro_config.training, timestamp, task_name=self._get_task_name()
         )
+        fixed_object_scale = _get_fixed_object_scale_value(randomization_config)
 
         SimulatorClass = get_class(simulator_config._target_)
         full_sim_config = FullSimConfig(
@@ -93,6 +158,7 @@ class BaseTask:
             training=training_config,
             logger=tyro_config.logger,
             experiment_dir=str(experiment_dir),
+            object_spawn_scale=fixed_object_scale,
         )
 
         self.num_envs = training_config.num_envs
@@ -198,6 +264,8 @@ class BaseTask:
         self._pending_episode_lengths = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         self._pending_episode_update_mask = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self._pending_torque_rfi: tuple[bool, float] = (False, 0.0)
+        self.student_prev_actions = torch.zeros(self.num_envs, self.dim_actions, device=self.device, dtype=torch.float)
+        self.student_base_actions = torch.zeros(self.num_envs, self.dim_actions, device=self.device, dtype=torch.float)
 
     def _refresh_sim_tensors(self):
         self.simulator.refresh_sim_tensors()
@@ -242,6 +310,8 @@ class BaseTask:
 
         self._pending_episode_lengths[env_ids] = self.episode_length_buf[env_ids]
         self._pending_episode_update_mask[env_ids] = False
+        self.student_prev_actions[env_ids] = 0.0
+        self.student_base_actions[env_ids] = 0.0
 
         # Call the actual reset implementation (to be overridden by subclasses)
         self._reset_envs_idx_impl(env_ids, target_states, target_buf)

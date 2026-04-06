@@ -20,3 +20,6 @@ class FullSimConfig:
 
     experiment_dir: str | None = None
     """Experiment directory path (computed from logger config in base_task)."""
+
+    object_spawn_scale: tuple[float, float, float] | None = None
+    """Optional fixed object scale to apply at spawn time for file-based object assets."""

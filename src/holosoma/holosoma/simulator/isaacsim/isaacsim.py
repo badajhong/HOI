@@ -22,7 +22,17 @@ from isaaclab.envs import ViewerCfg, mdp
 from isaaclab.managers import EventManager, SceneEntityCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
-from isaaclab.sensors import Camera, CameraCfg, ContactSensor, ContactSensorCfg, RayCaster, RayCasterCfg, patterns
+from isaaclab.sensors import (
+    Camera,
+    CameraCfg,
+    ContactSensor,
+    ContactSensorCfg,
+    RayCaster,
+    RayCasterCfg,
+    TiledCamera,
+    TiledCameraCfg,
+    patterns,
+)
 from isaaclab.sim import PhysxCfg, SimulationCfg, SimulationContext
 from isaaclab.terrains import TerrainGeneratorCfg, TerrainImporterCfg
 from isaaclab.terrains.utils import create_prim_from_mesh
@@ -71,6 +81,7 @@ class IsaacSim(BaseSimulator):
         self.robot_depth_camera_link_name = "realsense_d435_depth_optical_frame"
         self.robot_depth_camera_prim_name = "realsense_d435_depth"
         self.robot_depth_camera_resolution = (80, 60)
+        self.robot_depth_camera_use_tiled = self.training_config.num_envs > 1
 
         # Scale GPU rigid patch buffer with env count to avoid PhysX patch-buffer overflow
         # in large batched scenes (e.g., 24k+ envs with rich contacts).
@@ -414,6 +425,7 @@ class IsaacSim(BaseSimulator):
                     fix_base=False,
                     replace_cylinders_with_capsules=True,
                     asset_path=urdf_path,
+                    scale=self.object_spawn_scale,
                     activate_contact_sensors=True,
                     rigid_props=sim_utils.RigidBodyPropertiesCfg(
                         disable_gravity=False,
@@ -465,12 +477,24 @@ class IsaacSim(BaseSimulator):
     def _maybe_create_robot_depth_camera(self) -> None:
         from isaacsim.core.utils.prims import is_prim_path_valid
 
-        source_optical_frame_prim = f"/World/envs/env_0/Robot/{self.robot_depth_camera_link_name}"
-        if not is_prim_path_valid(source_optical_frame_prim):
+        direct_optical_frame_prim = f"/World/envs/env_0/Robot/{self.robot_depth_camera_link_name}"
+        nested_optical_frame_prim = (
+            f"/World/envs/env_0/Robot/realsense_d435_link/{self.robot_depth_camera_link_name}"
+        )
+        if is_prim_path_valid(direct_optical_frame_prim):
+            camera_mount_path = f"/World/envs/env_.*/Robot/{self.robot_depth_camera_link_name}"
+        elif is_prim_path_valid(nested_optical_frame_prim):
+            camera_mount_path = f"/World/envs/env_.*/Robot/realsense_d435_link/{self.robot_depth_camera_link_name}"
+        else:
+            logger.warning(
+                "Robot depth camera optical frame prim not found. "
+                f"Tried '{direct_optical_frame_prim}' and '{nested_optical_frame_prim}'."
+            )
             return
 
-        camera_cfg = CameraCfg(
-            prim_path=f"/World/envs/env_.*/Robot/{self.robot_depth_camera_link_name}/{self.robot_depth_camera_prim_name}",
+        camera_cfg_cls = TiledCameraCfg if self.robot_depth_camera_use_tiled else CameraCfg
+        camera_cfg = camera_cfg_cls(
+            prim_path=f"{camera_mount_path}/{self.robot_depth_camera_prim_name}",
             update_period=0.0,
             height=self.robot_depth_camera_resolution[1],
             width=self.robot_depth_camera_resolution[0],
@@ -482,18 +506,21 @@ class IsaacSim(BaseSimulator):
                 horizontal_aperture=20.955,
                 clipping_range=(0.05, 20.0),
             ),
-            offset=CameraCfg.OffsetCfg(
+            offset=camera_cfg_cls.OffsetCfg(
                 pos=(0.0, 0.0, 0.0),
                 rot=(1.0, 0.0, 0.0, 0.0),
                 convention="ros",
             ),
         )
-        self.robot_depth_camera = Camera(camera_cfg)
+        if self.robot_depth_camera_use_tiled:
+            self.robot_depth_camera = TiledCamera(camera_cfg)
+        else:
+            self.robot_depth_camera = Camera(camera_cfg)
         self.scene.sensors["robot_depth_camera"] = self.robot_depth_camera
         logger.info(
             "IsaacSim: registered robot-mounted depth camera sensor at "
             f"{camera_cfg.prim_path} from URDF link '{self.robot_depth_camera_link_name}' with "
-            f"resolution={self.robot_depth_camera_resolution}"
+            f"resolution={self.robot_depth_camera_resolution}, tiled={self.robot_depth_camera_use_tiled}"
         )
 
     def get_robot_depth_frame(self, env_id: int) -> torch.Tensor:

@@ -1,4 +1,4 @@
-# python src/holosoma/holosoma/ir_agent.py   --checkpoint=/home/rllab/haechan/holosoma/logs/WholeBodyTracking/20260324_040235-g1_29dof_wbt_manager-locomotion/model_15000.pt   --num-eval-episodes=1000   --max-eval-steps=200
+# python src/holosoma/holosoma/ir_agent.py   --checkpoint=/home/rllab/haechan/holosoma/logs/WholeBodyTracking/teacher_suitcase/model_17000.pt   --num-eval-episodes=1000   --max-eval-steps=200
 
 from __future__ import annotations
 
@@ -616,12 +616,12 @@ class IRTelemetryRecorder:
             current_u_window = self._build_window(self._u_windows[env_id], current_u_t)
             current_depth_frame = self._read_depth_frame(env_id)
             current_depth_window = self._build_window(self._depth_windows[env_id], current_depth_frame)
-            # depth_image_file = self._save_depth_preview(
-            #     env_id=env_id,
-            #     episode_index=self._episode_indices[env_id],
-            #     episode_step=self._episode_steps[env_id],
-            #     depth_frame=current_depth_frame,
-            # )
+            depth_image_file = self._save_depth_preview(
+                env_id=env_id,
+                episode_index=self._episode_indices[env_id],
+                episode_step=self._episode_steps[env_id],
+                depth_frame=current_depth_frame,
+            )
             entry = {
                 "global_step": global_step,
                 "episode_index": self._episode_indices[env_id],
@@ -638,7 +638,7 @@ class IRTelemetryRecorder:
                 "u_t": current_u_t,
                 "u_window": current_u_window,
                 "depth_window": current_depth_window,
-                # "depth_image_file": depth_image_file,
+                "depth_image_file": depth_image_file,
             }
             self._episode_entries[env_id].append(entry)
 

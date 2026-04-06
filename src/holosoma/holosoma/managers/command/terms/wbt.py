@@ -400,6 +400,35 @@ def get_filtered_body_names(body_list: List[str], pattern: str) -> List[str]:
     return [body_name for body_name in body_list if re.match(pattern, body_name)]
 
 
+def get_scaled_object_support_delta(
+    quat_xyzw: torch.Tensor,
+    scales_xyz: torch.Tensor,
+    local_bbox_center: torch.Tensor,
+    local_bbox_half_extent: torch.Tensor,
+) -> torch.Tensor:
+    """Return the z offset needed to keep a scaled object's support plane unchanged."""
+    if quat_xyzw.numel() == 0:
+        return torch.zeros(0, device=quat_xyzw.device, dtype=quat_xyzw.dtype)
+
+    dtype = quat_xyzw.dtype
+    device = quat_xyzw.device
+    local_bbox_center = local_bbox_center.to(device=device, dtype=dtype).unsqueeze(0)
+    local_bbox_half_extent = local_bbox_half_extent.to(device=device, dtype=dtype).unsqueeze(0)
+    scales_xyz = scales_xyz.to(device=device, dtype=dtype)
+
+    basis = torch.eye(3, device=device, dtype=dtype).unsqueeze(0).expand(quat_xyzw.shape[0], -1, -1)
+    rotated_basis = quat_apply(quat_xyzw.unsqueeze(1).expand(-1, 3, -1), basis, w_last=True)
+    world_z_axis_weights = rotated_basis[:, :, 2].abs()
+
+    base_center_z = quat_apply(quat_xyzw, local_bbox_center.expand(quat_xyzw.shape[0], -1), w_last=True)[:, 2]
+    scaled_center = local_bbox_center * scales_xyz
+    scaled_center_z = quat_apply(quat_xyzw, scaled_center, w_last=True)[:, 2]
+
+    base_support_z = base_center_z - torch.sum(world_z_axis_weights * local_bbox_half_extent, dim=1)
+    scaled_support_z = scaled_center_z - torch.sum(world_z_axis_weights * (local_bbox_half_extent * scales_xyz), dim=1)
+    return base_support_z - scaled_support_z
+
+
 class MotionCommand(CommandTermBase):
     def __init__(self, cfg: Any, env: WholeBodyTrackingManager):
         super().__init__(cfg, env)
@@ -646,6 +675,12 @@ class MotionCommand(CommandTermBase):
             obj_pos = self.object_pos_w[env_ids]
             obj_ori = self.object_quat_w[env_ids]
             obj_lin_vel = self.object_lin_vel_w[env_ids]
+            selected_keys: list[str | None] | None = None
+            all_keys: list[str] | None = None
+            if self.object_name_to_indices:
+                clip_ids_for_envs = self.clip_ids[env_ids]
+                selected_keys = [self.motion.clip_object_keys[int(i)] for i in clip_ids_for_envs.tolist()]
+                all_keys = sorted(self.object_name_to_indices.keys())
 
             # 4.2 add noise to the object states
             obj_pos_noise = torch.tensor(
@@ -654,16 +689,55 @@ class MotionCommand(CommandTermBase):
             )
             obj_pos_noise = obj_pos_noise * self.init_pose_cfg.overall_noise_scale  # (3,)
             target_obj_pos = obj_pos + (torch.rand(obj_pos.shape, device=self.device) - 0.5) * 2 * obj_pos_noise
+            bbox_centers = getattr(self._env, "object_local_bbox_center_by_actor", None)
+            bbox_half_extents = getattr(self._env, "object_local_bbox_half_extent_by_actor", None)
+            object_scales = getattr(self._env, "object_scale_factors", None)
+            if bbox_centers and bbox_half_extents and object_scales is not None:
+                if self.object_name_to_indices and selected_keys is not None and all_keys is not None:
+                    for object_key in all_keys:
+                        actor_name = f"object_{object_key}"
+                        local_center = bbox_centers.get(actor_name)
+                        local_half_extent = bbox_half_extents.get(actor_name)
+                        if local_center is None or local_half_extent is None:
+                            continue
+
+                        mask = torch.tensor(
+                            [key == object_key for key in selected_keys], device=self.device, dtype=torch.bool
+                        )
+                        if not mask.any():
+                            continue
+
+                        support_delta = get_scaled_object_support_delta(
+                            quat_xyzw=obj_ori[mask],
+                            scales_xyz=object_scales[env_ids[mask]],
+                            local_bbox_center=local_center,
+                            local_bbox_half_extent=local_half_extent,
+                        )
+                        target_obj_pos[mask, 2] += support_delta
+                else:
+                    local_center = bbox_centers.get(self.object_name)
+                    local_half_extent = bbox_half_extents.get(self.object_name)
+                    if local_center is not None and local_half_extent is not None:
+                        support_delta = get_scaled_object_support_delta(
+                            quat_xyzw=obj_ori,
+                            scales_xyz=object_scales[env_ids],
+                            local_bbox_center=local_center,
+                            local_bbox_half_extent=local_half_extent,
+                        )
+                        target_obj_pos[:, 2] += support_delta
+            elif hasattr(self._env, "object_scale_factors_z") and hasattr(self._env, "object_scale_height"):
+                scale_z = self._env.object_scale_factors_z[env_ids].to(device=self.device)
+                height = float(self._env.object_scale_height)
+                if height > 0.0:
+                    target_obj_pos[:, 2] += (scale_z - 1.0) * 0.5 * height
+            if hasattr(self, "object_pos_reward_offset"):
+                self.object_pos_reward_offset[env_ids] = target_obj_pos - obj_pos
 
             object_states = torch.cat(
                 [target_obj_pos, obj_ori, obj_lin_vel, torch.zeros_like(obj_lin_vel)], dim=-1
             )
             # 4.3 set object states in simulator (per-clip object selection when available)
-            if self.object_name_to_indices:
-                clip_ids_for_envs = self.clip_ids[env_ids]
-                selected_keys = [self.motion.clip_object_keys[int(i)] for i in clip_ids_for_envs.tolist()]
-                all_keys = sorted(self.object_name_to_indices.keys())
-
+            if self.object_name_to_indices and selected_keys is not None and all_keys is not None:
                 # Place active object per env according to selected clip key.
                 for object_key in all_keys:
                     mask = torch.tensor([k == object_key for k in selected_keys], device=self.device, dtype=torch.bool)
@@ -933,6 +1007,7 @@ class MotionCommand(CommandTermBase):
             self.active_object_indices = self.object_indices_in_simulator.clone()
             self.object_type_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
             self.num_object_types = max(getattr(self, "num_object_types", 1), 1)
+            self.object_pos_reward_offset = torch.zeros(self.num_envs, 3, device=self.device)
         self.body_pos_relative_w = torch.zeros(
             self.num_envs, len(self.motion_cfg.body_names_to_track), 3, device=self.device
         )  # type: ignore[arg-type]

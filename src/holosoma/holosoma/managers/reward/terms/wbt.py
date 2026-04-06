@@ -115,7 +115,10 @@ def motion_global_body_ang_vel(env: WholeBodyTrackingManager, sigma: float) -> t
 
 def object_global_ref_position_error_exp(env: WholeBodyTrackingManager, sigma: float) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
-    error = torch.sum(torch.square(motion_command.object_pos_w - motion_command.simulator_object_pos_w), dim=-1)
+    ref_pos = motion_command.object_pos_w
+    if hasattr(motion_command, "object_pos_reward_offset"):
+        ref_pos = ref_pos + motion_command.object_pos_reward_offset
+    error = torch.sum(torch.square(ref_pos - motion_command.simulator_object_pos_w), dim=-1)
     return torch.exp(-error / sigma**2)
 
 

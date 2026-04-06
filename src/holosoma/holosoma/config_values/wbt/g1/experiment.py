@@ -232,7 +232,7 @@ g1_29dof_wbt_w_object_multi_student = replace(
     g1_29dof_wbt_w_object_multi_teacher,
     training=replace(
         g1_29dof_wbt_w_object_multi_teacher.training,
-        name="g1_29dof_wbt_manager-ir-student",
+        name="student_ppo",
         num_envs=16384,
     ),
     algo=replace(
@@ -241,7 +241,7 @@ g1_29dof_wbt_w_object_multi_student = replace(
             algo.dagger_student.config,
             num_learning_iterations=50000,
             save_interval=1000,
-            fifo_buffer=6_400_000,
+            stack_buffer=6_400_000,
             module_dict=replace(
                 algo.dagger_student.config.module_dict,
                 actor=replace(
@@ -257,6 +257,61 @@ g1_29dof_wbt_w_object_multi_student = replace(
     observation=observation.g1_29dof_wbt_observation_w_object_multi_student,
 )
 
+g1_29dof_wbt_w_object_multi_res = replace(
+    g1_29dof_wbt_w_object_multi_teacher,
+    training=replace(
+        g1_29dof_wbt_w_object_multi_teacher.training,
+        name="residual_ppo",
+        num_envs=8192,
+    ),
+    algo=replace(
+        algo.ppo,
+        _target_="holosoma.agents.ppo.residual_student_ppo.ResidualStudentPPO",
+        config=replace(
+            algo.ppo.config,
+            num_learning_iterations=50000,
+            save_interval=1000,
+            use_symmetry=False,
+            init_at_random_ep_len=False,
+            module_dict=replace(
+                algo.ppo.config.module_dict,
+                actor=replace(
+                    algo.ppo.config.module_dict.actor,
+                    input_dim=["student_actor_obs", "student_base_action"],
+                    layer_config=replace(
+                        algo.ppo.config.module_dict.actor.layer_config,
+                        hidden_dims=[512, 256, 128],
+                    ),
+                ),
+                critic=replace(
+                    algo.ppo.config.module_dict.critic,
+                    input_dim=["critic_obs", "student_base_action"],
+                    layer_config=replace(
+                        algo.ppo.config.module_dict.critic.layer_config,
+                        hidden_dims=[512, 256, 128],
+                    ),
+                ),
+            ),
+        ),
+    ),
+    termination=termination.g1_29dof_wbt_w_object_multi_res_termination,
+    randomization=randomization.g1_29dof_wbt_randomization_w_object_multi_res,
+    observation=observation.g1_29dof_wbt_observation_w_object_multi_res,
+    reward=reward.g1_29dof_wbt_reward_w_object_multi_res,
+    robot=replace(
+        robot.g1_29dof_w_object_multi_realsense,
+        asset=replace(
+            robot.g1_29dof_w_object_multi_realsense.asset,
+            enable_self_collisions=True,
+        ),
+        object=replace(
+            robot.g1_29dof_w_object_multi_realsense.object,
+            object_urdf_path="holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf",
+        ),
+        init_state=replace(robot.g1_29dof_w_object_multi_realsense.init_state, pos=[0.0, 0.0, 0.76]),
+    ),
+)
+
 __all__ = [
     "g1_29dof_wbt",
     "g1_29dof_wbt_fast_sac",
@@ -265,6 +320,7 @@ __all__ = [
     "g1_29dof_wbt_w_object_multi",
     "g1_29dof_wbt_w_object_multi_teacher",
     "g1_29dof_wbt_w_object_multi_student",
+    "g1_29dof_wbt_w_object_multi_res",
 ]
 
 """

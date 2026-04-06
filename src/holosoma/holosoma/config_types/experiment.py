@@ -105,8 +105,12 @@ class ExperimentConfig:
     env_class: str = "holosoma.envs.locomotion.locomotion_manager.LeggedRobotLocomotionManager"
     teacher: str | None = None
     """Optional teacher checkpoint for student distillation runs."""
+    student: str | None = None
+    """Optional frozen student checkpoint used by residual-policy training."""
     ir_cvae: str | None = None
     """Optional frozen IR-CVAE checkpoint used to build latent observations."""
+    di_cvae: str | None = None
+    """Optional frozen depth-image CVAE checkpoint used to build visual latents."""
 
     training: TrainingConfig = TrainingConfig()
     algo: Annotated[

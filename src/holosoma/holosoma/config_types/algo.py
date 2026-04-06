@@ -345,8 +345,8 @@ class DaggerStudentConfig:
     num_learning_iterations: int = 50000
     """Total number of DAgger iterations."""
 
-    fifo_buffer: int = 6_400_000
-    """Maximum number of samples kept in the FIFO replay buffer."""
+    stack_buffer: int = 6_400_000
+    """Maximum number of samples kept in the rolling supervised buffer."""
 
     max_grad_norm: float = 1.0
     """Maximum gradient norm for clipping."""

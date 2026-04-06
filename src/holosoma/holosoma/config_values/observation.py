@@ -6,6 +6,7 @@ from holosoma.config_values.wbt.g1.observation import (
     g1_29dof_wbt_observation,
     g1_29dof_wbt_observation_w_object,
     g1_29dof_wbt_observation_w_object_multi,
+    g1_29dof_wbt_observation_w_object_multi_res,
     g1_29dof_wbt_observation_w_object_multi_teacher,
     g1_29dof_wbt_observation_w_object_multi_student,
 )
@@ -19,6 +20,7 @@ DEFAULTS = {
     "g1_29dof_wbt": g1_29dof_wbt_observation,
     "g1_29dof_wbt_w_object": g1_29dof_wbt_observation_w_object,
     "g1_29dof_wbt_w_object_multi": g1_29dof_wbt_observation_w_object_multi,
+    "g1_29dof_wbt_w_object_multi_res": g1_29dof_wbt_observation_w_object_multi_res,
     "g1_29dof_wbt_w_object_multi_teacher": g1_29dof_wbt_observation_w_object_multi_teacher,
     "g1_29dof_wbt_w_object_multi_student": g1_29dof_wbt_observation_w_object_multi_student,
 }
