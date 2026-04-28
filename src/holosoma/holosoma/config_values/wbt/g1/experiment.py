@@ -277,7 +277,7 @@ g1_29dof_wbt_w_object_multi_res = replace(
                 algo.ppo.config.module_dict,
                 actor=replace(
                     algo.ppo.config.module_dict.actor,
-                    input_dim=["student_actor_obs", "student_base_action"],
+                    input_dim=["residual_actor_obs", "student_base_action", "di_ae_latent"],
                     layer_config=replace(
                         algo.ppo.config.module_dict.actor.layer_config,
                         hidden_dims=[512, 256, 128],
@@ -285,7 +285,7 @@ g1_29dof_wbt_w_object_multi_res = replace(
                 ),
                 critic=replace(
                     algo.ppo.config.module_dict.critic,
-                    input_dim=["critic_obs", "student_base_action"],
+                    input_dim=["critic_obs", "student_base_action", "di_ae_latent"],
                     layer_config=replace(
                         algo.ppo.config.module_dict.critic.layer_config,
                         hidden_dims=[512, 256, 128],

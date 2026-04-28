@@ -17,7 +17,7 @@ from typing import Any
 from loguru import logger
 from typing_extensions import Self
 
-from holosoma.config_types.env import get_tyro_env_config
+from holosoma.config_types.env import get_tyro_env_config, resolve_observation_term_overrides
 from holosoma.config_types.experiment import ExperimentConfig
 from holosoma.config_types.full_sim import FullSimConfig
 from holosoma.config_types.run_sim import RunSimConfig
@@ -28,6 +28,30 @@ from holosoma.utils.rate import RateLimiter
 from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.simulator_config import SimulatorType, get_simulator_type, set_simulator_type
 from holosoma.utils.torch_utils import to_torch
+
+
+def _observation_requires_depth_camera(config: ExperimentConfig | RunSimConfig) -> bool:
+    """Return whether observation terms require a robot-mounted depth camera."""
+    if not isinstance(config, ExperimentConfig):
+        return False
+
+    resolved_config = resolve_observation_term_overrides(config)
+    if getattr(resolved_config, "di_ae", None):
+        return True
+
+    observation_cfg = resolved_config.observation
+    if observation_cfg is None:
+        return False
+
+    depth_term_funcs = {
+        "holosoma.managers.observation.terms.wbt:DIAELatent",
+        "holosoma.managers.observation.terms.wbt:FrozenStudentBaseAction",
+    }
+    return any(
+        term_cfg.func in depth_term_funcs
+        for group_cfg in observation_cfg.groups.values()
+        for term_cfg in group_cfg.terms.values()
+    )
 
 
 def setup_simulator_imports(config: ExperimentConfig | RunSimConfig) -> None:
@@ -98,7 +122,7 @@ def setup_isaaclab_launcher(config: ExperimentConfig | RunSimConfig, device: str
 
     # Check if video recording is enabled and add --enable_cameras flag
     video_enabled = config.logger.video.enabled or config.logger.headless_recording
-    depth_camera_required = isinstance(config, ExperimentConfig) and bool(getattr(config, "di_ae", None))
+    depth_camera_required = _observation_requires_depth_camera(config)
     if video_enabled or depth_camera_required:
         args_cli.enable_cameras = True
 
@@ -264,6 +288,7 @@ def setup_simulation_environment(
 
     else:
         # Original ExperimentConfig path
+        config = resolve_observation_term_overrides(config)
         env_target = config.env_class
         tyro_env_config = get_tyro_env_config(config)
 

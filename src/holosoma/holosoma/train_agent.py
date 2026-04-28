@@ -13,7 +13,7 @@ from typing import Any, TypedDict, cast
 import tyro
 from loguru import logger
 
-from holosoma.config_types.env import get_tyro_env_config
+from holosoma.config_types.env import get_tyro_env_config, resolve_observation_term_overrides
 from holosoma.config_types.experiment import ExperimentConfig
 from holosoma.config_values.experiment import AnnotatedExperimentConfig
 from holosoma.utils.config_utils import CONFIG_NAME
@@ -229,6 +229,7 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
     """
 
     tyro_config = _resolve_multi_object_urdf_config(tyro_config)
+    tyro_config = resolve_observation_term_overrides(tyro_config)
 
     if training_context is not None:
         # Use the context's pre-initialized sim app

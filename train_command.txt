@@ -36,7 +36,7 @@ python src/holosoma/holosoma/train_agent.py \
     --algo.config.module-dict.actor.layer-config.hidden-dims '[1024,512,256,128]' \
     --algo.config.module-dict.critic.layer-config.hidden-dims '[1024,512,256,128]' \
     --simulator.config.scene.env-spacing 5.0 \
-    --logger.video.camera.offset '[3.0, -3.0, 1.5]' \
+    --logger.video.camera.offset '[3.0, -3.0, 1.5]'
 
 
 python src/holosoma/holosoma/train_agent.py \
@@ -59,7 +59,7 @@ python src/holosoma/holosoma/train_agent.py \
   --algo.config.num-updates-per-iteration 8 \
   --algo.config.batch-size 16384 \
   --teacher="/home/rllab/haechan/holosoma/logs/WholeBodyTracking/teacher_suitcase/model_17000.pt" \
-  --ir_ae="/home/rllab/haechan/holosoma/logs/CVAE/ir_pelvis/best.pt" \
+  --ir_ae="/home/rllab/haechan/holosoma/logs/AE/ae_suitcase/best.pt" \
   --ir_ae_body_source=all \
   --simulator.config.scene.env-spacing 5.0 \
   --logger.video.camera.offset '[3.0, -3.0, 1.5]'
@@ -73,7 +73,7 @@ python src/holosoma/holosoma/train_agent.py \
   --training.num-envs 8192 \
   --algo.config.save-interval 1000 \
   --algo.config.module-dict.actor.layer-config.hidden-dims '[512,256,128]' \
-  --student="/home/rllab/haechan/holosoma/logs/WholeBodyTracking/20260401_132916-student_ppo-locomotion/model_03000.pt" \
-  --di_ae="/home/rllab/haechan/holosoma/logs/CVAE/20260329_104353-cvae-di/best.pt" \
+  --student="/home/rllab/haechan/holosoma/logs/WholeBodyTracking/20260428_091823-student_ppo-locomotion/model_00000.pt" \
+  --di_ae="/home/rllab/haechan/holosoma/logs/AE/ae_suitcase/best.pt" \
   --simulator.config.scene.env-spacing 5.0 \
   --logger.video.camera.offset '[3.0, -3.0, 1.5]'

@@ -368,8 +368,9 @@ def _load_di_latent_model(checkpoint_path: str, device: str):
 class IRAELatent(ObservationTermBase):
     """Frozen latent encoder that turns a live ir_window into a latent vector.
 
-    Supports ``body_source`` parameter (or ``--ir_ae_body_source`` on the
-    command line) to select which rigid bodies contribute to the surface-feature
+    Supports ``body_source`` parameter (preferred) or legacy
+    ``--ir_ae_body_source`` on the command line to select which rigid bodies
+    contribute to the surface-feature
     vector ``ir_t``.  Accepted values:
 
     * ``"pelvis"`` – pelvis body only (13-D ``ir_t``)
@@ -388,7 +389,8 @@ class IRAELatent(ObservationTermBase):
         if not checkpoint_path:
             raise ValueError(
                 "Latent observation requires a checkpoint. "
-                "Pass `--ir_ae=/path/to/best.pt` or set observation term param `checkpoint_path`."
+                "Set observation term param `checkpoint_path` "
+                "(preferred) or pass legacy `--ir_ae=/path/to/best.pt`."
             )
 
         self.device = env.device
@@ -453,7 +455,8 @@ class IRAELatent(ObservationTermBase):
             raise ValueError(
                 f"body_source='{self.body_source}' produces {expected_ir_t_dim}-D ir_t "
                 f"but checkpoint expects {self.ir_t_dim}-D. "
-                "Check --ir_ae_body_source matches the latent model training body source."
+                "Check observation term param `body_source` "
+                "(or legacy `--ir_ae_body_source`) matches the latent model training body source."
             )
 
         # --- surface feature computer ----------------------------------------
@@ -559,28 +562,28 @@ class IRAELatent(ObservationTermBase):
         mu, _ = self.encoder.encode_ir(normalized_window, text_features)
         return mu
 
-class FrozenStudentBaseAction(ObservationTermBase):
-    """Frozen depth latent encoder + frozen student actor that produces a base action."""
+def _get_observation_compute_token(env: WholeBodyTrackingManager) -> int:
+    observation_manager = getattr(env, "observation_manager", None)
+    if observation_manager is None:
+        return -1
+    return int(getattr(observation_manager, "_compute_invocation_id", -1))
+
+
+class _DepthLatentObservationTermBase(ObservationTermBase):
+    """Shared depth-latent encoder runtime for residual observations."""
 
     def __init__(self, cfg, env: WholeBodyTrackingManager):
         super().__init__(cfg, env)
 
-        student_checkpoint = cfg.params.get("student_checkpoint") or getattr(env, "student", None)
-        if not student_checkpoint:
-            raise ValueError(
-                "Frozen student base-action observation requires a student checkpoint. "
-                "Pass `--student=/path/to/model.pt` or set observation term param `student_checkpoint`."
-            )
         di_checkpoint = cfg.params.get("checkpoint_path") or getattr(env, "di_ae", None)
         if not di_checkpoint:
             raise ValueError(
-                "Frozen student base-action observation requires a depth latent checkpoint. "
-                "Pass `--di_ae=/path/to/best.pt` or set observation term param `checkpoint_path`."
+                "Depth-latent observation requires a depth latent checkpoint. "
+                "Set observation term param `checkpoint_path` "
+                "(preferred) or pass legacy `--di_ae=/path/to/best.pt`."
             )
 
         self.device = env.device
-        self.student_obs_group = str(cfg.params.get("student_obs_group", "student_actor_obs"))
-        self.student_checkpoint = str(student_checkpoint)
         self.di_checkpoint = str(di_checkpoint)
         self.debug_save_depth_images = bool(cfg.params.get("debug_save_depth_images", False))
         self.debug_depth_save_interval = max(int(cfg.params.get("debug_depth_save_interval", 200)), 1)
@@ -634,11 +637,9 @@ class FrozenStudentBaseAction(ObservationTermBase):
             dtype=torch.float32,
         )
         self.depth_is_initialized = torch.zeros(env.num_envs, dtype=torch.bool, device=self.device)
-
-        self.student_actor = None
-        self.student_input_keys: list[str] = []
-        self.student_obs_dim: int | None = None
-        self.num_actions = env.robot_config.actions_dim
+        self._cached_compute_token = -1
+        self._cached_modify_history: bool | None = None
+        self._cached_latent: torch.Tensor | None = None
 
         logger.info(
             f"Loaded frozen di latent encoder from {self.di_checkpoint} with "
@@ -659,6 +660,9 @@ class FrozenStudentBaseAction(ObservationTermBase):
             self.depth_is_initialized.zero_()
             self._debug_episode_indices += 1
             self._debug_last_saved_episode_steps.fill_(-1)
+            self._cached_compute_token = -1
+            self._cached_modify_history = None
+            self._cached_latent = None
             return
 
         env_ids_tensor = env_ids.to(device=self.device, dtype=torch.long)
@@ -668,6 +672,9 @@ class FrozenStudentBaseAction(ObservationTermBase):
         self.depth_is_initialized[env_ids_tensor] = False
         self._debug_episode_indices[env_ids_tensor] += 1
         self._debug_last_saved_episode_steps[env_ids_tensor] = -1
+        self._cached_compute_token = -1
+        self._cached_modify_history = None
+        self._cached_latent = None
 
     def _resolve_debug_depth_dir(self, env: WholeBodyTrackingManager) -> Path | None:
         save_dir = getattr(getattr(env.simulator, "video_config", None), "save_dir", None)
@@ -739,57 +746,6 @@ class FrozenStudentBaseAction(ObservationTermBase):
                 )
                 self._debug_invalid_env_ids_logged = True
 
-    def _get_student_actor_obs(self, env: WholeBodyTrackingManager) -> torch.Tensor:
-        student_obs = env.observation_manager.compute_group(self.student_obs_group, modify_history=False)
-        if not isinstance(student_obs, torch.Tensor):
-            raise ValueError(f"Observation group '{self.student_obs_group}' must be concatenated for frozen student input.")
-        return student_obs
-
-    def _setup_student_actor(self, student_obs_dim: int) -> None:
-        if self.student_actor is not None:
-            if self.student_obs_dim != student_obs_dim:
-                raise ValueError(
-                    f"Frozen student obs dim changed from {self.student_obs_dim} to {student_obs_dim}; "
-                    "this likely means the observation preset no longer matches the student checkpoint."
-                )
-            return
-
-        student_config, _ = load_saved_experiment_config(CheckpointConfig(checkpoint=self.student_checkpoint))
-        student_payload = torch.load(self.student_checkpoint, map_location=self.device)
-        student_algo_config = getattr(student_config.algo, "config", None)
-        if student_algo_config is None or not hasattr(student_algo_config, "module_dict"):
-            raise ValueError("Student checkpoint must contain a PPO-style actor module configuration.")
-
-        student_actor_cfg = student_algo_config.module_dict.actor
-        self.student_input_keys = list(student_actor_cfg.input_dim)
-        expected_keys = {"actor_obs", "ir_ae_latent"}
-        actual_keys = set(self.student_input_keys)
-        if actual_keys != expected_keys:
-            raise ValueError(
-                f"Frozen student actor expects inputs {self.student_input_keys}; supported inputs are {sorted(expected_keys)}."
-            )
-
-        self.student_actor = setup_ppo_actor_module(
-            obs_dim_dict={"actor_obs": student_obs_dim, "ir_ae_latent": self.latent_dim},
-            module_config=student_actor_cfg,
-            num_actions=self.num_actions,
-            init_noise_std=getattr(student_algo_config, "init_noise_std", 1.0),
-            device=self.device,
-            history_length={"actor_obs": 1, "ir_ae_latent": 1},
-        )
-        self.student_actor.load_state_dict(student_payload["actor_model_state_dict"])
-        self.student_actor.eval()
-        for parameter in self.student_actor.parameters():
-            parameter.requires_grad_(False)
-        if hasattr(self.student_actor, "std"):
-            self.student_actor.std.requires_grad_(False)
-
-        self.student_obs_dim = student_obs_dim
-        logger.info(
-            f"Loaded frozen student actor from {self.student_checkpoint} with "
-            f"student_obs_dim={student_obs_dim}, latent_dim={self.latent_dim}"
-        )
-
     def _read_depth_frames(self, env: WholeBodyTrackingManager) -> torch.Tensor:
         depth_camera = getattr(env.simulator, "robot_depth_camera", None)
         if depth_camera is None:
@@ -848,6 +804,136 @@ class FrozenStudentBaseAction(ObservationTermBase):
         mu, _ = self.di_encoder.encode_di(normalized_window, text_features)
         return mu
 
+    def _compute_depth_latent(self, env: WholeBodyTrackingManager, *, modify_history: bool) -> torch.Tensor:
+        compute_token = _get_observation_compute_token(env)
+        if (
+            self._cached_latent is not None
+            and self._cached_compute_token == compute_token
+            and self._cached_modify_history == modify_history
+        ):
+            return self._cached_latent
+
+        motion_command = _get_motion_command_and_assert_type(env)
+        if not getattr(motion_command.motion, "has_object", False):
+            zero_latent = torch.zeros(env.num_envs, self.latent_dim, device=self.device)
+            self._cached_compute_token = compute_token
+            self._cached_modify_history = modify_history
+            self._cached_latent = zero_latent
+            return zero_latent
+
+        try:
+            depth_frames = self._read_depth_frames(env)
+        except RuntimeError:
+            if not modify_history:
+                zero_latent = torch.zeros(env.num_envs, self.latent_dim, device=self.device)
+                self._cached_compute_token = compute_token
+                self._cached_modify_history = modify_history
+                self._cached_latent = zero_latent
+                return zero_latent
+            raise
+        if modify_history:
+            self._maybe_save_debug_depth_frames(env, depth_frames)
+        depth_window = self._build_depth_window(depth_frames, modify_history=modify_history)
+        depth_latent = self._encode_di_latent(depth_window)
+        self._cached_compute_token = compute_token
+        self._cached_modify_history = modify_history
+        self._cached_latent = depth_latent
+        return depth_latent
+
+
+class DIAELatent(_DepthLatentObservationTermBase):
+    """Frozen depth latent encoder that exposes a live depth latent vector."""
+
+    @torch.no_grad()
+    def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:
+        modify_history = bool(kwargs.pop("modify_history", True))
+        return self._compute_depth_latent(env, modify_history=modify_history)
+
+
+class FrozenStudentBaseAction(ObservationTermBase):
+    """Frozen student actor that consumes a shared depth-latent observation."""
+
+    def __init__(self, cfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+
+        student_checkpoint = cfg.params.get("student_checkpoint") or getattr(env, "student", None)
+        if not student_checkpoint:
+            raise ValueError(
+                "Frozen student base-action observation requires a student checkpoint. "
+                "Set observation term param `student_checkpoint` "
+                "(preferred) or pass legacy `--student=/path/to/model.pt`."
+            )
+
+        self.device = env.device
+        self.student_obs_group = str(cfg.params.get("student_obs_group", "student_actor_obs"))
+        self.latent_obs_group = str(cfg.params.get("latent_obs_group", "di_ae_latent"))
+        self.student_checkpoint = str(student_checkpoint)
+        self.student_actor = None
+        self.student_input_keys: list[str] = []
+        self.student_obs_dim: int | None = None
+        self.student_latent_dim: int | None = None
+        self.num_actions = env.robot_config.actions_dim
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        return
+
+    def _get_student_actor_obs(self, env: WholeBodyTrackingManager) -> torch.Tensor:
+        student_obs = env.observation_manager.compute_group(self.student_obs_group, modify_history=False)
+        if not isinstance(student_obs, torch.Tensor):
+            raise ValueError(f"Observation group '{self.student_obs_group}' must be concatenated for frozen student input.")
+        return student_obs
+
+    def _setup_student_actor(self, student_obs_dim: int, latent_dim: int) -> None:
+        if self.student_actor is not None:
+            if self.student_obs_dim != student_obs_dim:
+                raise ValueError(
+                    f"Frozen student obs dim changed from {self.student_obs_dim} to {student_obs_dim}; "
+                    "this likely means the observation preset no longer matches the student checkpoint."
+                )
+            if self.student_latent_dim != latent_dim:
+                raise ValueError(
+                    f"Frozen student latent dim changed from {self.student_latent_dim} to {latent_dim}; "
+                    "this likely means the depth latent preset no longer matches the student checkpoint."
+                )
+            return
+
+        student_config, _ = load_saved_experiment_config(CheckpointConfig(checkpoint=self.student_checkpoint))
+        student_payload = torch.load(self.student_checkpoint, map_location=self.device)
+        student_algo_config = getattr(student_config.algo, "config", None)
+        if student_algo_config is None or not hasattr(student_algo_config, "module_dict"):
+            raise ValueError("Student checkpoint must contain a PPO-style actor module configuration.")
+
+        student_actor_cfg = student_algo_config.module_dict.actor
+        self.student_input_keys = list(student_actor_cfg.input_dim)
+        expected_keys = {"actor_obs", "ir_ae_latent"}
+        actual_keys = set(self.student_input_keys)
+        if actual_keys != expected_keys:
+            raise ValueError(
+                f"Frozen student actor expects inputs {self.student_input_keys}; supported inputs are {sorted(expected_keys)}."
+            )
+
+        self.student_actor = setup_ppo_actor_module(
+            obs_dim_dict={"actor_obs": student_obs_dim, "ir_ae_latent": latent_dim},
+            module_config=student_actor_cfg,
+            num_actions=self.num_actions,
+            init_noise_std=getattr(student_algo_config, "init_noise_std", 1.0),
+            device=self.device,
+            history_length={"actor_obs": 1, "ir_ae_latent": 1},
+        )
+        self.student_actor.load_state_dict(student_payload["actor_model_state_dict"])
+        self.student_actor.eval()
+        for parameter in self.student_actor.parameters():
+            parameter.requires_grad_(False)
+        if hasattr(self.student_actor, "std"):
+            self.student_actor.std.requires_grad_(False)
+
+        self.student_obs_dim = student_obs_dim
+        self.student_latent_dim = latent_dim
+        logger.info(
+            f"Loaded frozen student actor from {self.student_checkpoint} with "
+            f"student_obs_dim={student_obs_dim}, latent_dim={latent_dim}"
+        )
+
     def _build_student_input(self, student_obs: torch.Tensor, depth_latent: torch.Tensor) -> torch.Tensor:
         inputs = []
         for key in self.student_input_keys:
@@ -858,6 +944,20 @@ class FrozenStudentBaseAction(ObservationTermBase):
             else:
                 raise ValueError(f"Unsupported frozen student input key '{key}'.")
         return torch.cat(inputs, dim=1)
+
+    def _get_depth_latent(self, env: WholeBodyTrackingManager, *, modify_history: bool) -> torch.Tensor:
+        observation_manager = getattr(env, "observation_manager", None)
+        if observation_manager is None:
+            raise RuntimeError("Environment is missing an observation manager.")
+        if self.latent_obs_group not in observation_manager.cfg.groups:
+            raise ValueError(
+                "Frozen student base-action observation requires a depth-latent observation group. "
+                f"Missing group '{self.latent_obs_group}'."
+            )
+        depth_latent = observation_manager.compute_group(self.latent_obs_group, modify_history=modify_history)
+        if not isinstance(depth_latent, torch.Tensor):
+            raise ValueError(f"Observation group '{self.latent_obs_group}' must be concatenated for latent input.")
+        return depth_latent
 
     @torch.no_grad()
     def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:
@@ -871,17 +971,8 @@ class FrozenStudentBaseAction(ObservationTermBase):
             return zero_actions
 
         student_obs = self._get_student_actor_obs(env)
-        self._setup_student_actor(student_obs.shape[1])
-        try:
-            depth_frames = self._read_depth_frames(env)
-        except RuntimeError:
-            if not modify_history:
-                return torch.zeros(env.num_envs, self.num_actions, device=self.device)
-            raise
-        if modify_history:
-            self._maybe_save_debug_depth_frames(env, depth_frames)
-        depth_window = self._build_depth_window(depth_frames, modify_history=modify_history)
-        depth_latent = self._encode_di_latent(depth_window)
+        depth_latent = self._get_depth_latent(env, modify_history=modify_history)
+        self._setup_student_actor(student_obs.shape[1], depth_latent.shape[1])
         student_input = self._build_student_input(student_obs, depth_latent)
         base_action = self.student_actor.act_inference({"actor_obs": student_input})
 

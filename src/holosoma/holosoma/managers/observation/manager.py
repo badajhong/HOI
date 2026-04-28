@@ -36,6 +36,8 @@ class ObservationManager:
         self.env = env
         self.device = device
         self.logger = getattr(env, "logger", None)
+        self._compute_invocation_id = 0
+        self._compute_active_depth = 0
 
         # Storage for resolved functions and stateful terms
         self._term_funcs: dict[str, dict[str, Callable]] = {}
@@ -85,10 +87,15 @@ class ObservationManager:
         dict[str, torch.Tensor | dict[str, torch.Tensor]]
             Mapping from group names to observation tensors or dictionaries of tensors.
         """
-        obs_dict = {}
-        for group_name in self.cfg.groups:
-            obs_dict[group_name] = self.compute_group(group_name, modify_history=modify_history)
-        return obs_dict
+        self._compute_invocation_id += 1
+        self._compute_active_depth += 1
+        try:
+            obs_dict = {}
+            for group_name in self.cfg.groups:
+                obs_dict[group_name] = self.compute_group(group_name, modify_history=modify_history)
+            return obs_dict
+        finally:
+            self._compute_active_depth -= 1
 
     def compute_group(self, group_name: str, *, modify_history: bool = True) -> torch.Tensor | dict[str, torch.Tensor]:
         """Compute observations for a specific group.
@@ -110,37 +117,46 @@ class ObservationManager:
             Concatenated tensor when ``group.concatenate`` is ``True``; otherwise
             a dictionary of tensors keyed by term name.
         """
-        group_cfg = self.cfg.groups[group_name]
-        obs_tensors = {}
+        top_level_group_compute = self._compute_active_depth == 0
+        if top_level_group_compute:
+            self._compute_invocation_id += 1
+            self._compute_active_depth += 1
 
-        for term_name, term_cfg in group_cfg.terms.items():
-            # 1. Compute base observation
-            obs = self._compute_term(group_name, term_name, term_cfg, modify_history=modify_history)
+        try:
+            group_cfg = self.cfg.groups[group_name]
+            obs_tensors = {}
 
-            # 2. Apply noise (matches direct: noise before scaling)
-            if group_cfg.enable_noise and term_cfg.noise > 0:
-                obs = self._apply_noise(obs, term_cfg.noise)
+            for term_name, term_cfg in group_cfg.terms.items():
+                # 1. Compute base observation
+                obs = self._compute_term(group_name, term_name, term_cfg, modify_history=modify_history)
 
-            # 3. Apply scaling (matches direct: scale after noise)
-            obs = self._apply_scale(obs, term_cfg.scale)
+                # 2. Apply noise (matches direct: noise before scaling)
+                if group_cfg.enable_noise and term_cfg.noise > 0:
+                    obs = self._apply_noise(obs, term_cfg.noise)
 
-            # 4. Apply clipping (if specified)
-            if term_cfg.clip is not None:
-                obs = obs.clip(term_cfg.clip[0], term_cfg.clip[1])
+                # 3. Apply scaling (matches direct: scale after noise)
+                obs = self._apply_scale(obs, term_cfg.scale)
 
-            # 5. Handle history buffering
-            if group_cfg.history_length > 1:
-                obs = self._apply_history(group_name, term_name, obs, group_cfg, modify_buffer=modify_history)
+                # 4. Apply clipping (if specified)
+                if term_cfg.clip is not None:
+                    obs = obs.clip(term_cfg.clip[0], term_cfg.clip[1])
 
-            obs_tensors[term_name] = obs
+                # 5. Handle history buffering
+                if group_cfg.history_length > 1:
+                    obs = self._apply_history(group_name, term_name, obs, group_cfg, modify_buffer=modify_history)
 
-        # Concatenate or return dict
-        if group_cfg.concatenate:
-            # Concatenate in alphabetically sorted order (to match direct system behavior)
-            # Direct system does: sorted(obs_config) before concatenation
-            sorted_keys = sorted(obs_tensors.keys())
-            return torch.cat([obs_tensors[key] for key in sorted_keys], dim=-1)
-        return obs_tensors
+                obs_tensors[term_name] = obs
+
+            # Concatenate or return dict
+            if group_cfg.concatenate:
+                # Concatenate in alphabetically sorted order (to match direct system behavior)
+                # Direct system does: sorted(obs_config) before concatenation
+                sorted_keys = sorted(obs_tensors.keys())
+                return torch.cat([obs_tensors[key] for key in sorted_keys], dim=-1)
+            return obs_tensors
+        finally:
+            if top_level_group_compute:
+                self._compute_active_depth -= 1
 
     def _compute_term(
         self,

@@ -345,6 +345,47 @@ student_obs_w_object_terms = ObsGroupCfg(
     },
 )
 
+# Residual actor should condition on the actually executed previous action
+# (student base action + residual correction), not the frozen student's
+# previous base-action rollout.
+residual_actor_obs_w_object_terms = ObsGroupCfg(
+    concatenate=True,
+    enable_noise=False,
+    history_length=1,
+    terms={
+        "motion_command_joint_pos": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:motion_command_joint_pos",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "base_ang_vel": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:base_ang_vel",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "dof_pos": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:dof_pos",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "dof_vel": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:dof_vel",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "actions": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:actions",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "obj_type_one_hot": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:obj_type_one_hot",
+            scale=1.0,
+            noise=0.0,
+        ),
+    },
+)
+
 g1_29dof_wbt_observation_w_object_multi_student = ObservationManagerCfg(
     groups={
         "actor_obs": student_obs_w_object_terms,
@@ -361,7 +402,14 @@ g1_29dof_wbt_observation_w_object_multi_student = ObservationManagerCfg(
             terms={
                 "ir_ae_latent": ObsTermCfg(
                     func="holosoma.managers.observation.terms.wbt:IRAELatent",
-                    params={},
+                    params={
+                        # Preferred override path:
+                        # --observation.groups.ir_ae_latent.terms.ir_ae_latent.params.checkpoint_path=/path/to/best.pt
+                        "checkpoint_path": "",
+                        # Preferred override path:
+                        # --observation.groups.ir_ae_latent.terms.ir_ae_latent.params.body_source=all
+                        "body_source": "",
+                    },
                     scale=1.0,
                     noise=0.0,
                 )
@@ -372,12 +420,33 @@ g1_29dof_wbt_observation_w_object_multi_student = ObservationManagerCfg(
 
 g1_29dof_wbt_observation_w_object_multi_res = ObservationManagerCfg(
     groups={
+        "residual_actor_obs": residual_actor_obs_w_object_terms,
         "student_actor_obs": student_obs_w_object_terms,
         "critic_obs": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
             history_length=1,
             terms=critic_obs_w_object_terms,
+        ),
+        "di_ae_latent": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms={
+                "di_ae_latent": ObsTermCfg(
+                    func="holosoma.managers.observation.terms.wbt:DIAELatent",
+                    params={
+                        # Preferred override path:
+                        # --observation.groups.di_ae_latent.terms.di_ae_latent.params.checkpoint_path=/path/to/di_ae.pt
+                        "checkpoint_path": "",
+                        "debug_save_depth_images": False,
+                        "debug_depth_save_interval": 200,
+                        "debug_depth_env_ids": (0,),
+                    },
+                    scale=1.0,
+                    noise=0.0,
+                )
+            },
         ),
         "student_base_action": ObsGroupCfg(
             concatenate=True,
@@ -387,10 +456,11 @@ g1_29dof_wbt_observation_w_object_multi_res = ObservationManagerCfg(
                 "student_base_action": ObsTermCfg(
                     func="holosoma.managers.observation.terms.wbt:FrozenStudentBaseAction",
                     params={
+                        # Preferred override path:
+                        # --observation.groups.student_base_action.terms.student_base_action.params.student_checkpoint=/path/to/student.pt
+                        "student_checkpoint": "",
                         "student_obs_group": "student_actor_obs",
-                        "debug_save_depth_images": False,
-                        "debug_depth_save_interval": 200,
-                        "debug_depth_env_ids": (0,),
+                        "latent_obs_group": "di_ae_latent",
                     },
                     scale=1.0,
                     noise=0.0,

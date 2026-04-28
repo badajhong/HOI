@@ -8,6 +8,7 @@ from loguru import logger
 from pydantic.dataclasses import dataclass
 
 from holosoma.agents.base_algo.base_algo import BaseAlgo
+from holosoma.config_types.env import resolve_observation_term_overrides
 from holosoma.config_types.experiment import ExperimentConfig
 from holosoma.utils.config_utils import CONFIG_NAME
 from holosoma.utils.eval_utils import (
@@ -40,6 +41,8 @@ def run_eval_with_tyro(
     saved_config: ExperimentConfig,
     saved_wandb_path: str | None,
 ):
+    tyro_config = resolve_observation_term_overrides(tyro_config)
+
     # Use shared simulation environment setup
     env, device, simulation_app = setup_simulation_environment(tyro_config)
 
