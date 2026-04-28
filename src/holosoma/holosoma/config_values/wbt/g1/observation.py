@@ -354,13 +354,13 @@ g1_29dof_wbt_observation_w_object_multi_student = ObservationManagerCfg(
             history_length=3,
             terms=obs_teacher,
         ),
-        "ir_cvae_latent": ObsGroupCfg(
+        "ir_ae_latent": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
             history_length=1,
             terms={
-                "ir_cvae_latent": ObsTermCfg(
-                    func="holosoma.managers.observation.terms.wbt:IRCVAELatent",
+                "ir_ae_latent": ObsTermCfg(
+                    func="holosoma.managers.observation.terms.wbt:IRAELatent",
                     params={},
                     scale=1.0,
                     noise=0.0,

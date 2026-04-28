@@ -1,4 +1,10 @@
-# python src/holosoma/holosoma/ir_agent.py   --checkpoint=/home/rllab/haechan/holosoma/logs/WholeBodyTracking/teacher_suitcase/model_17000.pt   --num-eval-episodes=1000   --max-eval-steps=200
+# python src/holosoma/holosoma/ir_agent.py \
+#   --checkpoint=/home/rllab/haechan/holosoma/logs/WholeBodyTracking/teacher_suitcase/model_13000.pt \
+#   --surface-feature-body-source=all \
+#   --training.num-envs=32 \
+#   --num-eval-episodes=10 \
+#   --max-eval-steps=200 \
+#   --save-camera-images=False
 
 from __future__ import annotations
 
@@ -29,9 +35,9 @@ from holosoma.utils.experiment_paths import get_experiment_dir, get_timestamp
 from holosoma.utils.helpers import get_class
 from holosoma.utils.module_utils import get_holosoma_root
 from holosoma.utils.object_urdf import resolve_multi_object_urdf_config
-from holosoma.utils.rotations import quaternion_to_matrix
 from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.sim_utils import close_simulation_app, setup_simulation_environment
+from holosoma.utils.surface_features import SurfaceFeatureComputer
 from holosoma.utils.tyro_utils import TYRO_CONIFG
 
 
@@ -40,24 +46,40 @@ REALSENSE_XML_FILE = "g1/g1_29dof_realsense.xml"
 REALSENSE_CAMERA_BODY_LINK = "realsense_d435_link"
 DEPTH_CAMERA_FRAME_LINK = "realsense_d435_depth_optical_frame"
 DEPTH_CAMERA_PRIM_NAME = "realsense_d435_depth"
+# IsaacSim camera config uses (width, height). Saved depth_window tensors use
+# [window, height, width], so telemetry stores both conventions explicitly.
 DEPTH_RESOLUTION = (80, 60)
-IR_U_T_MODE = "object_centric_hybrid_v1"
-IR_U_T_COMPONENT_NAMES = (
-    "r_obj_x",
-    "r_obj_y",
-    "r_obj_z",
-    "v_close_obj",
-    "v_orbit_obj_x",
-    "v_orbit_obj_y",
-    "v_orbit_obj_z",
-    "obj_ori_6d_0",
-    "obj_ori_6d_1",
-    "obj_ori_6d_2",
-    "obj_ori_6d_3",
-    "obj_ori_6d_4",
-    "obj_ori_6d_5",
+IR_SURFACE_FEATURE_COMPONENT_NAMES = (
+    "phi",
+    "grad_phi_x",
+    "grad_phi_y",
+    "grad_phi_z",
+    "v_t_x",
+    "v_t_y",
+    "v_t_z",
+    "v_norm_x",
+    "v_norm_y",
+    "v_norm_z",
+    "v_tan_x",
+    "v_tan_y",
+    "v_tan_z",
 )
-IR_FEATURE_EPS = 1e-6
+IR_SURFACE_FEATURE_BODY_SOURCE_CHOICES = ("pelvis", "hands", "all")
+IR_SURFACE_FEATURE_BODY_SOURCE_BASE_CHOICES = ("pelvis", "hands")
+IR_SURFACE_FEATURE_BODY_SOURCE_ALL_RESOLVED = ("hands", "pelvis")
+IR_HAND_BODY_LABELS = ("left_hand", "right_hand")
+IR_LEFT_HAND_BODY_NAME_CANDIDATES = (
+    "left_hand_link",
+    "left_wrist_yaw_link",
+    "left_wrist_pitch_link",
+    "left_wrist_roll_link",
+)
+IR_RIGHT_HAND_BODY_NAME_CANDIDATES = (
+    "right_hand_link",
+    "right_wrist_yaw_link",
+    "right_wrist_pitch_link",
+    "right_wrist_roll_link",
+)
 
 
 @dataclass(frozen=True)
@@ -69,19 +91,56 @@ class IRCheckpointConfig:
     """Maximum number of evaluation steps inside a single episode."""
 
     num_eval_episodes: int | None = None
-    """Total number of episodes to collect before ending the IR run. None means keep running until manually stopped."""
+    """Number of episodes to collect per environment before ending the IR run. None means keep running until manually stopped."""
 
-    pelvis_surface_feature_log_env_ids: tuple[int, ...] = (0,)
-    """Environment ids to print for live IR u_t features during playback."""
+    surface_feature_log_env_ids: tuple[int, ...] = (0,)
+    """Environment ids to print for live IR ir_t features during playback."""
 
-    pelvis_body_name: str = "pelvis"
-    """Rigid body name from the simulated robot to use as x_t."""
+    surface_feature_body_source: str = "pelvis"
+    """Surface-feature body source selection. Supported values: 'pelvis', 'hands', or 'all'."""
 
-    pelvis_surface_feature_mesh_mode: str = "box"
-    """Deprecated. Surface-mesh mode is ignored; IR u_t now uses object-centric kinematic features."""
+    surface_feature_body_name: str = "pelvis"
+    """Rigid body name to use when `surface_feature_body_source` includes 'pelvis'."""
+
+    left_hand_body_name: str | None = None
+    """Optional override for the left-hand rigid body when `surface_feature_body_source` includes 'hands'."""
+
+    right_hand_body_name: str | None = None
+    """Optional override for the right-hand rigid body when `surface_feature_body_source` includes 'hands'."""
+
+    save_camera_images: bool = False
+    """Save per-step depth camera preview images under the IR telemetry folder."""
 
     show_camera_marker: bool = True
     """Deprecated. Camera marker visualization was removed from ir_agent.py and this flag has no effect."""
+
+
+def _normalize_bool_value(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    raise ValueError(f"Unsupported boolean value '{value}'. Expected true/false.")
+
+
+def _normalize_ir_cli_bool_equals_args(args: list[str]) -> list[str]:
+    """Allow `--flag=True/False` spellings for Tyro bool flags used by IR CLI."""
+    bool_flags = ("--save-camera-images", "--show-camera-marker")
+    normalized_args: list[str] = []
+    for arg in args:
+        rewritten = False
+        for flag in bool_flags:
+            prefix = f"{flag}="
+            if not arg.startswith(prefix):
+                continue
+            flag_value = _normalize_bool_value(arg[len(prefix) :])
+            normalized_args.append(flag if flag_value else f"--no-{flag[2:]}")
+            rewritten = True
+            break
+        if not rewritten:
+            normalized_args.append(arg)
+    return normalized_args
 
 
 @dataclasses.dataclass(frozen=True)
@@ -198,49 +257,98 @@ def _to_numpy_float32(value) -> np.ndarray:
     return np.asarray(value, dtype=np.float32)
 
 
-def _rotation_matrix_to_6d(rotation_matrix: torch.Tensor) -> torch.Tensor:
-    return rotation_matrix[..., :2].reshape(rotation_matrix.shape[0], -1)
+def _ir_t_mode_for_body_source(body_source: str) -> str:
+    return f"surface_phi_grad_v_vnorm_vtan_{body_source}_v1"
 
 
-def _safe_normalize_vectors(vectors: torch.Tensor, eps: float = IR_FEATURE_EPS) -> tuple[torch.Tensor, torch.Tensor]:
-    norms = torch.linalg.norm(vectors, dim=-1, keepdim=True)
-    normalized = torch.where(norms > eps, vectors / norms.clamp_min(eps), torch.zeros_like(vectors))
-    return normalized, norms
+def _canonical_surface_feature_body_source(body_sources: tuple[str, ...]) -> str:
+    if body_sources == ("pelvis",):
+        return "pelvis"
+    if body_sources == ("hands",):
+        return "hands"
+    if body_sources == IR_SURFACE_FEATURE_BODY_SOURCE_ALL_RESOLVED:
+        return "all"
+    return ",".join(body_sources)
 
 
-def _compute_object_centric_ir_features(
-    pelvis_pos_w: torch.Tensor,
-    pelvis_lin_vel_w: torch.Tensor,
-    object_pos_w: torch.Tensor,
-    object_quat_w: torch.Tensor,
-    object_lin_vel_w: torch.Tensor,
-) -> dict[str, torch.Tensor]:
-    object_rotation = quaternion_to_matrix(object_quat_w, w_last=True)
-    object_rotation_inv = object_rotation.transpose(1, 2)
+def _parse_surface_feature_body_sources(body_source: str) -> tuple[str, ...]:
+    normalized = body_source.strip().lower()
+    if not normalized:
+        raise ValueError("surface_feature_body_source must not be empty.")
 
-    rel_pos_w = pelvis_pos_w - object_pos_w
-    rel_vel_w = pelvis_lin_vel_w - object_lin_vel_w
+    if normalized in IR_SURFACE_FEATURE_BODY_SOURCE_BASE_CHOICES:
+        return (normalized,)
+    if normalized == "all":
+        return IR_SURFACE_FEATURE_BODY_SOURCE_ALL_RESOLVED
 
-    r_obj = torch.bmm(object_rotation_inv, rel_pos_w.unsqueeze(-1)).squeeze(-1)
-    v_rel_obj = torch.bmm(object_rotation_inv, rel_vel_w.unsqueeze(-1)).squeeze(-1)
+    # Backward-compatible alias for older comma-separated combinations such as "hands,pelvis".
+    parts = [part.strip() for part in normalized.split(",") if part.strip()]
+    invalid_parts = [part for part in parts if part not in IR_SURFACE_FEATURE_BODY_SOURCE_BASE_CHOICES]
+    if invalid_parts or not parts:
+        raise ValueError(
+            "surface_feature_body_source contains unsupported values "
+            f"{invalid_parts}. Expected entries from {IR_SURFACE_FEATURE_BODY_SOURCE_CHOICES}."
+        )
 
-    n_obj, d_center = _safe_normalize_vectors(r_obj)
-    radial_velocity_obj = torch.sum(v_rel_obj * n_obj, dim=-1, keepdim=True)
-    v_close = -radial_velocity_obj
-    v_orbit_obj = v_rel_obj - radial_velocity_obj * n_obj
-    obj_ori_6d = _rotation_matrix_to_6d(object_rotation)
-    u_t = torch.cat([r_obj, v_close, v_orbit_obj, obj_ori_6d], dim=-1)
+    ordered_unique_parts: list[str] = []
+    for part in parts:
+        if part not in ordered_unique_parts:
+            ordered_unique_parts.append(part)
+    return tuple(ordered_unique_parts)
 
-    return {
-        "r_obj": r_obj,
-        "d_center": d_center,
-        "n_obj": n_obj,
-        "v_rel_obj": v_rel_obj,
-        "v_close": v_close,
-        "v_orbit_obj": v_orbit_obj,
-        "obj_ori_6d": obj_ori_6d,
-        "u_t": u_t,
-    }
+
+def _ir_t_mode_for_body_sources(body_sources: tuple[str, ...]) -> str:
+    return _ir_t_mode_for_body_source(_canonical_surface_feature_body_source(body_sources))
+
+
+def _ir_t_component_names_for_body_source(body_source: str) -> tuple[str, ...]:
+    if body_source == "pelvis":
+        return IR_SURFACE_FEATURE_COMPONENT_NAMES
+    if body_source == "hands":
+        return tuple(
+            f"{body_label}_{component_name}"
+            for body_label in IR_HAND_BODY_LABELS
+            for component_name in IR_SURFACE_FEATURE_COMPONENT_NAMES
+        )
+    raise ValueError(
+        f"Unsupported surface_feature_body_source '{body_source}'. Expected one of {IR_SURFACE_FEATURE_BODY_SOURCE_CHOICES}."
+    )
+
+
+def _ir_t_component_names_for_body_sources(body_sources: tuple[str, ...]) -> tuple[str, ...]:
+    if len(body_sources) == 1:
+        return _ir_t_component_names_for_body_source(body_sources[0])
+
+    component_names: list[str] = []
+    for body_source in body_sources:
+        if body_source == "pelvis":
+            component_names.extend(f"pelvis_{component_name}" for component_name in IR_SURFACE_FEATURE_COMPONENT_NAMES)
+            continue
+        component_names.extend(_ir_t_component_names_for_body_source(body_source))
+    return tuple(component_names)
+
+
+def _resolve_surface_feature_body_name(
+    available_body_names: list[str],
+    explicit_name: str | None,
+    candidate_names: tuple[str, ...],
+    body_label: str,
+) -> str:
+    if explicit_name is not None:
+        if explicit_name not in available_body_names:
+            raise RuntimeError(
+                f"Configured {body_label} body '{explicit_name}' was not found in simulator body names: {available_body_names}."
+            )
+        return explicit_name
+
+    for candidate_name in candidate_names:
+        if candidate_name in available_body_names:
+            return candidate_name
+
+    raise RuntimeError(
+        f"Could not auto-resolve the {body_label} body name. Tried {list(candidate_names)} against available bodies: "
+        f"{available_body_names}"
+    )
 
 
 def _compose_local_transform(
@@ -351,27 +459,41 @@ class IRTelemetryRecorder:
         self.telemetry_dir = self.log_dir / "telemetry"
         self.depth_image_dir = self.telemetry_dir / "depth_images"
         self.window_size = 5
-        self.log_env_ids = set(ir_cfg.pelvis_surface_feature_log_env_ids)
-        self.pelvis_body_name = ir_cfg.pelvis_body_name
+
+        self.log_env_ids = set(ir_cfg.surface_feature_log_env_ids)
+        self.surface_feature_body_sources = _parse_surface_feature_body_sources(ir_cfg.surface_feature_body_source)
+        self.surface_feature_body_source = _canonical_surface_feature_body_source(self.surface_feature_body_sources)
+        self.surface_feature_body_name = ir_cfg.surface_feature_body_name
+        self.left_hand_body_name = ir_cfg.left_hand_body_name
+        self.right_hand_body_name = ir_cfg.right_hand_body_name
         self.max_eval_steps = ir_cfg.max_eval_steps
         self.num_eval_episodes = ir_cfg.num_eval_episodes
         self.depth_resolution = DEPTH_RESOLUTION
         self.depth_camera_mount = depth_camera_mount
+        self.save_camera_images = ir_cfg.save_camera_images
         self.show_camera_marker = ir_cfg.show_camera_marker
-        self.u_t_mode = IR_U_T_MODE
-        self.u_t_component_names = list(IR_U_T_COMPONENT_NAMES)
-        self.deprecated_mesh_mode = ir_cfg.pelvis_surface_feature_mesh_mode
+        self.ir_t_mode = _ir_t_mode_for_body_sources(self.surface_feature_body_sources)
+        self.ir_t_component_names = list(_ir_t_component_names_for_body_sources(self.surface_feature_body_sources))
 
-        self._pelvis_body_index: int | None = None
+        body_labels: list[str] = []
+        for body_source in self.surface_feature_body_sources:
+            if body_source == "pelvis":
+                body_labels.append("pelvis")
+            else:
+                body_labels.extend(IR_HAND_BODY_LABELS)
+        self._surface_feature_body_labels = tuple(body_labels)
+        self._surface_feature_body_names: tuple[str, ...] = ()
+        self._surface_feature_body_indices: tuple[int, ...] = ()
+        self._surface_feature_computer: SurfaceFeatureComputer | None = None
         self._run_complete = False
 
         self._episode_indices: list[int] = []
         self._episode_steps: list[int] = []
-        self._u_windows: list[list[list[float]]] = []
+        self._ir_windows: list[list[list[float]]] = []
         self._depth_windows: list[list[list[list[float]]]] = []
         self._episode_entries: list[list[dict]] = []
         self._index_entries: list[dict] = []
-        self._completed_episode_count = 0
+        self._completed_episode_counts: list[int] = []
 
     @property
     def run_complete(self) -> bool:
@@ -385,9 +507,126 @@ class IRTelemetryRecorder:
         object_type_ids = motion_command.object_type_ids.detach().cpu().tolist()
         return [id_to_key.get(int(type_id)) for type_id in object_type_ids]
 
+    def _surface_feature_body_name_map(self) -> dict[str, str]:
+        return {
+            body_label: body_name
+            for body_label, body_name in zip(self._surface_feature_body_labels, self._surface_feature_body_names)
+        }
+
+    def _resolve_surface_feature_bodies(self) -> tuple[tuple[str, ...], tuple[int, ...]]:
+        available_body_names = self.env.body_names
+        resolved_body_names: list[str] = []
+        resolved_body_indices: list[int] = []
+
+        for body_source in self.surface_feature_body_sources:
+            if body_source == "pelvis":
+                if self.surface_feature_body_name not in available_body_names:
+                    raise RuntimeError(
+                        f"Configured surface feature body '{self.surface_feature_body_name}' was not found in simulator body names: "
+                        f"{available_body_names}."
+                    )
+                resolved_body_names.append(self.surface_feature_body_name)
+                resolved_body_indices.append(available_body_names.index(self.surface_feature_body_name))
+                continue
+
+            left_hand_body_name = _resolve_surface_feature_body_name(
+                available_body_names=available_body_names,
+                explicit_name=self.left_hand_body_name,
+                candidate_names=IR_LEFT_HAND_BODY_NAME_CANDIDATES,
+                body_label="left hand",
+            )
+            right_hand_body_name = _resolve_surface_feature_body_name(
+                available_body_names=available_body_names,
+                explicit_name=self.right_hand_body_name,
+                candidate_names=IR_RIGHT_HAND_BODY_NAME_CANDIDATES,
+                body_label="right hand",
+            )
+            if left_hand_body_name == right_hand_body_name:
+                raise RuntimeError(
+                    f"Left and right hand body names resolved to the same body '{left_hand_body_name}'. "
+                    "Please provide explicit --left-hand-body-name and --right-hand-body-name values."
+                )
+
+            resolved_body_names.extend((left_hand_body_name, right_hand_body_name))
+            resolved_body_indices.extend(
+                (available_body_names.index(left_hand_body_name), available_body_names.index(right_hand_body_name))
+            )
+
+        return tuple(resolved_body_names), tuple(resolved_body_indices)
+
+    def _compute_surface_feature_batches(
+        self,
+        motion_command,
+        object_keys: list[str | None],
+    ) -> dict[str, dict[str, torch.Tensor]]:
+        if self._surface_feature_computer is None:
+            raise RuntimeError("IR surface feature computer was not initialized before evaluation stepping.")
+
+        body_feature_batches: dict[str, dict[str, torch.Tensor]] = {}
+        for body_label, body_index in zip(self._surface_feature_body_labels, self._surface_feature_body_indices):
+            body_pos_w = self.env.simulator._rigid_body_pos[:, body_index, :]
+            body_lin_vel_w = self.env.simulator._rigid_body_vel[:, body_index, :]
+            body_feature_batches[body_label] = self._surface_feature_computer.compute_batch(
+                body_pos_w=body_pos_w,
+                body_lin_vel_w=body_lin_vel_w,
+                object_pos_w=motion_command.simulator_object_pos_w,
+                object_quat_w=motion_command.simulator_object_quat_w,
+                object_keys=object_keys,
+            )
+        return body_feature_batches
+
+    def _combine_surface_feature_batches(
+        self,
+        body_feature_batches: dict[str, dict[str, torch.Tensor]],
+    ) -> dict[str, torch.Tensor]:
+        if self.surface_feature_body_sources == ("pelvis",):
+            return body_feature_batches["pelvis"]
+
+        ir_t_parts: list[torch.Tensor] = []
+        for body_source in self.surface_feature_body_sources:
+            if body_source == "pelvis":
+                ir_t_parts.append(body_feature_batches["pelvis"]["ir_t"])
+                continue
+            ir_t_parts.append(body_feature_batches["left_hand"]["ir_t"])
+            ir_t_parts.append(body_feature_batches["right_hand"]["ir_t"])
+
+        combined_ir_t = torch.cat(ir_t_parts, dim=-1)
+        combined_features: dict[str, torch.Tensor] = {"ir_t": combined_ir_t}
+        for body_label, body_features in body_feature_batches.items():
+            for feature_name, feature_tensor in body_features.items():
+                if feature_name == "ir_t":
+                    continue
+                combined_features[f"{body_label}_{feature_name}"] = feature_tensor
+        return combined_features
+
+    def _surface_feature_entry_for_env(
+        self,
+        body_name: str,
+        body_features: dict[str, torch.Tensor],
+        env_id: int,
+    ) -> dict[str, float | list[float] | str]:
+        return {
+            "body_name": body_name,
+            "phi": float(body_features["phi"][env_id, 0].item()),
+            "grad_phi": [float(v) for v in body_features["grad_phi"][env_id].tolist()],
+            "v_t": [float(v) for v in body_features["v_t"][env_id].tolist()],
+            "v_norm": [float(v) for v in body_features["v_norm"][env_id].tolist()],
+            "v_tan": [float(v) for v in body_features["v_tan"][env_id].tolist()],
+        }
+
+    def _env_episode_target_reached(self, env_id: int) -> bool:
+        return self.num_eval_episodes is not None and self._completed_episode_counts[env_id] >= self.num_eval_episodes
+
+    def _all_episode_targets_reached(self) -> bool:
+        return (
+            self.num_eval_episodes is not None
+            and bool(self._completed_episode_counts)
+            and all(count >= self.num_eval_episodes for count in self._completed_episode_counts)
+        )
+
     def _reset_env_buffers(self, env_id: int) -> None:
         self._episode_steps[env_id] = 0
-        self._u_windows[env_id] = []
+        self._ir_windows[env_id] = []
         self._depth_windows[env_id] = []
         self._episode_entries[env_id] = []
         self._episode_indices[env_id] += 1
@@ -471,6 +710,13 @@ class IRTelemetryRecorder:
         depth_array = np.nan_to_num(depth_array, nan=0.0, posinf=0.0, neginf=0.0)
         return depth_array.tolist()
 
+    def _depth_frame_shape_hw(self) -> tuple[int, int]:
+        return (int(self.depth_resolution[1]), int(self.depth_resolution[0]))
+
+    def _depth_window_shape_t_h_w(self) -> tuple[int, int, int]:
+        height, width = self._depth_frame_shape_hw()
+        return (self.window_size, height, width)
+
     def _export_episode(self, episode_data: dict) -> None:
         file_name = self._episode_file_name(episode_data["env_id"], episode_data["episode_index"])
         file_path = self.telemetry_dir / file_name
@@ -496,27 +742,41 @@ class IRTelemetryRecorder:
             "termination_reason": reason,
             "max_eval_steps": self.max_eval_steps,
             "num_eval_episodes": self.num_eval_episodes,
-            "pelvis_body_name": self.pelvis_body_name,
-            "u_t_mode": self.u_t_mode,
-            "u_t_components": self.u_t_component_names,
-            "u_t_dim": len(self.u_t_component_names),
-            "deprecated_mesh_mode": self.deprecated_mesh_mode,
+            "num_eval_episodes_scope": "per_env",
+            "surface_feature_body_source": self.surface_feature_body_source,
+            "surface_feature_body_sources": list(self.surface_feature_body_sources),
+            "surface_feature_body_names": self._surface_feature_body_name_map(),
+            "surface_feature_body_name": self.surface_feature_body_name,
+            "left_hand_body_name": self.left_hand_body_name,
+            "right_hand_body_name": self.right_hand_body_name,
+            "ir_t_mode": self.ir_t_mode,
+            "ir_t_components": self.ir_t_component_names,
+            "ir_t_dim": len(self.ir_t_component_names),
+            "save_camera_images": self.save_camera_images,
+            # Legacy field: camera config order is [width, height].
             "depth_resolution": list(self.depth_resolution),
+            "depth_resolution_order": "width_height",
+            "depth_frame_shape": list(self._depth_frame_shape_hw()),
+            "depth_frame_shape_order": "height_width",
+            "depth_window_shape": list(self._depth_window_shape_t_h_w()),
+            "depth_window_shape_order": "time_height_width",
             "depth_camera_prim_name": DEPTH_CAMERA_PRIM_NAME,
             "depth_camera_mount": self.depth_camera_mount.to_json_dict(),
             "completed_at_global_step": global_step,
             "entries": self._episode_entries[env_id],
         }
         self._export_episode(episode_data)
-        self._completed_episode_count += 1
+        self._completed_episode_counts[env_id] += 1
         self._reset_env_buffers(env_id)
 
-        if self.num_eval_episodes is not None and self._completed_episode_count >= self.num_eval_episodes:
+        if self._all_episode_targets_reached():
             self._run_complete = True
 
+        total_completed = sum(self._completed_episode_counts)
         logger.info(
             f"[ir_episode_complete] env={env_id} episode={episode_data['episode_index']} "
-            f"steps={episode_data['num_steps']} reason={reason} total_completed={self._completed_episode_count}"
+            f"steps={episode_data['num_steps']} reason={reason} "
+            f"env_completed={self._completed_episode_counts[env_id]} total_completed={total_completed}"
         )
 
     def on_pre_evaluate_policy(self) -> None:
@@ -525,16 +785,20 @@ class IRTelemetryRecorder:
             raise RuntimeError("motion_command not found; IR telemetry requires a motion command.")
         if not getattr(motion_command.motion, "has_object", False):
             raise RuntimeError("IR telemetry requires a motion with an object.")
-        if self.pelvis_body_name not in self.env.body_names:
-            raise RuntimeError(
-                f"Pelvis body '{self.pelvis_body_name}' was not found in simulator body names: {self.env.body_names}."
-            )
         if self.max_eval_steps is not None and self.max_eval_steps <= 0:
             raise ValueError(f"max_eval_steps must be positive when provided, got {self.max_eval_steps}")
         if self.num_eval_episodes is not None and self.num_eval_episodes <= 0:
             raise ValueError(f"num_eval_episodes must be positive when provided, got {self.num_eval_episodes}")
 
-        self._pelvis_body_index = self.env.body_names.index(self.pelvis_body_name)
+        self._surface_feature_body_names, self._surface_feature_body_indices = self._resolve_surface_feature_bodies()
+        try:
+            self._surface_feature_computer = SurfaceFeatureComputer.from_object_config(
+                self.env.robot_config.object,
+                mesh_mode="full",
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Failed to initialize GPU IR surface feature computer: {exc}") from exc
+
         depth_camera = self._get_simulator_depth_camera()
         self.depth_resolution = (int(depth_camera.cfg.width), int(depth_camera.cfg.height))
 
@@ -551,23 +815,26 @@ class IRTelemetryRecorder:
                 f"Simulator depth camera prims were not found on the live stage: {missing_prim_paths}"
             )
         self.telemetry_dir.mkdir(parents=True, exist_ok=True)
-        self.depth_image_dir.mkdir(parents=True, exist_ok=True)
+        if self.save_camera_images:
+            self.depth_image_dir.mkdir(parents=True, exist_ok=True)
 
         self._episode_indices = [0 for _ in range(self.env.num_envs)]
         self._episode_steps = [0 for _ in range(self.env.num_envs)]
-        self._u_windows = [[] for _ in range(self.env.num_envs)]
+        self._ir_windows = [[] for _ in range(self.env.num_envs)]
         self._depth_windows = [[] for _ in range(self.env.num_envs)]
         self._episode_entries = [[] for _ in range(self.env.num_envs)]
         self._index_entries = []
-        self._completed_episode_count = 0
+        self._completed_episode_counts = [0 for _ in range(self.env.num_envs)]
         self._run_complete = False
         self._write_index_file()
 
         logger.info(
-            f"IR telemetry enabled for body '{self.pelvis_body_name}' with window_size={self.window_size}, "
-            f"u_t_mode={self.u_t_mode}, u_t_dim={len(self.u_t_component_names)}, "
-            f"deprecated_mesh_mode={self.deprecated_mesh_mode}, max_eval_steps={self.max_eval_steps}, "
-            f"num_eval_episodes={self.num_eval_episodes}, depth_resolution={self.depth_resolution}."
+            f"IR telemetry enabled for body_source='{self.surface_feature_body_source}' "
+            f"body_names={list(self._surface_feature_body_names)} with window_size={self.window_size}, "
+            f"ir_t_mode={self.ir_t_mode}, ir_t_dim={len(self.ir_t_component_names)}, "
+            f"max_eval_steps={self.max_eval_steps}, "
+            f"num_eval_episodes_per_env={self.num_eval_episodes}, save_camera_images={self.save_camera_images}, "
+            f"depth_resolution_wh={self.depth_resolution}, depth_window_shape_t_h_w={self._depth_window_shape_t_h_w()}."
         )
         logger.info(
             "Loaded depth camera mount from URDF: "
@@ -580,77 +847,127 @@ class IRTelemetryRecorder:
         logger.info(
             f"IR depth camera is managed by IsaacSim scene sensor at URDF optical-frame prim: {self._camera_parent_prim_path(0)}"
         )
-        if self.deprecated_mesh_mode:
-            logger.info(
-                "pelvis_surface_feature_mesh_mode is deprecated and ignored; "
-                "IR telemetry now saves object-centric hybrid u_t features."
-            )
         if self.show_camera_marker:
             logger.info("show_camera_marker is deprecated and ignored; marker visualization was removed from ir_agent.py.")
 
     def on_pre_eval_env_step(self, actor_state: dict) -> dict:
-        if self._pelvis_body_index is None or self._run_complete:
+        if not self._surface_feature_body_indices or self._run_complete:
             return actor_state
 
         motion_command = self.env.command_manager.get_state("motion_command")
         if motion_command is None:
             return actor_state
-
-        pelvis_pos_w = self.env.simulator._rigid_body_pos[:, self._pelvis_body_index, :]
-        pelvis_lin_vel_w = self.env.simulator._rigid_body_vel[:, self._pelvis_body_index, :]
         object_keys = self._object_keys_for_envs(motion_command, self.env.num_envs)
-        features = _compute_object_centric_ir_features(
-            pelvis_pos_w=pelvis_pos_w,
-            pelvis_lin_vel_w=pelvis_lin_vel_w,
-            object_pos_w=motion_command.simulator_object_pos_w,
-            object_quat_w=motion_command.simulator_object_quat_w,
-            object_lin_vel_w=motion_command.simulator_object_lin_vel_w,
-        )
+        body_feature_batches = self._compute_surface_feature_batches(motion_command=motion_command, object_keys=object_keys)
+        features = self._combine_surface_feature_batches(body_feature_batches)
 
-        actor_state["ir_u_features"] = features
+        # ir_t: [num_envs, 13] for pelvis, [num_envs, 26] for hands, or concatenated across requested sources.
+        # ir_window: [5, ir_t_dim] after the unchanged windowing logic below.
+        actor_state["ir_features"] = features
+        actor_state["ir_surface_features_by_body"] = body_feature_batches
         actor_state["ir_object_keys"] = object_keys
         global_step = int(actor_state.get("step", -1))
 
         for env_id in range(self.env.num_envs):
-            current_u_t = [float(v) for v in features["u_t"][env_id].tolist()]
-            current_u_window = self._build_window(self._u_windows[env_id], current_u_t)
+            if self._env_episode_target_reached(env_id):
+                continue
+
+            current_ir_t = [float(v) for v in features["ir_t"][env_id].tolist()]
+            current_ir_window = self._build_window(self._ir_windows[env_id], current_ir_t)
             current_depth_frame = self._read_depth_frame(env_id)
             current_depth_window = self._build_window(self._depth_windows[env_id], current_depth_frame)
-            depth_image_file = self._save_depth_preview(
-                env_id=env_id,
-                episode_index=self._episode_indices[env_id],
-                episode_step=self._episode_steps[env_id],
-                depth_frame=current_depth_frame,
-            )
+            depth_image_file: str | None = None
+            if self.save_camera_images:
+                depth_image_file = self._save_depth_preview(
+                    env_id=env_id,
+                    episode_index=self._episode_indices[env_id],
+                    episode_step=self._episode_steps[env_id],
+                    depth_frame=current_depth_frame,
+                )
             entry = {
                 "global_step": global_step,
                 "episode_index": self._episode_indices[env_id],
                 "episode_step": self._episode_steps[env_id],
                 "env_id": env_id,
                 "object_key": object_keys[env_id],
-                "r_obj": [float(v) for v in features["r_obj"][env_id].tolist()],
-                "d_center": float(features["d_center"][env_id, 0].item()),
-                "n_obj": [float(v) for v in features["n_obj"][env_id].tolist()],
-                "v_rel_obj": [float(v) for v in features["v_rel_obj"][env_id].tolist()],
-                "v_close": float(features["v_close"][env_id, 0].item()),
-                "v_orbit_obj": [float(v) for v in features["v_orbit_obj"][env_id].tolist()],
-                "obj_ori_6d": [float(v) for v in features["obj_ori_6d"][env_id].tolist()],
-                "u_t": current_u_t,
-                "u_window": current_u_window,
+                "surface_feature_body_source": self.surface_feature_body_source,
+                "surface_feature_body_sources": list(self.surface_feature_body_sources),
+                "ir_t": current_ir_t,
+                "ir_window": current_ir_window,
                 "depth_window": current_depth_window,
                 "depth_image_file": depth_image_file,
             }
+            if self.surface_feature_body_sources == ("pelvis",):
+                entry.update(
+                    self._surface_feature_entry_for_env(
+                        body_name=self._surface_feature_body_names[0],
+                        body_features=body_feature_batches["pelvis"],
+                        env_id=env_id,
+                    )
+                )
+            else:
+                if "pelvis" in self.surface_feature_body_sources:
+                    pelvis_body_index = self._surface_feature_body_labels.index("pelvis")
+                    entry["pelvis_surface_features"] = self._surface_feature_entry_for_env(
+                        body_name=self._surface_feature_body_names[pelvis_body_index],
+                        body_features=body_feature_batches["pelvis"],
+                        env_id=env_id,
+                    )
+                if "hands" in self.surface_feature_body_sources:
+                    left_hand_index = self._surface_feature_body_labels.index("left_hand")
+                    right_hand_index = self._surface_feature_body_labels.index("right_hand")
+                    entry["left_hand_surface_features"] = self._surface_feature_entry_for_env(
+                        body_name=self._surface_feature_body_names[left_hand_index],
+                        body_features=body_feature_batches["left_hand"],
+                        env_id=env_id,
+                    )
+                    entry["right_hand_surface_features"] = self._surface_feature_entry_for_env(
+                        body_name=self._surface_feature_body_names[right_hand_index],
+                        body_features=body_feature_batches["right_hand"],
+                        env_id=env_id,
+                    )
             self._episode_entries[env_id].append(entry)
 
             if env_id in self.log_env_ids:
-                logger.info(
-                    f"[ir_u_window] step={global_step} env={env_id} episode={self._episode_indices[env_id]} "
-                    f"episode_step={self._episode_steps[env_id]} object={object_keys[env_id]} "
-                    f"r_obj={[round(float(v), 4) for v in features['r_obj'][env_id].tolist()]} "
-                    f"v_close={float(features['v_close'][env_id, 0].item()):.4f} "
-                    f"v_orbit_obj={[round(float(v), 4) for v in features['v_orbit_obj'][env_id].tolist()]} "
-                    f"depth_shape={self.depth_resolution}"
-                )
+                if self.surface_feature_body_sources == ("pelvis",):
+                    body_features = body_feature_batches["pelvis"]
+                    logger.info(
+                        f"[ir_window] step={global_step} env={env_id} episode={self._episode_indices[env_id]} "
+                        f"episode_step={self._episode_steps[env_id]} object={object_keys[env_id]} "
+                        f"body={self._surface_feature_body_names[0]} "
+                        f"phi={float(body_features['phi'][env_id, 0].item()):.4f} "
+                        f"grad_phi={[round(float(v), 4) for v in body_features['grad_phi'][env_id].tolist()]} "
+                        f"v_norm={[round(float(v), 4) for v in body_features['v_norm'][env_id].tolist()]} "
+                        f"v_tan={[round(float(v), 4) for v in body_features['v_tan'][env_id].tolist()]} "
+                        f"depth_shape_t_h_w={self._depth_window_shape_t_h_w()}"
+                    )
+                elif self.surface_feature_body_sources == ("hands",):
+                    left_hand_features = body_feature_batches["left_hand"]
+                    right_hand_features = body_feature_batches["right_hand"]
+                    logger.info(
+                        f"[ir_window] step={global_step} env={env_id} episode={self._episode_indices[env_id]} "
+                        f"episode_step={self._episode_steps[env_id]} object={object_keys[env_id]} "
+                        f"left_hand={self._surface_feature_body_names[0]} "
+                        f"left_phi={float(left_hand_features['phi'][env_id, 0].item()):.4f} "
+                        f"right_hand={self._surface_feature_body_names[1]} "
+                        f"right_phi={float(right_hand_features['phi'][env_id, 0].item()):.4f} "
+                        f"depth_shape_t_h_w={self._depth_window_shape_t_h_w()}"
+                    )
+                else:
+                    pelvis_features = body_feature_batches["pelvis"]
+                    left_hand_features = body_feature_batches["left_hand"]
+                    right_hand_features = body_feature_batches["right_hand"]
+                    logger.info(
+                        f"[ir_window] step={global_step} env={env_id} episode={self._episode_indices[env_id]} "
+                        f"episode_step={self._episode_steps[env_id]} object={object_keys[env_id]} "
+                        f"pelvis={self.surface_feature_body_name} "
+                        f"pelvis_phi={float(pelvis_features['phi'][env_id, 0].item()):.4f} "
+                        f"left_hand={self._surface_feature_body_names[self._surface_feature_body_labels.index('left_hand')]} "
+                        f"left_phi={float(left_hand_features['phi'][env_id, 0].item()):.4f} "
+                        f"right_hand={self._surface_feature_body_names[self._surface_feature_body_labels.index('right_hand')]} "
+                        f"right_phi={float(right_hand_features['phi'][env_id, 0].item()):.4f} "
+                        f"depth_shape_t_h_w={self._depth_window_shape_t_h_w()}"
+                    )
 
         return actor_state
 
@@ -669,6 +986,9 @@ class IRTelemetryRecorder:
             if self._run_complete:
                 break
 
+            if self._env_episode_target_reached(env_id):
+                continue
+
             self._episode_steps[env_id] += 1
             reached_limit = self.max_eval_steps is not None and self._episode_steps[env_id] >= self.max_eval_steps
             is_done = bool(dones[env_id].item())
@@ -677,7 +997,7 @@ class IRTelemetryRecorder:
                 self._finalize_episode(env_id, reason="done", global_step=global_step)
             elif reached_limit:
                 self._finalize_episode(env_id, reason="max_eval_steps", global_step=global_step)
-                if not self._run_complete:
+                if not self._run_complete and not self._env_episode_target_reached(env_id):
                     maxed_env_ids.append(env_id)
 
         if maxed_env_ids and not self._run_complete:
@@ -696,7 +1016,7 @@ class IRTelemetryRecorder:
         return actor_state
 
     def on_post_evaluate_policy(self) -> None:
-        target_reached = self.num_eval_episodes is not None and self._completed_episode_count >= self.num_eval_episodes
+        target_reached = self._all_episode_targets_reached()
         if not target_reached:
             for env_id in range(self.env.num_envs):
                 if self._episode_entries[env_id]:
@@ -848,7 +1168,13 @@ def run_ir_with_tyro(
 
 def main() -> None:
     init_eval_logging()
-    ir_cfg, remaining_args = tyro.cli(IRCheckpointConfig, return_unknown_args=True, add_help=False)
+    normalized_args = _normalize_ir_cli_bool_equals_args(sys.argv[1:])
+    ir_cfg, remaining_args = tyro.cli(
+        IRCheckpointConfig,
+        args=normalized_args,
+        return_unknown_args=True,
+        add_help=False,
+    )
     saved_cfg, saved_wandb_path = load_saved_experiment_config(ir_cfg)
     eval_cfg = saved_cfg.get_eval_config()
     overwritten_tyro_config = tyro.cli(
@@ -860,8 +1186,9 @@ def main() -> None:
     )
     logger.info(
         f"Running IR evaluation with num_envs={overwritten_tyro_config.training.num_envs}, "
-        f"episode_max_eval_steps={ir_cfg.max_eval_steps}, num_eval_episodes={ir_cfg.num_eval_episodes}, "
-        f"depth_resolution={DEPTH_RESOLUTION}"
+        f"episode_max_eval_steps={ir_cfg.max_eval_steps}, num_eval_episodes_per_env={ir_cfg.num_eval_episodes}, "
+        f"depth_resolution_wh={DEPTH_RESOLUTION}, "
+        f"depth_frame_shape_hw={(DEPTH_RESOLUTION[1], DEPTH_RESOLUTION[0])}"
     )
     run_ir_with_tyro(overwritten_tyro_config, ir_cfg, saved_cfg, saved_wandb_path)
 

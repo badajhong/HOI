@@ -26,6 +26,10 @@ _WANDB_PREFIX = "wandb://"
 _WANDB_REFERENCE_FORMAT = f"{_WANDB_PREFIX}<entity>/<project>/<run_id>/[<artifact_name>]"
 
 
+def _migrate_experiment_config_dict(config_data: dict) -> dict:
+    return dict(config_data)
+
+
 def _parse_wandb_reference(reference: str) -> tuple[str, str | None]:
     """Split a wandb:// URI into run path and optional artifact/checkpoint name."""
 
@@ -93,14 +97,14 @@ def load_saved_experiment_config(checkpoint_cfg: CheckpointConfig) -> tuple[Expe
     cached_config_path = get_cached_file_path(config_uri)
 
     with open(cached_config_path) as f:
-        return ExperimentConfig(**yaml.safe_load(f)), wandb_run_path
+        return ExperimentConfig(**_migrate_experiment_config_dict(yaml.safe_load(f))), wandb_run_path
 
 
 def _load_config_from_checkpoint(checkpoint_path: Path) -> tuple[ExperimentConfig, str | None]:
     """Attempt to load the serialized ExperimentConfig from a checkpoint file."""
 
     checkpoint_contents = torch.load(checkpoint_path, map_location="cpu")
-    config_data = checkpoint_contents["experiment_config"]
+    config_data = _migrate_experiment_config_dict(checkpoint_contents["experiment_config"])
     return ExperimentConfig(**config_data), checkpoint_contents.get("wandb_run_path")
 
 

@@ -27,8 +27,8 @@ from holosoma.utils.tyro_utils import TYRO_CONIFG
 
 @dataclass(frozen=True)
 class StudentEvalConfig(CheckpointConfig):
-    ir_cvae: str | None = None
-    """Optional IR-CVAE checkpoint override for student evaluation."""
+    ir_ae: str | None = None
+    """Optional latent AE checkpoint override for student evaluation."""
 
     teacher: str | None = None
     """Optional teacher checkpoint override. Defaults to disabled during eval."""
@@ -100,7 +100,7 @@ def main() -> None:
     eval_cfg = dataclasses.replace(
         eval_cfg,
         teacher=student_eval_cfg.teacher,
-        ir_cvae=student_eval_cfg.ir_cvae or eval_cfg.ir_cvae,
+        ir_ae=student_eval_cfg.ir_ae or eval_cfg.ir_ae,
     )
     overwritten_tyro_config = tyro.cli(
         ExperimentConfig,

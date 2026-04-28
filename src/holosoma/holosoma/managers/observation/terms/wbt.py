@@ -9,19 +9,33 @@ from loguru import logger
 import torch
 
 from holosoma.agents.modules.module_utils import setup_ppo_actor_module
-from holosoma.cvae_di_train import load_encoder as load_depth_encoder
-from holosoma.cvae_ir_train import CLIPTextFeatureExtractor, load_encoder as load_ir_encoder
+from holosoma.ae_joint_train import CLIPTextFeatureExtractor, load_joint_model
 from holosoma.managers.command.terms.wbt import MotionCommand
 from holosoma.managers.observation.base import ObservationTermBase
 from holosoma.utils.eval_utils import CheckpointConfig, load_saved_experiment_config
 from holosoma.utils.rotations import quat_rotate_inverse, quaternion_to_matrix, subtract_frame_transforms
+from holosoma.utils.surface_features import SurfaceFeatureComputer
 from holosoma.utils.torch_utils import get_axis_params, to_torch
 
 if TYPE_CHECKING:
     from holosoma.envs.wbt.wbt_manager import WholeBodyTrackingManager
 
 
-IR_FEATURE_EPS = 1e-6
+IR_SURFACE_FEATURE_BODY_SOURCE_CHOICES = ("pelvis", "hands", "all")
+IR_SURFACE_FEATURE_BODY_SOURCE_ALL_RESOLVED = ("hands", "pelvis")
+IR_HAND_BODY_LABELS = ("left_hand", "right_hand")
+IR_LEFT_HAND_BODY_NAME_CANDIDATES = (
+    "left_hand_link",
+    "left_wrist_yaw_link",
+    "left_wrist_pitch_link",
+    "left_wrist_roll_link",
+)
+IR_RIGHT_HAND_BODY_NAME_CANDIDATES = (
+    "right_hand_link",
+    "right_wrist_yaw_link",
+    "right_wrist_pitch_link",
+    "right_wrist_roll_link",
+)
 
 
 #########################################################################################################
@@ -245,71 +259,208 @@ def obj_type_one_hot(env: WholeBodyTrackingManager) -> torch.Tensor:
     return torch.nn.functional.one_hot(motion_command.object_type_ids, num_classes=num_classes).float()
 
 
-def _rotation_matrix_to_6d(rotation_matrix: torch.Tensor) -> torch.Tensor:
-    return rotation_matrix[..., :2].reshape(rotation_matrix.shape[0], -1)
+def _normalize_ir_surface_feature_body_source(body_source: str) -> str:
+    normalized = body_source.strip().lower()
+    if normalized not in IR_SURFACE_FEATURE_BODY_SOURCE_CHOICES:
+        raise ValueError(
+            f"Unsupported IR latent body source '{body_source}'. "
+            f"Expected one of {IR_SURFACE_FEATURE_BODY_SOURCE_CHOICES}."
+        )
+    return normalized
 
 
-def _safe_normalize_vectors(vectors: torch.Tensor, eps: float = IR_FEATURE_EPS) -> tuple[torch.Tensor, torch.Tensor]:
-    norms = torch.linalg.norm(vectors, dim=-1, keepdim=True)
-    normalized = torch.where(norms > eps, vectors / norms.clamp_min(eps), torch.zeros_like(vectors))
-    return normalized, norms
+def _parse_ir_surface_feature_body_sources(body_source: str) -> tuple[str, ...]:
+    normalized = _normalize_ir_surface_feature_body_source(body_source)
+    if normalized == "all":
+        return IR_SURFACE_FEATURE_BODY_SOURCE_ALL_RESOLVED
+    return (normalized,)
 
 
-def _compute_object_centric_ir_u_t(
-    pelvis_pos_w: torch.Tensor,
-    pelvis_lin_vel_w: torch.Tensor,
-    object_pos_w: torch.Tensor,
-    object_quat_w: torch.Tensor,
-    object_lin_vel_w: torch.Tensor,
-) -> torch.Tensor:
-    object_rotation = quaternion_to_matrix(object_quat_w, w_last=True)
-    object_rotation_inv = object_rotation.transpose(1, 2)
-
-    rel_pos_w = pelvis_pos_w - object_pos_w
-    rel_vel_w = pelvis_lin_vel_w - object_lin_vel_w
-
-    r_obj = torch.bmm(object_rotation_inv, rel_pos_w.unsqueeze(-1)).squeeze(-1)
-    v_rel_obj = torch.bmm(object_rotation_inv, rel_vel_w.unsqueeze(-1)).squeeze(-1)
-
-    n_obj, _ = _safe_normalize_vectors(r_obj)
-    radial_velocity_obj = torch.sum(v_rel_obj * n_obj, dim=-1, keepdim=True)
-    v_close = -radial_velocity_obj
-    v_orbit_obj = v_rel_obj - radial_velocity_obj * n_obj
-    obj_ori_6d = _rotation_matrix_to_6d(object_rotation)
-    return torch.cat([r_obj, v_close, v_orbit_obj, obj_ori_6d], dim=-1)
+def _canonical_ir_surface_feature_body_source(body_sources: tuple[str, ...]) -> str:
+    if body_sources == ("pelvis",):
+        return "pelvis"
+    if body_sources == ("hands",):
+        return "hands"
+    if body_sources == IR_SURFACE_FEATURE_BODY_SOURCE_ALL_RESOLVED:
+        return "all"
+    return ",".join(body_sources)
 
 
-class IRCVAELatent(ObservationTermBase):
-    """Frozen IR-CVAE encoder that turns a live u_window into a latent vector."""
+def _infer_ir_surface_feature_body_source(payload: dict, ir_t_dim: int) -> str:
+    config = payload.get("config", {})
+    if isinstance(config, dict):
+        body_source = config.get("ir_window_body_source")
+        if isinstance(body_source, str):
+            return _normalize_ir_surface_feature_body_source(body_source)
+
+    telemetry = payload.get("telemetry", {})
+    if isinstance(telemetry, dict):
+        body_source = telemetry.get("ir_window_body_source") or telemetry.get("surface_feature_body_source")
+        if isinstance(body_source, str):
+            return _normalize_ir_surface_feature_body_source(body_source)
+
+    if ir_t_dim == 13:
+        return "pelvis"
+    if ir_t_dim == 26:
+        return "hands"
+    if ir_t_dim == 39:
+        return "all"
+    raise ValueError(
+        f"Cannot infer IR latent body source from checkpoint ir_t_dim={ir_t_dim}. "
+        "Pass --ir_ae_body_source as one of: pelvis, hands, all."
+    )
+
+
+def _resolve_ir_surface_feature_body_name(
+    available_body_names: set[str],
+    *,
+    explicit_name: str | None,
+    candidates: tuple[str, ...],
+    label: str,
+) -> str:
+    if explicit_name:
+        if explicit_name not in available_body_names:
+            raise ValueError(f"Configured {label} body '{explicit_name}' was not found in environment body names.")
+        return explicit_name
+
+    for candidate in candidates:
+        if candidate in available_body_names:
+            return candidate
+    raise ValueError(
+        f"Could not resolve {label} body. Tried candidates={candidates}; "
+        "set observation param or top-level override for the body name."
+    )
+
+
+def _object_keys_for_envs(motion_command, num_envs: int) -> list[str | None]:
+    object_key_to_id = getattr(motion_command, "object_key_to_id", None) or {}
+    if not object_key_to_id:
+        return [None] * num_envs
+    id_to_key = {int(idx): key for key, idx in object_key_to_id.items()}
+    object_type_ids = motion_command.object_type_ids.detach().cpu().tolist()
+    return [id_to_key.get(int(type_id)) for type_id in object_type_ids]
+
+
+def _load_ir_latent_model(checkpoint_path: str, device: str):
+    payload = torch.load(checkpoint_path, map_location="cpu")
+    model_type = str(payload.get("model_type", ""))
+    if model_type != "joint_multimodal_ae":
+        raise ValueError(
+            f"IR latent checkpoint '{checkpoint_path}' is not a joint AE checkpoint "
+            f"(model_type={model_type!r}). Export it again with ae_joint_train.py."
+        )
+    model, payload = load_joint_model(checkpoint_path, device=device)
+    return model, payload, "joint_multimodal_ae"
+
+
+def _load_di_latent_model(checkpoint_path: str, device: str):
+    payload = torch.load(checkpoint_path, map_location="cpu")
+    model_type = str(payload.get("model_type", ""))
+    if model_type != "joint_multimodal_ae":
+        raise ValueError(
+            f"Depth latent checkpoint '{checkpoint_path}' is not a joint AE checkpoint "
+            f"(model_type={model_type!r}). Export it again with ae_joint_train.py."
+        )
+    model, payload = load_joint_model(checkpoint_path, device=device)
+    return model, payload, "joint_multimodal_ae"
+
+
+class IRAELatent(ObservationTermBase):
+    """Frozen latent encoder that turns a live ir_window into a latent vector.
+
+    Supports ``body_source`` parameter (or ``--ir_ae_body_source`` on the
+    command line) to select which rigid bodies contribute to the surface-feature
+    vector ``ir_t``.  Accepted values:
+
+    * ``"pelvis"`` – pelvis body only (13-D ``ir_t``)
+    * ``"hands"``  – left + right hand bodies (26-D ``ir_t``)
+    * ``"all"``    – hands + pelvis (39-D ``ir_t``)
+
+    When ``body_source`` is not explicitly provided the value is inferred from
+    the AE checkpoint metadata (``ir_window_body_source`` in the config or
+    telemetry block, or from the ``ir_t_dim``).
+    """
 
     def __init__(self, cfg, env: WholeBodyTrackingManager):
         super().__init__(cfg, env)
 
-        checkpoint_path = cfg.params.get("checkpoint_path") or getattr(env, "ir_cvae", None)
+        checkpoint_path = cfg.params.get("checkpoint_path") or getattr(env, "ir_ae", None)
         if not checkpoint_path:
             raise ValueError(
-                "IR-CVAE latent observation requires a checkpoint. "
-                "Pass `--ir_cvae=/path/to/best.pt` or set observation term param `checkpoint_path`."
+                "Latent observation requires a checkpoint. "
+                "Pass `--ir_ae=/path/to/best.pt` or set observation term param `checkpoint_path`."
             )
 
-        pelvis_body_name = str(cfg.params.get("pelvis_body_name", "pelvis"))
-        if pelvis_body_name not in env.body_names:
-            raise ValueError(f"Pelvis body '{pelvis_body_name}' was not found in environment body names.")
-
         self.device = env.device
-        self.pelvis_body_name = pelvis_body_name
-        self.pelvis_body_index = env.body_names.index(pelvis_body_name)
-        self.encoder, payload = load_ir_encoder(str(checkpoint_path), device=self.device)
-
-        input_shape = tuple(int(v) for v in payload["input_shape"])
+        self.encoder, payload, self.checkpoint_model_type = _load_ir_latent_model(str(checkpoint_path), device=self.device)
+        input_shape = tuple(int(v) for v in payload["ir_window_shape"])
         if len(input_shape) != 2:
-            raise ValueError(f"IR-CVAE checkpoint input_shape must have length 2, got {input_shape}")
+            raise ValueError(f"Joint AE checkpoint ir_window_shape must have length 2, got {input_shape}")
+        self.feature_mean = payload["ir_feature_mean"].to(device=self.device, dtype=torch.float32)
+        self.feature_std = payload["ir_feature_std"].to(device=self.device, dtype=torch.float32).clamp_min(1e-6)
 
-        self.window_size, self.u_t_dim = input_shape
+        self.window_size, self.ir_t_dim = input_shape
         self.latent_dim = int(payload["config"]["latent_dim"])
-        self.feature_mean = payload["feature_mean"].to(device=self.device, dtype=torch.float32)
-        self.feature_std = payload["feature_std"].to(device=self.device, dtype=torch.float32).clamp_min(1e-6)
 
+        # --- body source resolution -------------------------------------------
+        explicit_body_source = (
+            cfg.params.get("body_source")
+            or getattr(env, "ir_ae_body_source", None)
+        )
+        if explicit_body_source:
+            self.body_source = _normalize_ir_surface_feature_body_source(explicit_body_source)
+        else:
+            self.body_source = _infer_ir_surface_feature_body_source(payload, self.ir_t_dim)
+        self.body_sources = _parse_ir_surface_feature_body_sources(self.body_source)
+
+        # --- resolve body names & indices ------------------------------------
+        available = set(env.body_names)
+        self._body_labels: list[str] = []
+        self._body_indices: list[int] = []
+
+        for src in self.body_sources:
+            if src == "pelvis":
+                pelvis_name = _resolve_ir_surface_feature_body_name(
+                    available,
+                    explicit_name=cfg.params.get("pelvis_body_name"),
+                    candidates=("pelvis",),
+                    label="pelvis",
+                )
+                self._body_labels.append("pelvis")
+                self._body_indices.append(env.body_names.index(pelvis_name))
+            elif src == "hands":
+                left_name = _resolve_ir_surface_feature_body_name(
+                    available,
+                    explicit_name=cfg.params.get("left_hand_body_name"),
+                    candidates=IR_LEFT_HAND_BODY_NAME_CANDIDATES,
+                    label="left hand",
+                )
+                right_name = _resolve_ir_surface_feature_body_name(
+                    available,
+                    explicit_name=cfg.params.get("right_hand_body_name"),
+                    candidates=IR_RIGHT_HAND_BODY_NAME_CANDIDATES,
+                    label="right hand",
+                )
+                self._body_labels.extend(["left_hand", "right_hand"])
+                self._body_indices.extend([
+                    env.body_names.index(left_name),
+                    env.body_names.index(right_name),
+                ])
+
+        # Validate expected ir_t dim vs body source
+        expected_ir_t_dim = 13 * len(self._body_labels)
+        if expected_ir_t_dim != self.ir_t_dim:
+            raise ValueError(
+                f"body_source='{self.body_source}' produces {expected_ir_t_dim}-D ir_t "
+                f"but checkpoint expects {self.ir_t_dim}-D. "
+                "Check --ir_ae_body_source matches the latent model training body source."
+            )
+
+        # --- surface feature computer ----------------------------------------
+        object_cfg = env.robot_config.object
+        self._surface_feature_computer = SurfaceFeatureComputer.from_object_config(object_cfg)
+
+        # --- CLIP text features ----------------------------------------------
         condition_text = str(cfg.params.get("condition_text") or payload["condition_text"])
         clip_cfg = payload["clip"]
         text_extractor = CLIPTextFeatureExtractor(
@@ -319,24 +470,53 @@ class IRCVAELatent(ObservationTermBase):
             local_files_only=clip_cfg["local_files_only"],
         )
         self.text_features = text_extractor.encode([condition_text]).to(device=self.device, dtype=torch.float32)
-        self.u_window_history = torch.zeros(env.num_envs, self.window_size, self.u_t_dim, device=self.device)
+        self.ir_window_history = torch.zeros(env.num_envs, self.window_size, self.ir_t_dim, device=self.device)
         self.is_initialized = torch.zeros(env.num_envs, dtype=torch.bool, device=self.device)
 
         logger.info(
-            f"Loaded frozen IR-CVAE latent encoder from {checkpoint_path} with "
-            f"window_size={self.window_size}, u_t_dim={self.u_t_dim}, latent_dim={self.latent_dim}"
+            f"Loaded frozen latent encoder from {checkpoint_path} with "
+            f"model_type={self.checkpoint_model_type}, latent_mode=mu, "
+            f"body_source='{self.body_source}', "
+            f"window_size={self.window_size}, ir_t_dim={self.ir_t_dim}, latent_dim={self.latent_dim}"
         )
+
+    def _compute_current_ir_t(
+        self,
+        env: WholeBodyTrackingManager,
+        motion_command: MotionCommand,
+    ) -> torch.Tensor:
+        """Compute the current surface-feature vector for all envs.
+
+        Returns a tensor of shape ``[num_envs, ir_t_dim]`` whose layout matches
+        the body-source ordering used during latent training.
+        """
+        object_keys = _object_keys_for_envs(motion_command, env.num_envs)
+        ir_t_parts: list[torch.Tensor] = []
+
+        for label, body_idx in zip(self._body_labels, self._body_indices):
+            body_pos_w = env.simulator._rigid_body_pos[:, body_idx, :]
+            body_lin_vel_w = env.simulator._rigid_body_vel[:, body_idx, :]
+            features = self._surface_feature_computer.compute_batch(
+                body_pos_w=body_pos_w,
+                body_lin_vel_w=body_lin_vel_w,
+                object_pos_w=motion_command.simulator_object_pos_w,
+                object_quat_w=motion_command.simulator_object_quat_w,
+                object_keys=object_keys,
+            )
+            ir_t_parts.append(features["ir_t"])
+
+        return torch.cat(ir_t_parts, dim=-1) if len(ir_t_parts) > 1 else ir_t_parts[0]
 
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
         if env_ids is None:
-            self.u_window_history.zero_()
+            self.ir_window_history.zero_()
             self.is_initialized.zero_()
             return
 
         env_ids_tensor = env_ids.to(device=self.device, dtype=torch.long)
         if env_ids_tensor.numel() == 0:
             return
-        self.u_window_history[env_ids_tensor] = 0.0
+        self.ir_window_history[env_ids_tensor] = 0.0
         self.is_initialized[env_ids_tensor] = False
 
     @torch.no_grad()
@@ -346,50 +526,41 @@ class IRCVAELatent(ObservationTermBase):
         if not getattr(motion_command.motion, "has_object", False):
             return torch.zeros(env.num_envs, self.latent_dim, device=self.device)
 
-        pelvis_pos_w = env.simulator._rigid_body_pos[:, self.pelvis_body_index, :]
-        pelvis_lin_vel_w = env.simulator._rigid_body_vel[:, self.pelvis_body_index, :]
-        current_u_t = _compute_object_centric_ir_u_t(
-            pelvis_pos_w=pelvis_pos_w,
-            pelvis_lin_vel_w=pelvis_lin_vel_w,
-            object_pos_w=motion_command.simulator_object_pos_w,
-            object_quat_w=motion_command.simulator_object_quat_w,
-            object_lin_vel_w=motion_command.simulator_object_lin_vel_w,
-        )
-        if current_u_t.shape[1] != self.u_t_dim:
+        current_ir_t = self._compute_current_ir_t(env, motion_command)
+        if current_ir_t.shape[1] != self.ir_t_dim:
             raise ValueError(
-                f"IR feature dim mismatch: checkpoint expects {self.u_t_dim}, got {current_u_t.shape[1]}"
+                f"IR feature dim mismatch: checkpoint expects {self.ir_t_dim}, got {current_ir_t.shape[1]}"
             )
 
         if modify_history:
             new_mask = ~self.is_initialized
             if torch.any(new_mask):
-                repeated = current_u_t[new_mask].unsqueeze(1).repeat(1, self.window_size, 1)
-                self.u_window_history[new_mask] = repeated
+                repeated = current_ir_t[new_mask].unsqueeze(1).repeat(1, self.window_size, 1)
+                self.ir_window_history[new_mask] = repeated
 
             existing_mask = self.is_initialized
             if torch.any(existing_mask):
-                existing_history = self.u_window_history[existing_mask].clone()
+                existing_history = self.ir_window_history[existing_mask].clone()
                 existing_history[:, :-1] = existing_history[:, 1:].clone()
-                existing_history[:, -1] = current_u_t[existing_mask]
-                self.u_window_history[existing_mask] = existing_history
+                existing_history[:, -1] = current_ir_t[existing_mask]
+                self.ir_window_history[existing_mask] = existing_history
 
             self.is_initialized[:] = True
-            effective_window = self.u_window_history
+            effective_window = self.ir_window_history
         else:
-            effective_window = torch.cat([self.u_window_history[:, 1:], current_u_t.unsqueeze(1)], dim=1)
+            effective_window = torch.cat([self.ir_window_history[:, 1:], current_ir_t.unsqueeze(1)], dim=1)
             new_mask = ~self.is_initialized
             if torch.any(new_mask):
-                effective_window[new_mask] = current_u_t[new_mask].unsqueeze(1).repeat(1, self.window_size, 1)
+                effective_window[new_mask] = current_ir_t[new_mask].unsqueeze(1).repeat(1, self.window_size, 1)
 
         flat_window = effective_window.reshape(env.num_envs, -1)
         normalized_window = (flat_window - self.feature_mean.unsqueeze(0)) / self.feature_std.unsqueeze(0)
         text_features = self.text_features.expand(env.num_envs, -1)
-        mu, _ = self.encoder(normalized_window, text_features)
+        mu, _ = self.encoder.encode_ir(normalized_window, text_features)
         return mu
 
-
 class FrozenStudentBaseAction(ObservationTermBase):
-    """Frozen depth-CVAE + frozen student actor that produces a base action."""
+    """Frozen depth latent encoder + frozen student actor that produces a base action."""
 
     def __init__(self, cfg, env: WholeBodyTrackingManager):
         super().__init__(cfg, env)
@@ -400,11 +571,11 @@ class FrozenStudentBaseAction(ObservationTermBase):
                 "Frozen student base-action observation requires a student checkpoint. "
                 "Pass `--student=/path/to/model.pt` or set observation term param `student_checkpoint`."
             )
-        di_checkpoint = cfg.params.get("checkpoint_path") or getattr(env, "di_cvae", None)
+        di_checkpoint = cfg.params.get("checkpoint_path") or getattr(env, "di_ae", None)
         if not di_checkpoint:
             raise ValueError(
-                "Frozen student base-action observation requires a depth-image CVAE checkpoint. "
-                "Pass `--di_cvae=/path/to/best.pt` or set observation term param `checkpoint_path`."
+                "Frozen student base-action observation requires a depth latent checkpoint. "
+                "Pass `--di_ae=/path/to/best.pt` or set observation term param `checkpoint_path`."
             )
 
         self.device = env.device
@@ -427,28 +598,21 @@ class FrozenStudentBaseAction(ObservationTermBase):
         self._debug_invalid_env_ids_logged = False
         self._debug_save_disabled_logged = False
 
-        self.depth_encoder, payload = load_depth_encoder(self.di_checkpoint, device=self.device)
-        for parameter in self.depth_encoder.parameters():
+        self.di_encoder, payload, self.di_checkpoint_model_type = _load_di_latent_model(
+            self.di_checkpoint,
+            device=self.device,
+        )
+        for parameter in self.di_encoder.parameters():
             parameter.requires_grad_(False)
 
         input_shape = tuple(int(v) for v in payload["input_shape"])
         if len(input_shape) != 3:
-            raise ValueError(f"Depth-CVAE checkpoint input_shape must have length 3, got {input_shape}")
+            raise ValueError(f"Depth latent checkpoint input_shape must have length 3, got {input_shape}")
         self.window_size, self.depth_height, self.depth_width = input_shape
         self.latent_dim = int(payload["config"]["latent_dim"])
-        self.depth_feature_mean = payload["feature_mean"].to(device=self.device, dtype=torch.float32)
-        self.depth_feature_std = payload["feature_std"].to(device=self.device, dtype=torch.float32).clamp_min(1e-6)
-
-        target_latent_mean = payload.get("target_latent_mean")
-        target_latent_std = payload.get("target_latent_std")
-        self.target_latent_mean = (
-            target_latent_mean.to(device=self.device, dtype=torch.float32) if target_latent_mean is not None else None
-        )
-        self.target_latent_std = (
-            target_latent_std.to(device=self.device, dtype=torch.float32).clamp_min(1e-6)
-            if target_latent_std is not None
-            else None
-        )
+        self.di_feature_mean = payload["di_feature_mean"].to(device=self.device, dtype=torch.float32)
+        self.di_feature_std = payload["di_feature_std"].to(device=self.device, dtype=torch.float32).clamp_min(1e-6)
+        self.depth_latent_mode = "mu"
 
         condition_text = str(cfg.params.get("condition_text") or payload["condition_text"])
         clip_cfg = payload["clip"]
@@ -459,7 +623,7 @@ class FrozenStudentBaseAction(ObservationTermBase):
             local_files_only=clip_cfg["local_files_only"],
             quiet_load=True,
         )
-        self.depth_text_features = text_extractor.encode([condition_text]).to(device=self.device, dtype=torch.float32)
+        self.di_text_features = text_extractor.encode([condition_text]).to(device=self.device, dtype=torch.float32)
 
         self.depth_window_history = torch.zeros(
             env.num_envs,
@@ -477,7 +641,8 @@ class FrozenStudentBaseAction(ObservationTermBase):
         self.num_actions = env.robot_config.actions_dim
 
         logger.info(
-            f"Loaded frozen depth-CVAE encoder from {self.di_checkpoint} with "
+            f"Loaded frozen di latent encoder from {self.di_checkpoint} with "
+            f"model_type={self.di_checkpoint_model_type}, latent_mode={self.depth_latent_mode}, "
             f"window_size={self.window_size}, depth_shape=({self.depth_height}, {self.depth_width}), latent_dim={self.latent_dim}"
         )
         if self.debug_depth_dir is not None:
@@ -597,19 +762,20 @@ class FrozenStudentBaseAction(ObservationTermBase):
 
         student_actor_cfg = student_algo_config.module_dict.actor
         self.student_input_keys = list(student_actor_cfg.input_dim)
-        expected_keys = {"actor_obs", "ir_cvae_latent"}
-        if set(self.student_input_keys) != expected_keys:
+        expected_keys = {"actor_obs", "ir_ae_latent"}
+        actual_keys = set(self.student_input_keys)
+        if actual_keys != expected_keys:
             raise ValueError(
                 f"Frozen student actor expects inputs {self.student_input_keys}; supported inputs are {sorted(expected_keys)}."
             )
 
         self.student_actor = setup_ppo_actor_module(
-            obs_dim_dict={"actor_obs": student_obs_dim, "ir_cvae_latent": self.latent_dim},
+            obs_dim_dict={"actor_obs": student_obs_dim, "ir_ae_latent": self.latent_dim},
             module_config=student_actor_cfg,
             num_actions=self.num_actions,
             init_noise_std=getattr(student_algo_config, "init_noise_std", 1.0),
             device=self.device,
-            history_length={"actor_obs": 1, "ir_cvae_latent": 1},
+            history_length={"actor_obs": 1, "ir_ae_latent": 1},
         )
         self.student_actor.load_state_dict(student_payload["actor_model_state_dict"])
         self.student_actor.eval()
@@ -676,12 +842,10 @@ class FrozenStudentBaseAction(ObservationTermBase):
             effective_window[new_mask] = depth_frames[new_mask].unsqueeze(1).repeat(1, self.window_size, 1, 1)
         return effective_window
 
-    def _encode_depth_latent(self, depth_window: torch.Tensor) -> torch.Tensor:
-        normalized_window = (depth_window - self.depth_feature_mean.unsqueeze(0)) / self.depth_feature_std.unsqueeze(0)
-        text_features = self.depth_text_features.expand(depth_window.shape[0], -1)
-        mu, _ = self.depth_encoder(normalized_window, text_features)
-        if self.target_latent_mean is not None and self.target_latent_std is not None:
-            mu = mu * self.target_latent_std.unsqueeze(0) + self.target_latent_mean.unsqueeze(0)
+    def _encode_di_latent(self, depth_window: torch.Tensor) -> torch.Tensor:
+        normalized_window = (depth_window - self.di_feature_mean.unsqueeze(0)) / self.di_feature_std.unsqueeze(0)
+        text_features = self.di_text_features.expand(depth_window.shape[0], -1)
+        mu, _ = self.di_encoder.encode_di(normalized_window, text_features)
         return mu
 
     def _build_student_input(self, student_obs: torch.Tensor, depth_latent: torch.Tensor) -> torch.Tensor:
@@ -689,7 +853,7 @@ class FrozenStudentBaseAction(ObservationTermBase):
         for key in self.student_input_keys:
             if key == "actor_obs":
                 inputs.append(student_obs)
-            elif key == "ir_cvae_latent":
+            elif key == "ir_ae_latent":
                 inputs.append(depth_latent)
             else:
                 raise ValueError(f"Unsupported frozen student input key '{key}'.")
@@ -717,7 +881,7 @@ class FrozenStudentBaseAction(ObservationTermBase):
         if modify_history:
             self._maybe_save_debug_depth_frames(env, depth_frames)
         depth_window = self._build_depth_window(depth_frames, modify_history=modify_history)
-        depth_latent = self._encode_depth_latent(depth_window)
+        depth_latent = self._encode_di_latent(depth_window)
         student_input = self._build_student_input(student_obs, depth_latent)
         base_action = self.student_actor.act_inference({"actor_obs": student_input})
 

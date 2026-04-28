@@ -36,8 +36,9 @@ class EnvConfig:
     logger: LoggerConfig
     teacher: str | None = None
     student: str | None = None
-    ir_cvae: str | None = None
-    di_cvae: str | None = None
+    ir_ae: str | None = None
+    ir_ae_body_source: str | None = None
+    di_ae: str | None = None
 
 
 def get_tyro_env_config(tyro_config: ExperimentConfig) -> EnvConfig:
@@ -57,8 +58,9 @@ def get_tyro_env_config(tyro_config: ExperimentConfig) -> EnvConfig:
         env_class=tyro_config.env_class,
         teacher=tyro_config.teacher,
         student=tyro_config.student,
-        ir_cvae=tyro_config.ir_cvae,
-        di_cvae=tyro_config.di_cvae,
+        ir_ae=tyro_config.ir_ae,
+        ir_ae_body_source=tyro_config.ir_ae_body_source,
+        di_ae=tyro_config.di_ae,
         training=tyro_config.training,
         simulator=tyro_config.simulator,
         terrain=tyro_config.terrain,

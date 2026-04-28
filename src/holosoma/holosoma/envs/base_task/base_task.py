@@ -106,8 +106,9 @@ class BaseTask:
         self.robot_config = robot_config
         self.teacher = tyro_config.teacher
         self.student = tyro_config.student
-        self.ir_cvae = tyro_config.ir_cvae
-        self.di_cvae = tyro_config.di_cvae
+        self.ir_ae = tyro_config.ir_ae
+        self.ir_ae_body_source = tyro_config.ir_ae_body_source
+        self.di_ae = tyro_config.di_ae
 
         # Validate configs: manager workflow requires all manager configs to be provided
         if observation_config is None:

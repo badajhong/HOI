@@ -107,10 +107,12 @@ class ExperimentConfig:
     """Optional teacher checkpoint for student distillation runs."""
     student: str | None = None
     """Optional frozen student checkpoint used by residual-policy training."""
-    ir_cvae: str | None = None
-    """Optional frozen IR-CVAE checkpoint used to build latent observations."""
-    di_cvae: str | None = None
-    """Optional frozen depth-image CVAE checkpoint used to build visual latents."""
+    ir_ae: str | None = None
+    """Optional frozen latent checkpoint used to build live ir_window latents."""
+    ir_ae_body_source: str | None = None
+    """Optional live latent ir_window body source: 'pelvis', 'hands', or 'all'. If None, infer from checkpoint."""
+    di_ae: str | None = None
+    """Optional frozen depth latent checkpoint used to build visual latents."""
 
     training: TrainingConfig = TrainingConfig()
     algo: Annotated[

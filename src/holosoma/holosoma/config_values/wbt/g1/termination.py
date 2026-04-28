@@ -92,7 +92,7 @@ g1_29dof_wbt_w_object_multi_res_termination = TerminationManagerCfg(
                 ],
                 # object tracking
                 # only triggered when has_object=True
-                "bad_object_pos_threshold": 0.25,
+                "bad_object_pos_threshold": 0.5,
                 "bad_object_ori_threshold": 0.8,
             },
         ),

@@ -5,7 +5,7 @@ from typing import Sequence
 from loguru import logger
 
 from holosoma.agents.callbacks.base_callback import RLEvalCallback
-from holosoma.utils.pelvis_surface_features import PelvisSurfaceFeatureComputer
+from holosoma.utils.surface_features import SurfaceFeatureComputer
 
 
 class PelvisSurfaceFeatureEvalCallback(RLEvalCallback):
@@ -31,7 +31,7 @@ class PelvisSurfaceFeatureEvalCallback(RLEvalCallback):
         self.pelvis_body_name = pelvis_body_name
         self.mesh_mode = mesh_mode
         self._enabled = True
-        self._feature_computer: PelvisSurfaceFeatureComputer | None = None
+        self._feature_computer: SurfaceFeatureComputer | None = None
         self._pelvis_body_index: int | None = None
 
     def _unwrap_env(self):
@@ -66,7 +66,7 @@ class PelvisSurfaceFeatureEvalCallback(RLEvalCallback):
         self._pelvis_body_index = env.body_names.index(self.pelvis_body_name)
 
         try:
-            self._feature_computer = PelvisSurfaceFeatureComputer.from_object_config(
+            self._feature_computer = SurfaceFeatureComputer.from_object_config(
                 env.robot_config.object, mesh_mode=self.mesh_mode
             )
         except Exception as exc:
@@ -92,8 +92,8 @@ class PelvisSurfaceFeatureEvalCallback(RLEvalCallback):
         pelvis_lin_vel_w = env.simulator._rigid_body_vel[:, self._pelvis_body_index, :]
         object_keys = self._object_keys_for_envs(motion_command, env.num_envs)
         features = self._feature_computer.compute_batch(
-            pelvis_pos_w=pelvis_pos_w,
-            pelvis_lin_vel_w=pelvis_lin_vel_w,
+            body_pos_w=pelvis_pos_w,
+            body_lin_vel_w=pelvis_lin_vel_w,
             object_pos_w=motion_command.simulator_object_pos_w,
             object_quat_w=motion_command.simulator_object_quat_w,
             object_keys=object_keys,
