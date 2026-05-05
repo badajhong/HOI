@@ -2,6 +2,7 @@
 Unified robot retargeting script for all task types:
 - robot_only: Robot-only retargeting with ground interaction
 - object_interaction: Object manipulation retargeting (InterMimic)
+- object_interaction_scaled: Object manipulation retargeting with SMPL-scaled object assets
 - climbing: Climbing retargeting with dynamic terrain
 """
 
@@ -32,9 +33,12 @@ from holosoma_retargeting.src.interaction_mesh_retargeter import (  # noqa: E402
 from holosoma_retargeting.src.utils import (  # noqa: E402
     augment_object_poses,
     calculate_scale_factor,
+    compute_object_pose_z_offset_for_scale,
     create_new_scene_xml_file,
     create_scaled_multi_boxes_urdf,
     create_scaled_multi_boxes_xml,
+    create_scaled_single_object_scene_xml,
+    create_scaled_single_object_urdf,
     estimate_human_orientation,
     extract_foot_sticking_sequence_velocity,
     extract_object_first_moving_frame,
@@ -55,12 +59,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_DATA_FORMATS = {
     "robot_only": "smplh",
     "object_interaction": "smplh",
+    "object_interaction_scaled": "smplh",
     "climbing": "mocap",
 }
 
 DEFAULT_SAVE_DIRS = {
     "robot_only": "demo_results/{robot}/robot_only/omomo",
     "object_interaction": "demo_results/{robot}/object_interaction/omomo",
+    "object_interaction_scaled": "demo_results/{robot}/object_interaction_scaled/omomo",
     "climbing": "demo_results/{robot}/climbing/mocap_climb",
 }
 
@@ -72,7 +78,7 @@ _AUGMENTATION_TRANSLATION = np.array([0.2, 0.0, 0.0])
 
 
 # Type aliases
-TaskType = Literal["robot_only", "object_interaction", "climbing"]
+TaskType = Literal["robot_only", "object_interaction", "object_interaction_scaled", "climbing"]
 # DataFormat is imported from config_types.data_type
 
 
@@ -91,7 +97,7 @@ def create_task_constants(
         robot_config: Robot configuration
         motion_data_config: Motion data format configuration
         task_config: Task-specific configuration
-        task_type: Type of task ("robot_only", "object_interaction", "climbing")
+        task_type: Type of task ("robot_only", "object_interaction", "object_interaction_scaled", "climbing")
 
     Returns:
         SimpleNamespace with all task constants
@@ -113,12 +119,16 @@ def create_task_constants(
         task_constants.OBJECT_NAME = obj_name
         task_constants.OBJECT_URDF_FILE = None
         task_constants.OBJECT_MESH_FILE = None
-    elif task_type == "object_interaction":
+    elif task_type in {"object_interaction", "object_interaction_scaled"}:
         obj_name = task_config.object_name or "largebox"
         task_constants.OBJECT_NAME = obj_name
         task_constants.OBJECT_URDF_FILE = f"models/objects/{obj_name}/{obj_name}.urdf"
         task_constants.OBJECT_MESH_FILE = f"models/objects/{obj_name}/{obj_name}.obj"
         task_constants.OBJECT_URDF_TEMPLATE = f"models/templates/{obj_name}.urdf.jinja"
+        scene_xml_name = Path(robot_config.ROBOT_URDF_FILE).name.replace(".urdf", f"_w_{obj_name}.xml")
+        task_constants.BASE_SCENE_XML_FILE = str(Path(robot_config.ROBOT_URDF_FILE).parent / scene_xml_name)
+        task_constants.SCENE_XML_FILE = task_constants.BASE_SCENE_XML_FILE
+        task_constants.OBJECT_POSE_Z_OFFSET = 0.0
     elif task_type == "climbing":
         obj_name = task_config.object_name or "multi_boxes"
         task_constants.OBJECT_NAME = obj_name
@@ -152,7 +162,7 @@ def validate_config(cfg: RetargetingConfig) -> None:
     # Task-specific format requirements
     if cfg.task_type == "climbing" and cfg.data_format not in (None, "mocap"):
         raise ValueError("Climbing task requires 'mocap' data format")
-    if cfg.task_type == "object_interaction" and cfg.data_format not in (None, "smplh"):
+    if cfg.task_type in {"object_interaction", "object_interaction_scaled"} and cfg.data_format not in (None, "smplh"):
         raise ValueError("Object interaction requires 'smplh' data format")
     # robot_only accepts any format in the registry (already validated above)
 
@@ -172,7 +182,6 @@ def create_ground_points(x_range: tuple[float, float], y_range: tuple[float, flo
     y = np.linspace(y_range[0], y_range[1], size)
     X, Y = np.meshgrid(x, y)
     return np.stack([X.flatten(), Y.flatten(), np.zeros_like(X.flatten())], axis=1)
-
 
 def load_motion_data(
     task_type: TaskType,
@@ -253,7 +262,7 @@ def load_motion_data(
         num_frames = human_joints.shape[0]
         object_poses = np.tile(np.array([[1, 0, 0, 0, 0, 0, 0]]), (num_frames, 1))
 
-    elif task_type == "object_interaction":
+    elif task_type in {"object_interaction", "object_interaction_scaled"}:
         pt_path = data_path / f"{task_name}.pt"
         if not pt_path.exists():
             raise FileNotFoundError(f"InterMimic data file not found: {pt_path}")
@@ -315,7 +324,7 @@ def setup_object_data(
         ground_pts = create_ground_points(task_config.ground_range, task_config.ground_range, task_config.ground_size)
         return ground_pts, ground_pts, None
 
-    if task_type == "object_interaction":
+    if task_type in {"object_interaction", "object_interaction_scaled"}:
         # Load object data
         if constants.OBJECT_MESH_FILE is None:
             raise ValueError("OBJECT_MESH_FILE not set for object_interaction task")
@@ -323,7 +332,37 @@ def setup_object_data(
         object_local_pts, object_local_pts_demo = load_object_data(
             constants.OBJECT_MESH_FILE, smpl_scale=smpl_scale, sample_count=100
         )
-        return object_local_pts, object_local_pts_demo, constants.OBJECT_URDF_FILE
+        if task_type == "object_interaction":
+            constants.OBJECT_POSE_Z_OFFSET = 0.0
+            return object_local_pts, object_local_pts_demo, constants.OBJECT_URDF_FILE
+
+        if constants.OBJECT_URDF_FILE is None:
+            raise ValueError("OBJECT_URDF_FILE not set for object_interaction_scaled task")
+        scene_xml_file = getattr(constants, "BASE_SCENE_XML_FILE", getattr(constants, "SCENE_XML_FILE", ""))
+        if not scene_xml_file:
+            raise ValueError("SCENE_XML_FILE not set for object_interaction_scaled task")
+
+        scale_factors = (float(smpl_scale), float(smpl_scale), float(smpl_scale))
+        object_urdf_output = str(Path(constants.OBJECT_URDF_FILE).with_name(f"{Path(constants.OBJECT_URDF_FILE).stem}_scaled.urdf"))
+        scene_xml_output = str(Path(scene_xml_file).with_name(f"{Path(scene_xml_file).stem}_scaled.xml"))
+        object_urdf_file = create_scaled_single_object_urdf(
+            constants.OBJECT_URDF_FILE,
+            scale_factors,
+            output_path=object_urdf_output,
+        )
+        constants.SCENE_XML_FILE = create_scaled_single_object_scene_xml(
+            scene_xml_file,
+            constants.OBJECT_NAME,
+            scale_factors,
+            output_path=scene_xml_output,
+        )
+        constants.OBJECT_POSE_Z_OFFSET = 0.0
+        logger.info(
+            "Using scaled object interaction assets: urdf=%s, scene=%s",
+            object_urdf_file,
+            constants.SCENE_XML_FILE,
+        )
+        return object_local_pts_demo, object_local_pts_demo, object_urdf_file
 
     if task_type == "climbing":
         if object_dir is None:
@@ -407,7 +446,7 @@ def _compute_q_init_base(
             )
             # MuJoCo order: pos first, then quat
             q_init_base = np.concatenate([human_joints[0, 0, :3], human_quat_init, np.zeros(constants.ROBOT_DOF)])
-    elif task_type == "object_interaction":
+    elif task_type in {"object_interaction", "object_interaction_scaled"}:
         _, human_quat_init = transform_from_human_to_world(
             human_joints[0, 0, :], object_poses[0], np.array([0.0, 0.0, 0.0])
         )
@@ -524,7 +563,7 @@ def initialize_robot_pose(
         object_poses = convert_object_poses_to_mujoco_order(object_poses)
         return q_init, None, object_poses, human_joints, object_poses
 
-    if task_type == "object_interaction":
+    if task_type in {"object_interaction", "object_interaction_scaled"}:
         if augmentation:
             object_moving_frame_idx = extract_object_first_moving_frame(object_poses)
             object_poses_augmented = augment_object_poses(
@@ -588,7 +627,7 @@ def determine_output_path(
     """
     if task_type == "robot_only":
         return str(save_dir / f"{task_name}.npz")
-    if task_type in ("object_interaction", "climbing"):
+    if task_type in ("object_interaction", "object_interaction_scaled", "climbing"):
         suffix = "_augmented" if augmentation else "_original"
         return str(save_dir / f"{task_name}{suffix}.npz")
     raise ValueError(f"Unknown task type: {task_type}")
@@ -657,6 +696,18 @@ def main(cfg: RetargetingConfig) -> None:
         object_scale_augmented=_OBJECT_SCALE_AUGMENTED,
     )
 
+    if task_type == "object_interaction_scaled":
+        scale_factors = (float(smpl_scale), float(smpl_scale), float(smpl_scale))
+        constants.OBJECT_POSE_Z_OFFSET = compute_object_pose_z_offset_for_scale(
+            constants.OBJECT_MESH_FILE,
+            scale_factors,
+            object_poses[0, :4],
+        )
+        logger.info(
+            "Computed scaled object spawn z-offset %.6f from initial object orientation.",
+            constants.OBJECT_POSE_Z_OFFSET,
+        )
+
     # Create retargeter
     retargeter_kwargs = build_retargeter_kwargs_from_config(cfg.retargeter, constants, object_urdf_path, task_type)
     retargeter = InteractionMeshRetargeter(**retargeter_kwargs)
@@ -665,7 +716,7 @@ def main(cfg: RetargetingConfig) -> None:
     # Preprocess motion data
     if task_type == "robot_only":
         human_joints = preprocess_motion_data(human_joints, retargeter, toe_names, smpl_scale)
-    elif task_type in {"object_interaction", "climbing"}:
+    elif task_type in {"object_interaction", "object_interaction_scaled", "climbing"}:
         human_joints, object_poses, object_moving_frame_idx = preprocess_motion_data(
             human_joints,
             retargeter,
@@ -673,6 +724,10 @@ def main(cfg: RetargetingConfig) -> None:
             scale=smpl_scale,
             object_poses=object_poses,
         )
+        object_pose_z_offset = float(getattr(constants, "OBJECT_POSE_Z_OFFSET", 0.0))
+        if object_pose_z_offset != 0.0:
+            object_poses[:, -1] += object_pose_z_offset
+            logger.info("Applied object pose z-offset of %.6f to preserve floor contact after scaling.", object_pose_z_offset)
 
     # Initialize robot pose
     q_init, q_nominal, object_poses_augmented, human_joints, object_poses = initialize_robot_pose(
@@ -693,7 +748,7 @@ def main(cfg: RetargetingConfig) -> None:
     foot_sticking_sequences = extract_foot_sticking_sequence_velocity(human_joints, retargeter.demo_joints, toe_names)
 
     # Task-specific foot sticking adjustments
-    if task_type == "object_interaction":
+    if task_type in {"object_interaction", "object_interaction_scaled"}:
         # Disable initial sticking
         foot_sticking_sequences[0][toe_names[0]] = False
         foot_sticking_sequences[0][toe_names[1]] = False

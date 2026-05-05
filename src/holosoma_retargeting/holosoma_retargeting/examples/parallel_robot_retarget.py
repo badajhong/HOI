@@ -2,6 +2,7 @@
 Unified parallel processing script for retargeting all task types:
 - robot_only: Robot-only retargeting with ground interaction (LAFAN)
 - object_interaction: Object manipulation retargeting (InterMimic)
+- object_interaction_scaled: Object manipulation retargeting with SMPL-scaled object assets
 - climbing: Climbing retargeting with dynamic terrain (MOCAP)
 """
 
@@ -42,6 +43,7 @@ from holosoma_retargeting.src.interaction_mesh_retargeter import (  # noqa: E402
     InteractionMeshRetargeter,  # type: ignore[import-not-found]
 )
 from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]  # noqa: E402
+    compute_object_pose_z_offset_for_scale,
     extract_foot_sticking_sequence_velocity,
     preprocess_motion_data,
 )
@@ -52,6 +54,7 @@ from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]  
 PARALLEL_SAVE_DIRS = {
     "robot_only": "demo_results_parallel/{robot}/robot_only/omomo",
     "object_interaction": "demo_results_parallel/{robot}/object_interaction/omomo",
+    "object_interaction_scaled": "demo_results_parallel/{robot}/object_interaction_scaled/omomo",
     "climbing": "demo_results_parallel/{robot}/climbing/mocap_climb",
 }
 
@@ -99,7 +102,7 @@ def generate_augmentation_configs(task_type: str, augmentation: bool = True):
         # No augmentation for robot_only
         return [{"name": "original"}]
 
-    if task_type == "object_interaction":
+    if task_type in {"object_interaction", "object_interaction_scaled"}:
         """Generate different augmentation configurations for object interaction."""
         augmentations = []
         augmentations.append({"name": "original", "translation": np.array([0.0, 0.0, 0.0]), "rotation": 0.0})
@@ -225,6 +228,14 @@ def process_single_task(args):
                 augmentation=(k > 0),
             )
 
+        if task_type == "object_interaction_scaled":
+            scale_factors = (float(smpl_scale), float(smpl_scale), float(smpl_scale))
+            constants.OBJECT_POSE_Z_OFFSET = compute_object_pose_z_offset_for_scale(
+                constants.OBJECT_MESH_FILE,
+                scale_factors,
+                object_poses[0, :4],
+            )
+
         # Create retargeter
         retargeter_kwargs = build_retargeter_kwargs_from_config(retargeter, constants, object_urdf_path, task_type)
         retargeter = InteractionMeshRetargeter(**retargeter_kwargs)
@@ -232,10 +243,13 @@ def process_single_task(args):
         # Preprocess motion data
         if task_type == "robot_only":
             human_joints = preprocess_motion_data(human_joints, retargeter, toe_names, smpl_scale)
-        elif task_type in {"object_interaction", "climbing"}:
+        elif task_type in {"object_interaction", "object_interaction_scaled", "climbing"}:
             human_joints, object_poses, object_moving_frame_idx = preprocess_motion_data(
                 human_joints, retargeter, toe_names, scale=smpl_scale, object_poses=object_poses
             )
+            object_pose_z_offset = float(getattr(constants, "OBJECT_POSE_Z_OFFSET", 0.0))
+            if object_pose_z_offset != 0.0:
+                object_poses[:, -1] += object_pose_z_offset
 
         # Extract foot sticking sequences
         foot_sticking_sequences = extract_foot_sticking_sequence_velocity(
@@ -243,7 +257,7 @@ def process_single_task(args):
         )
 
         # Task-specific foot sticking adjustments
-        if task_type == "object_interaction":
+        if task_type in {"object_interaction", "object_interaction_scaled"}:
             # Disable initial sticking
             foot_sticking_sequences[0][toe_names[0]] = False
             foot_sticking_sequences[0][toe_names[1]] = False
@@ -251,7 +265,7 @@ def process_single_task(args):
         # Determine if this is an augmentation run (k > 0 means we're augmenting)
         is_augmentation_run = k > 0
 
-        if task_type == "object_interaction":
+        if task_type in {"object_interaction", "object_interaction_scaled"}:
             # Initialize robot pose
             q_init, q_nominal, object_poses_augmented, human_joints, object_poses = initialize_robot_pose(
                 task_type,

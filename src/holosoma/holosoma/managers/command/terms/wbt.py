@@ -22,6 +22,7 @@ from holosoma.utils.rotations import (
     quat_from_euler_xyz,
     quat_inverse,
     quat_mul,
+    quaternion_to_matrix,
     slerp,
     yaw_quat,
 )
@@ -429,6 +430,47 @@ def get_scaled_object_support_delta(
     return base_support_z - scaled_support_z
 
 
+def get_scaled_object_support_delta_from_points(
+    quat_xyzw: torch.Tensor,
+    scales_xyz: torch.Tensor,
+    local_support_points: torch.Tensor,
+    *,
+    chunk_size: int = 256,
+) -> torch.Tensor:
+    """Return the z offset needed to keep a scaled object's support plane unchanged.
+
+    This uses representative geometry support points rather than a local bbox
+    proxy, which better preserves floor contact for tilted and slender objects.
+    """
+    if quat_xyzw.numel() == 0:
+        return torch.zeros(0, device=quat_xyzw.device, dtype=quat_xyzw.dtype)
+
+    dtype = quat_xyzw.dtype
+    device = quat_xyzw.device
+    support_points = local_support_points.to(device=device, dtype=dtype)
+    scales_xyz = scales_xyz.to(device=device, dtype=dtype)
+
+    rotation_mats = quaternion_to_matrix(quat_xyzw, w_last=True)
+    world_z_in_local = rotation_mats[:, 2, :]
+
+    num_envs = quat_xyzw.shape[0]
+    orig_min = torch.full((num_envs,), torch.inf, device=device, dtype=dtype)
+    scaled_min = torch.full((num_envs,), torch.inf, device=device, dtype=dtype)
+    chunk_size = max(1, min(int(chunk_size), int(support_points.shape[0])))
+
+    for start in range(0, int(support_points.shape[0]), chunk_size):
+        points_chunk = support_points[start : start + chunk_size]
+        points_chunk = points_chunk.unsqueeze(0).expand(num_envs, -1, -1)
+
+        orig_proj = torch.sum(points_chunk * world_z_in_local.unsqueeze(1), dim=2)
+        scaled_proj = torch.sum((points_chunk * scales_xyz.unsqueeze(1)) * world_z_in_local.unsqueeze(1), dim=2)
+
+        orig_min = torch.minimum(orig_min, torch.min(orig_proj, dim=1).values)
+        scaled_min = torch.minimum(scaled_min, torch.min(scaled_proj, dim=1).values)
+
+    return orig_min - scaled_min
+
+
 class MotionCommand(CommandTermBase):
     def __init__(self, cfg: Any, env: WholeBodyTrackingManager):
         super().__init__(cfg, env)
@@ -689,10 +731,40 @@ class MotionCommand(CommandTermBase):
             )
             obj_pos_noise = obj_pos_noise * self.init_pose_cfg.overall_noise_scale  # (3,)
             target_obj_pos = obj_pos + (torch.rand(obj_pos.shape, device=self.device) - 0.5) * 2 * obj_pos_noise
+            support_points_by_actor = getattr(self._env, "object_local_support_points_by_actor", None)
             bbox_centers = getattr(self._env, "object_local_bbox_center_by_actor", None)
             bbox_half_extents = getattr(self._env, "object_local_bbox_half_extent_by_actor", None)
             object_scales = getattr(self._env, "object_scale_factors", None)
-            if bbox_centers and bbox_half_extents and object_scales is not None:
+            if support_points_by_actor and object_scales is not None:
+                if self.object_name_to_indices and selected_keys is not None and all_keys is not None:
+                    for object_key in all_keys:
+                        actor_name = f"object_{object_key}"
+                        local_support_points = support_points_by_actor.get(actor_name)
+                        if local_support_points is None:
+                            continue
+
+                        mask = torch.tensor(
+                            [key == object_key for key in selected_keys], device=self.device, dtype=torch.bool
+                        )
+                        if not mask.any():
+                            continue
+
+                        support_delta = get_scaled_object_support_delta_from_points(
+                            quat_xyzw=obj_ori[mask],
+                            scales_xyz=object_scales[env_ids[mask]],
+                            local_support_points=local_support_points,
+                        )
+                        target_obj_pos[mask, 2] += support_delta
+                else:
+                    local_support_points = support_points_by_actor.get(self.object_name)
+                    if local_support_points is not None:
+                        support_delta = get_scaled_object_support_delta_from_points(
+                            quat_xyzw=obj_ori,
+                            scales_xyz=object_scales[env_ids],
+                            local_support_points=local_support_points,
+                        )
+                        target_obj_pos[:, 2] += support_delta
+            elif bbox_centers and bbox_half_extents and object_scales is not None:
                 if self.object_name_to_indices and selected_keys is not None and all_keys is not None:
                     for object_key in all_keys:
                         actor_name = f"object_{object_key}"

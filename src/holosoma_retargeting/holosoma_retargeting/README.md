@@ -1,6 +1,6 @@
 # Holosoma Motion Retargeting
 
-This repository provides tools for retargeting human motion data to humanoid robots. It supports multiple data formats (smplh, mocap, lafan) and task types including robot-only motion, object interaction, and climbing.
+This repository provides tools for retargeting human motion data to humanoid robots. It supports multiple data formats (smplh, mocap, lafan) and task types including robot-only motion, object interaction, scaled object interaction, and climbing.
 
 **Data Requirements**: The retargeting pipeline requires motion data in world joint positions. For custom data, you need to prepare world joint positions in shape `(T, J, 3)` where T is the number of frames and J is the number of joints, and modify `demo_joints` and `joints_mapping` defined in `config_types/data_type.py`.
 
@@ -13,11 +13,14 @@ python examples/robot_retarget.py --data_path demo_data/OMOMO_new --task-type ro
 # Object interaction (OMOMO)
 python examples/robot_retarget.py --data_path demo_data/OMOMO_new --task-type object_interaction --task-name sub3_largebox_003 --data_format smplh --retargeter.debug --retargeter.visualize
 
+# Object interaction with SMPL-scaled object assets (matches the red demo points)
+python examples/robot_retarget.py --data_path demo_data/OMOMO_new --task-type object_interaction_scaled --task-name sub3_largebox_003 --data_format smplh --retargeter.debug --retargeter.visualize
+
 # Climbing
 python examples/robot_retarget.py --data_path demo_data/climb --task-type climbing --task-name mocap_climb_seq_0 --data_format mocap --robot-config.robot-urdf-file models/g1/g1_29dof_spherehand.urdf --retargeter.debug --retargeter.visualize
 ```
 
-**Note**: Add `--augmentation` to run sequences with augmentation. You must first run the original sequence before adding augmentation.
+**Note**: `object_interaction_scaled` creates scaled object URDF/XML assets automatically and applies a z-offset so compressed objects stay on the floor instead of floating. Add `--augmentation` to run sequences with augmentation. You must first run the original sequence before adding augmentation.
 
 ## Batch Processing for Motion Retargeting
 
@@ -27,6 +30,9 @@ python examples/parallel_robot_retarget.py --data-dir demo_data/OMOMO_new --task
 
 # Object interaction (OMOMO)
 python examples/parallel_robot_retarget.py --data-dir demo_data/OMOMO_new --task-type object_interaction --data_format smplh --save_dir demo_results_parallel/g1/object_interaction/omomo --task-config.object-name largebox
+
+# Object interaction with SMPL-scaled object assets
+python examples/parallel_robot_retarget.py --data-dir demo_data/OMOMO_new --task-type object_interaction_scaled --data_format smplh --save_dir demo_results_parallel/g1/object_interaction_scaled/omomo --task-config.object-name largebox
 
 # Climbing
 python examples/parallel_robot_retarget.py --data-dir demo_data/climb --task-type climbing --data_format mocap --robot-config.robot-urdf-file models/g1/g1_29dof_spherehand.urdf --task-config.object-name multi_boxes --save_dir demo_results_parallel/g1/climbing/mocap_climb

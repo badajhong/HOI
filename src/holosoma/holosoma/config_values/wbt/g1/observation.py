@@ -395,20 +395,33 @@ g1_29dof_wbt_observation_w_object_multi_student = ObservationManagerCfg(
             history_length=3,
             terms=obs_teacher,
         ),
-        "ir_ae_latent": ObsGroupCfg(
+        "ae_latent": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
             history_length=1,
             terms={
-                "ir_ae_latent": ObsTermCfg(
-                    func="holosoma.managers.observation.terms.wbt:IRAELatent",
+                "ae_latent": ObsTermCfg(
+                    func="holosoma.managers.observation.terms.wbt:AELatent",
                     params={
-                        # Preferred override path:
-                        # --observation.groups.ir_ae_latent.terms.ir_ae_latent.params.checkpoint_path=/path/to/best.pt
+                        # Preferred IR override path:
+                        # --observation.groups.ae_latent.terms.ae_latent.params.checkpoint_path=/path/to/ir_ae.pt
                         "checkpoint_path": "",
-                        # Preferred override path:
-                        # --observation.groups.ir_ae_latent.terms.ir_ae_latent.params.body_source=all
+                        # Preferred DI override path:
+                        # --observation.groups.ae_latent.terms.ae_latent.params.di_checkpoint_path=/path/to/di_ae.pt
+                        "di_checkpoint_path": "",
+                        # Optional explicit source: "", "ir", or "di"
+                        "source": "",
+                        # Optional depth-robot asset mode when source resolves to DI:
+                        # --observation.groups.ae_latent.terms.ae_latent.params.robot_depth_asset_mode=original
+                        "robot_depth_asset_mode": "auto",
+                        # Preferred IR-only override path:
+                        # --observation.groups.ae_latent.terms.ae_latent.params.body_source=all
                         "body_source": "",
+                        # Optional DI debug image saving when source resolves to DIAELatent.
+                        "debug_save_depth_images": False,
+                        "debug_depth_save_interval": 200,
+                        # Accept compact CLI values like "0" or "0,3".
+                        "debug_depth_env_ids": "0",
                     },
                     scale=1.0,
                     noise=0.0,
@@ -439,9 +452,14 @@ g1_29dof_wbt_observation_w_object_multi_res = ObservationManagerCfg(
                         # Preferred override path:
                         # --observation.groups.di_ae_latent.terms.di_ae_latent.params.checkpoint_path=/path/to/di_ae.pt
                         "checkpoint_path": "",
+                        # Match student training: keep the original robot asset and
+                        # let the simulator mount the depth camera on the torso
+                        # fallback when the realsense optical frame is absent.
+                        "robot_depth_asset_mode": "original",
                         "debug_save_depth_images": False,
                         "debug_depth_save_interval": 200,
-                        "debug_depth_env_ids": (0,),
+                        # Accept compact CLI values like "0" or "0,3".
+                        "debug_depth_env_ids": "0",
                     },
                     scale=1.0,
                     noise=0.0,

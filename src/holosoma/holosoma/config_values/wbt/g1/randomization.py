@@ -63,7 +63,7 @@ additional_object_dr_at_setup = {
     "randomize_object_scale_startup": RandomizationTermCfg(
         func="holosoma.managers.randomization.terms.locomotion:randomize_object_scale_startup",
         params={
-            "scale_range": (0.8, 1.2),
+            "scale_range": (0.9, 1.1),
             # Optional fixed scale for debugging. Example: 2.0 or [1.0, 1.0, 2.0].
             # "scale_value": 2.0,
             # Optional manual height fallback. Non-positive values trigger URDF-based auto bounds.
@@ -71,14 +71,14 @@ additional_object_dr_at_setup = {
             "enabled": True,
         },
     ),
-    "set_object_init_pose_noise": RandomizationTermCfg(
-        func="holosoma.managers.randomization.terms.locomotion:set_object_init_pose_noise",
-        params={
-            "object_pos_noise": [0.2, 0.2, 0.0],
-            "overall_noise_scale": 1.0,
-            "enabled": True,
-        },
-    ),
+    # "set_object_init_pose_noise": RandomizationTermCfg(
+    #     func="holosoma.managers.randomization.terms.locomotion:set_object_init_pose_noise",
+    #     params={
+    #         "object_pos_noise": [0.2, 0.2, 0.0],
+    #         "overall_noise_scale": 1.0,
+    #         "enabled": True,
+    #     },
+    # ),
 }
 
 base_setup_terms = {

@@ -106,7 +106,7 @@ class MotionConfig:
     start_at_timestep_zero_prob: float = 0.2
     """Probability of starting at timestep zero."""
 
-    freeze_at_timestep_zero_prob: float = 0.95
+    freeze_at_timestep_zero_prob: float = 0.0
     """When starting at timestep 0, probability of freezing motion counter at 0 (not advancing).
     This makes the robot practice holding the initial pose. Only applies when episode starts at timestep 0.
     Sampled independently each policy step; expected wait is roughly 1 / (1 - p) steps before unfreezing."""

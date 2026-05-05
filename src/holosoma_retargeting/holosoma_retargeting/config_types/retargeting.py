@@ -20,7 +20,9 @@ class RetargetingConfig:
     """
 
     # --- Task type selection ---
-    task_type: Literal["robot_only", "object_interaction", "climbing"] = "object_interaction"
+    task_type: Literal["robot_only", "object_interaction", "object_interaction_scaled", "climbing"] = (
+        "object_interaction"
+    )
     """Type of retargeting task."""
 
     # --- top-level run knobs ---

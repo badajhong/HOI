@@ -47,11 +47,18 @@ def _observation_requires_depth_camera(config: ExperimentConfig | RunSimConfig) 
         "holosoma.managers.observation.terms.wbt:DIAELatent",
         "holosoma.managers.observation.terms.wbt:FrozenStudentBaseAction",
     }
-    return any(
-        term_cfg.func in depth_term_funcs
-        for group_cfg in observation_cfg.groups.values()
-        for term_cfg in group_cfg.terms.values()
-    )
+    for group_cfg in observation_cfg.groups.values():
+        for term_cfg in group_cfg.terms.values():
+            if term_cfg.func in depth_term_funcs:
+                return True
+            if term_cfg.func in {
+                "holosoma.managers.observation.terms.wbt:AELatent",
+                "holosoma.managers.observation.terms.wbt:StudentLatent",
+            }:
+                source = str(term_cfg.params.get("source", "")).strip().lower()
+                if source == "di" or bool(term_cfg.params.get("di_checkpoint_path")):
+                    return True
+    return False
 
 
 def setup_simulator_imports(config: ExperimentConfig | RunSimConfig) -> None:

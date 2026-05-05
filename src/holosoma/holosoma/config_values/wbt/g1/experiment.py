@@ -208,16 +208,17 @@ g1_29dof_wbt_w_object_multi_teacher = replace(
     g1_29dof_wbt_w_object,
     command=command.g1_29dof_wbt_command_w_object_multi,
     robot=replace(
-        robot.g1_29dof_w_object_multi_teacher,
+        robot.g1_29dof_w_object_multi_realsense,
         asset=replace(
-            robot.g1_29dof_w_object_multi_teacher.asset,
+            robot.g1_29dof_w_object_multi_realsense.asset,
             enable_self_collisions=True,
+            collapse_fixed_joints=False,
         ),
         object=replace(
-            robot.g1_29dof_w_object_multi_teacher.object,
+            robot.g1_29dof_w_object_multi_realsense.object,
             object_urdf_path="holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf",
         ),
-        init_state=replace(robot.g1_29dof_w_object_multi_teacher.init_state, pos=[0.0, 0.0, 0.76]),
+        init_state=replace(robot.g1_29dof_w_object_multi_realsense.init_state, pos=[0.0, 0.0, 0.76]),
     ),
     randomization=randomization.g1_29dof_wbt_randomization_w_object,
     observation=observation.g1_29dof_wbt_observation_w_object_multi_teacher,
@@ -299,16 +300,16 @@ g1_29dof_wbt_w_object_multi_res = replace(
     observation=observation.g1_29dof_wbt_observation_w_object_multi_res,
     reward=reward.g1_29dof_wbt_reward_w_object_multi_res,
     robot=replace(
-        robot.g1_29dof_w_object_multi_realsense,
+        robot.g1_29dof_w_object_multi,
         asset=replace(
-            robot.g1_29dof_w_object_multi_realsense.asset,
+            robot.g1_29dof_w_object_multi.asset,
             enable_self_collisions=True,
         ),
         object=replace(
-            robot.g1_29dof_w_object_multi_realsense.object,
+            robot.g1_29dof_w_object_multi.object,
             object_urdf_path="holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf",
         ),
-        init_state=replace(robot.g1_29dof_w_object_multi_realsense.init_state, pos=[0.0, 0.0, 0.76]),
+        init_state=replace(robot.g1_29dof_w_object_multi.init_state, pos=[0.0, 0.0, 0.76]),
     ),
 )
 

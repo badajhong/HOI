@@ -121,7 +121,7 @@ class MotionConfig:
     # Sampling behavior
     use_adaptive_timesteps_sampler: bool = False      # Prioritize hard samples
     start_at_timestep_zero_prob: float = 0.2          # Prob of starting at 0
-    freeze_at_timestep_zero_prob: float = 0.95        # Prob of freezing at 0
+    freeze_at_timestep_zero_prob: float = 0.0         # Prob of freezing at 0
     
     # Pose interpolation
     enable_default_pose_prepend: bool = True          # Interpolate from default pose at start

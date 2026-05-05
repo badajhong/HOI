@@ -119,10 +119,11 @@ class RetargetingEvaluator:
         self.sliding_threshold = 0.01
 
         # Load Mujoco model
+        scene_xml_file = getattr(constants, "SCENE_XML_FILE", "")
         if self.object_name == "ground":
             robot_xml_path = robot_model_path.replace(".urdf", ".xml")
-        elif self.object_name == "multi_boxes":
-            robot_xml_path = constants.SCENE_XML_FILE  # type: ignore[attr-defined]
+        elif scene_xml_file:
+            robot_xml_path = scene_xml_file
         else:
             robot_xml_path = robot_model_path.replace(".urdf", "_w_" + self.object_name + ".xml")
 

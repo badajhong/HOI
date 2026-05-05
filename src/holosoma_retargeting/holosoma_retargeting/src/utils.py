@@ -659,6 +659,77 @@ def create_scaled_multi_boxes_xml(
     return output_path
 
 
+def create_scaled_single_object_urdf(
+    urdf_path: str,
+    new_scale: tuple[float, float, float],
+    output_path: str | None = None,
+):
+    """Generate a scaled URDF for a single mesh object."""
+    if output_path is None:
+        output_path = urdf_path.replace(".urdf", "_scaled.urdf")
+
+    with open(urdf_path) as f:
+        content = f.read()
+
+    replacement = f'scale="{new_scale[0]} {new_scale[1]} {new_scale[2]}"'
+    content = re.sub(r'scale="[^"]*"', replacement, content)
+
+    with open(output_path, "w") as f:
+        f.write(content)
+
+    return output_path
+
+
+def create_scaled_single_object_scene_xml(
+    scene_xml_path: str,
+    object_name: str,
+    new_scale: tuple[float, float, float],
+    output_path: str | None = None,
+):
+    """Generate a scaled MuJoCo scene XML for a single mesh object."""
+    if output_path is None:
+        output_path = scene_xml_path.replace(".xml", "_scaled.xml")
+
+    with open(scene_xml_path) as f:
+        content = f.read()
+
+    mesh_pattern = rf'(<mesh\s+name="{re.escape(object_name)}_mesh"[^>]*scale=")([^"]*)(")'
+    replacement = rf"\g<1>{new_scale[0]} {new_scale[1]} {new_scale[2]}\3"
+    content, replacements = re.subn(mesh_pattern, replacement, content, count=1)
+    if replacements != 1:
+        raise ValueError(
+            f"Failed to locate mesh asset '{object_name}_mesh' in scene XML '{scene_xml_path}' for scaling."
+        )
+
+    with open(output_path, "w") as f:
+        f.write(content)
+
+    return output_path
+
+
+def compute_object_pose_z_offset_for_scale(
+    object_file: str,
+    scale_factors: tuple[float, float, float],
+    object_quat_wxyz: np.ndarray,
+) -> float:
+    """Compute a z-offset so the scaled object keeps the same initial floor contact.
+
+    The offset is computed from the mesh bottom projected onto world z using the
+    initial object orientation, which is necessary when the object's local z-axis
+    is not aligned with world up.
+    """
+    obj_mesh = trimesh.load(object_file, force="mesh")
+    vertices = np.asarray(obj_mesh.vertices, dtype=np.float64)  # type: ignore[attr-defined]
+
+    qw, qx, qy, qz = [float(v) for v in object_quat_wxyz]
+    rotation = R.from_quat([qx, qy, qz, qw]).as_matrix()
+
+    original_projected_min_z = float(np.min((vertices @ rotation.T)[:, 2]))
+    scaled_vertices = vertices * np.asarray(scale_factors, dtype=np.float64)
+    scaled_projected_min_z = float(np.min((scaled_vertices @ rotation.T)[:, 2]))
+    return original_projected_min_z - scaled_projected_min_z
+
+
 def create_new_scene_xml_file(
     ori_scene_xml_path: str,
     new_scale: tuple,

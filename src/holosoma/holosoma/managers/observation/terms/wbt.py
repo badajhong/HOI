@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -562,11 +563,114 @@ class IRAELatent(ObservationTermBase):
         mu, _ = self.encoder.encode_ir(normalized_window, text_features)
         return mu
 
+
+class AELatent(ObservationTermBase):
+    """AE latent observation backed by either IR or depth latent encoders.
+
+    This term provides a source-agnostic latent observation for student
+    policies while allowing student training to swap between:
+
+    * IR latent (`--ir_ae`, optional `--ir_ae_body_source`)
+    * DI latent (`--di_ae`)
+    """
+
+    def __init__(self, cfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+
+        ir_checkpoint = cfg.params.get("checkpoint_path") or getattr(env, "ir_ae", None)
+        di_checkpoint = cfg.params.get("di_checkpoint_path") or getattr(env, "di_ae", None)
+        requested_source = str(cfg.params.get("source", "")).strip().lower()
+
+        if requested_source and requested_source not in {"ir", "di"}:
+            raise ValueError(
+                f"Unsupported student latent source '{requested_source}'. Expected one of ('', 'ir', 'di')."
+            )
+
+        if not requested_source:
+            if ir_checkpoint and di_checkpoint:
+                raise ValueError(
+                    "AE latent observation received both IR and DI checkpoints. "
+                    "Pass only one of `--ir_ae` / `--di_ae`, or set observation param `source` to disambiguate."
+                )
+            if di_checkpoint:
+                requested_source = "di"
+            elif ir_checkpoint:
+                requested_source = "ir"
+            else:
+                raise ValueError(
+                    "AE latent observation requires either an IR latent checkpoint or a DI latent checkpoint. "
+                    "Pass `--ir_ae=/path/to/best.pt` (optionally with `--ir_ae_body_source`) "
+                    "or `--di_ae=/path/to/best.pt`."
+                )
+
+        if requested_source == "ir":
+            if not ir_checkpoint:
+                raise ValueError(
+                    "AE latent source is set to 'ir', but no IR latent checkpoint was provided. "
+                    "Pass `--ir_ae=/path/to/best.pt`."
+                )
+            inner_params = dict(cfg.params)
+            inner_params["checkpoint_path"] = ir_checkpoint
+            inner_cfg = dataclasses.replace(cfg, params=inner_params)
+            self.impl = IRAELatent(inner_cfg, env)
+        else:
+            if not di_checkpoint:
+                raise ValueError(
+                    "AE latent source is set to 'di', but no DI latent checkpoint was provided. "
+                    "Pass `--di_ae=/path/to/best.pt`."
+                )
+            inner_params = dict(cfg.params)
+            inner_params["checkpoint_path"] = di_checkpoint
+            inner_cfg = dataclasses.replace(cfg, params=inner_params)
+            self.impl = DIAELatent(inner_cfg, env)
+
+        self.source = requested_source
+        logger.info(f"AE latent observation is using source='{self.source}'.")
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        self.impl.reset(env_ids)
+
+    @torch.no_grad()
+    def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:
+        return self.impl(env, **kwargs)
+
+
+class StudentLatent(AELatent):
+    """Backward-compatible alias for older student_latent observation configs."""
+
 def _get_observation_compute_token(env: WholeBodyTrackingManager) -> int:
     observation_manager = getattr(env, "observation_manager", None)
     if observation_manager is None:
         return -1
     return int(getattr(observation_manager, "_compute_invocation_id", -1))
+
+
+def _parse_debug_depth_env_ids(raw_env_ids: object) -> tuple[int, ...]:
+    """Parse debug env ids from int, iterable, or a compact CLI-friendly string."""
+    if raw_env_ids is None:
+        return (0,)
+
+    if isinstance(raw_env_ids, int):
+        return (int(raw_env_ids),)
+
+    if isinstance(raw_env_ids, str):
+        text = raw_env_ids.strip()
+        if text.lower() in {"", "all", "*"}:
+            return ()
+
+        if (text.startswith("(") and text.endswith(")")) or (text.startswith("[") and text.endswith("]")):
+            text = text[1:-1].strip()
+        if text.endswith(","):
+            text = text[:-1].strip()
+        if text.lower() in {"", "all", "*"}:
+            return ()
+
+        parts = [part.strip() for part in text.split(",") if part.strip()]
+        if not parts:
+            return ()
+        return tuple(int(part) for part in parts)
+
+    return tuple(int(env_id) for env_id in raw_env_ids)
 
 
 class _DepthLatentObservationTermBase(ObservationTermBase):
@@ -587,13 +691,8 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
         self.di_checkpoint = str(di_checkpoint)
         self.debug_save_depth_images = bool(cfg.params.get("debug_save_depth_images", False))
         self.debug_depth_save_interval = max(int(cfg.params.get("debug_depth_save_interval", 200)), 1)
-        debug_depth_env_ids = cfg.params.get("debug_depth_env_ids", (0,))
-        if debug_depth_env_ids is None:
-            self.debug_depth_env_ids: tuple[int, ...] = (0,)
-        elif isinstance(debug_depth_env_ids, int):
-            self.debug_depth_env_ids = (int(debug_depth_env_ids),)
-        else:
-            self.debug_depth_env_ids = tuple(int(env_id) for env_id in debug_depth_env_ids)
+        debug_depth_env_ids = cfg.params.get("debug_depth_env_ids", "0")
+        self.debug_depth_env_ids = _parse_debug_depth_env_ids(debug_depth_env_ids)
         self.debug_depth_env_id_set = set(self.debug_depth_env_ids)
         self.debug_depth_dir = self._resolve_debug_depth_dir(env) if self.debug_save_depth_images else None
         self._debug_episode_indices = torch.full((env.num_envs,), -1, device=self.device, dtype=torch.long)
@@ -870,6 +969,7 @@ class FrozenStudentBaseAction(ObservationTermBase):
         self.student_checkpoint = str(student_checkpoint)
         self.student_actor = None
         self.student_input_keys: list[str] = []
+        self.student_latent_input_key: str | None = None
         self.student_obs_dim: int | None = None
         self.student_latent_dim: int | None = None
         self.num_actions = env.robot_config.actions_dim
@@ -905,20 +1005,23 @@ class FrozenStudentBaseAction(ObservationTermBase):
 
         student_actor_cfg = student_algo_config.module_dict.actor
         self.student_input_keys = list(student_actor_cfg.input_dim)
-        expected_keys = {"actor_obs", "ir_ae_latent"}
         actual_keys = set(self.student_input_keys)
-        if actual_keys != expected_keys:
+        supported_latent_keys = {"ae_latent", "student_latent", "ir_ae_latent"}
+        latent_input_keys = [key for key in self.student_input_keys if key != "actor_obs"]
+        if "actor_obs" not in actual_keys or len(latent_input_keys) != 1 or latent_input_keys[0] not in supported_latent_keys:
             raise ValueError(
-                f"Frozen student actor expects inputs {self.student_input_keys}; supported inputs are {sorted(expected_keys)}."
+                "Frozen student actor expects input keys ['actor_obs', '<latent_key>'] where "
+                f"<latent_key> is one of {sorted(supported_latent_keys)}. Got {self.student_input_keys}."
             )
+        self.student_latent_input_key = latent_input_keys[0]
 
         self.student_actor = setup_ppo_actor_module(
-            obs_dim_dict={"actor_obs": student_obs_dim, "ir_ae_latent": latent_dim},
+            obs_dim_dict={"actor_obs": student_obs_dim, self.student_latent_input_key: latent_dim},
             module_config=student_actor_cfg,
             num_actions=self.num_actions,
             init_noise_std=getattr(student_algo_config, "init_noise_std", 1.0),
             device=self.device,
-            history_length={"actor_obs": 1, "ir_ae_latent": 1},
+            history_length={"actor_obs": 1, self.student_latent_input_key: 1},
         )
         self.student_actor.load_state_dict(student_payload["actor_model_state_dict"])
         self.student_actor.eval()
@@ -939,7 +1042,7 @@ class FrozenStudentBaseAction(ObservationTermBase):
         for key in self.student_input_keys:
             if key == "actor_obs":
                 inputs.append(student_obs)
-            elif key == "ir_ae_latent":
+            elif key in {"ae_latent", "student_latent", "ir_ae_latent"}:
                 inputs.append(depth_latent)
             else:
                 raise ValueError(f"Unsupported frozen student input key '{key}'.")

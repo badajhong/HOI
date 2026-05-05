@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 import numpy as np
 import onnx
@@ -10,6 +11,7 @@ from loguru import logger
 from termcolor import colored
 
 from holosoma_inference.config.config_types.inference import InferenceConfig
+from holosoma_inference.config.config_types.observation import ObservationConfig
 from holosoma_inference.policies import BasePolicy
 from holosoma_inference.policies.wbt_utils import MotionClockUtil, PinocchioRobot, TimestepUtil
 from holosoma_inference.utils.clock import ClockSub
@@ -27,6 +29,15 @@ from holosoma_inference.utils.math.quat import (
 class WholeBodyTrackingPolicy(BasePolicy):
     def __init__(self, config: InferenceConfig):
         self.config = config
+        self._default_observation_config = config.observation
+        self._residual_fused_export_spec: dict | None = None
+        self._uses_residual_fused_export = False
+        self._di_onnx_session = None
+        self._di_onnx_input_names: list[str] = []
+        self._di_onnx_output_names: list[str] = []
+        self._di_model_path: str | None = None
+        self._static_di_latent: np.ndarray | None = None
+        self._static_depth_window: np.ndarray | None = None
 
         # initialize motion state
         self.motion_clip_progressing = False
@@ -121,6 +132,184 @@ class WholeBodyTrackingPolicy(BasePolicy):
         ref_ori_xyzw = self.pinocchio_robot.fk_and_get_ref_body_orientation_in_world(configuration)
         return xyzw_to_wxyz(ref_ori_xyzw)
 
+    def _apply_observation_config(self, obs_config: ObservationConfig) -> None:
+        self.obs_config = obs_config
+        self.obs_scales = self.obs_config.obs_scales
+        self.obs_dims = self.obs_config.obs_dims
+        self.obs_dict = self.obs_config.obs_dict
+        self.obs_dim_dict = self._calculate_obs_dim_dict()
+        self.history_length_dict = self.obs_config.history_length_dict
+        self._initialize_history_state()
+
+    def _build_residual_fused_observation_config(self, export_spec: dict) -> ObservationConfig:
+        shared_terms = list(export_spec["shared_obs_terms"])
+        shared_dims = {str(key): int(value) for key, value in export_spec["shared_obs_dims"].items()}
+        shared_scales = dict(export_spec["shared_obs_scales"])
+        shared_history = int(export_spec.get("shared_obs_history_length", 1))
+        di_mode = str(export_spec.get("di_encoder_mode", "fused"))
+
+        if di_mode == "fused":
+            return ObservationConfig(
+                obs_dict={"shared_obs": shared_terms},
+                obs_dims=dict(shared_dims),
+                obs_scales={str(key): float(value) for key, value in shared_scales.items()},
+                history_length_dict={"shared_obs": shared_history},
+            )
+
+        obs_dict = {
+            "shared_obs": shared_terms,
+            "di_ae_latent": [str(export_spec.get("latent_term", "di_ae_latent"))],
+        }
+        obs_dims = dict(shared_dims)
+        obs_dims[str(export_spec.get("latent_term", "di_ae_latent"))] = int(export_spec["latent_dim"])
+        obs_scales = {str(key): float(value) for key, value in shared_scales.items()}
+        obs_scales[str(export_spec.get("latent_term", "di_ae_latent"))] = 1.0
+        history_length_dict = {
+            "shared_obs": shared_history,
+            "di_ae_latent": int(export_spec.get("latent_history_length", 1)),
+        }
+        return ObservationConfig(
+            obs_dict=obs_dict,
+            obs_dims=obs_dims,
+            obs_scales=obs_scales,
+            history_length_dict=history_length_dict,
+        )
+
+    def _residual_di_mode(self) -> str:
+        if self._residual_fused_export_spec is None:
+            return ""
+        return str(self._residual_fused_export_spec.get("di_encoder_mode", "fused"))
+
+    def _maybe_resolve_di_model_path(self, model_path: str, export_spec: dict) -> str | None:
+        if self.config.task.di_model_path:
+            return self.config.task.di_model_path
+
+        artifact_name = export_spec.get("di_encoder_artifact")
+        if not artifact_name:
+            return None
+
+        candidate = Path(model_path).with_name(str(artifact_name))
+        if candidate.exists():
+            return str(candidate)
+        return None
+
+    def _setup_separate_di_provider(self, model_path: str, export_spec: dict) -> None:
+        self._di_onnx_session = None
+        self._di_onnx_input_names = []
+        self._di_onnx_output_names = []
+        self._di_model_path = self._maybe_resolve_di_model_path(model_path, export_spec)
+        self._static_di_latent = None
+        self._static_depth_window = None
+
+        latent_dim = int(export_spec["latent_dim"])
+        if self.config.task.di_latent_path:
+            latent = np.asarray(np.load(self.config.task.di_latent_path), dtype=np.float32)
+            if latent.ndim == 1:
+                latent = latent.reshape(1, -1)
+            if latent.shape != (1, latent_dim):
+                raise ValueError(
+                    f"Expected DI latent override shape (1, {latent_dim}), got {latent.shape} from "
+                    f"{self.config.task.di_latent_path}."
+                )
+            self._static_di_latent = latent
+            logger.info(f"Loaded static DI latent override: {self.config.task.di_latent_path}")
+
+        if self.config.task.depth_window_npy_path:
+            depth_window = np.asarray(np.load(self.config.task.depth_window_npy_path), dtype=np.float32)
+            self._static_depth_window = self._prepare_depth_window_input(depth_window)
+            logger.info(f"Loaded static depth window override: {self.config.task.depth_window_npy_path}")
+
+        if self._di_model_path:
+            self._di_onnx_session = onnxruntime.InferenceSession(self._di_model_path)
+            self._di_onnx_input_names = [inp.name for inp in self._di_onnx_session.get_inputs()]
+            self._di_onnx_output_names = [out.name for out in self._di_onnx_session.get_outputs()]
+            logger.info(f"Loaded separate DI encoder ONNX: {self._di_model_path}")
+        elif self._static_di_latent is None:
+            logger.warning(
+                "This older residual WBT export expects a separate DI latent source. "
+                "Provide `--task.di-model-path` plus a depth provider, or use "
+                "`--task.di-latent-path` for a precomputed latent."
+            )
+
+    def _setup_fused_depth_provider(self) -> None:
+        self._di_onnx_session = None
+        self._di_onnx_input_names = []
+        self._di_onnx_output_names = []
+        self._di_model_path = None
+        self._static_di_latent = None
+        self._static_depth_window = None
+        if self.config.task.depth_window_npy_path:
+            depth_window = np.asarray(np.load(self.config.task.depth_window_npy_path), dtype=np.float32)
+            self._static_depth_window = self._prepare_depth_window_input(depth_window)
+            logger.info(f"Loaded static depth window override: {self.config.task.depth_window_npy_path}")
+
+    def _prepare_depth_window_input(self, depth_window: np.ndarray) -> np.ndarray:
+        depth_window_np = np.asarray(depth_window, dtype=np.float32)
+        if depth_window_np.ndim == 3:
+            depth_window_np = depth_window_np.reshape(1, *depth_window_np.shape)
+        if depth_window_np.ndim != 4 or depth_window_np.shape[0] != 1:
+            raise ValueError(
+                f"Expected depth window shape [T, H, W] or [1, T, H, W], got {depth_window_np.shape}."
+            )
+        return depth_window_np.astype(np.float32, copy=False)
+
+    def _get_current_depth_window(self) -> np.ndarray | None:
+        if self._static_depth_window is not None:
+            return self._static_depth_window.copy()
+
+        get_depth_window = getattr(self.interface, "get_depth_window", None)
+        if callable(get_depth_window):
+            depth_window = get_depth_window()
+            if depth_window is None:
+                return None
+            return self._prepare_depth_window_input(depth_window)
+        return None
+
+    def _get_di_latent(self) -> np.ndarray:
+        assert self._residual_fused_export_spec is not None
+        latent_dim = int(self._residual_fused_export_spec["latent_dim"])
+        if self._static_di_latent is not None:
+            return self._static_di_latent.copy()
+
+        if self._di_onnx_session is None:
+            raise RuntimeError(
+                "This older residual WBT export needs a separate DI latent source, but no DI encoder is configured. "
+                "Use `--task.di-model-path` together with an interface that exposes `get_depth_window()`, "
+                "or pass `--task.di-latent-path`."
+            )
+
+        depth_window = self._get_current_depth_window()
+        if depth_window is None:
+            raise RuntimeError(
+                "Residual fused WBT inference could not obtain a depth window. "
+                "Provide `--task.depth-window-npy-path` for offline testing or expose "
+                "`interface.get_depth_window()` in the runtime interface."
+            )
+
+        input_name = self._di_onnx_input_names[0]
+        output_name = self._di_onnx_output_names[0]
+        latent = self._di_onnx_session.run([output_name], {input_name: depth_window})[0]
+        latent = np.asarray(latent, dtype=np.float32)
+        if latent.ndim == 1:
+            latent = latent.reshape(1, -1)
+        if latent.shape != (1, latent_dim):
+            raise ValueError(f"Expected DI encoder output shape (1, {latent_dim}), got {latent.shape}.")
+        return latent
+
+    def _get_object_type_one_hot(self) -> np.ndarray:
+        if self._residual_fused_export_spec is None:
+            raise RuntimeError("Residual fused export spec is missing.")
+        shared_dims = self._residual_fused_export_spec["shared_obs_dims"]
+        if "obj_type_one_hot" not in shared_dims:
+            raise RuntimeError("Residual fused export expects obj_type_one_hot, but the export spec omitted it.")
+        num_classes = int(shared_dims["obj_type_one_hot"])
+        if num_classes <= 0:
+            raise ValueError(f"obj_type_one_hot dimension must be positive, got {num_classes}.")
+        object_type_id = int(np.clip(self.config.task.object_type_id, 0, num_classes - 1))
+        one_hot = np.zeros((1, num_classes), dtype=np.float32)
+        one_hot[0, object_type_id] = 1.0
+        return one_hot
+
     def setup_policy(self, model_path):
         self.onnx_policy_session = onnxruntime.InferenceSession(model_path)
         self.onnx_input_names = [inp.name for inp in self.onnx_policy_session.get_inputs()]
@@ -138,20 +327,51 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         self.onnx_kp = np.array(metadata["kp"]) if "kp" in metadata else None
         self.onnx_kd = np.array(metadata["kd"]) if "kd" in metadata else None
+        self._residual_fused_export_spec = None
+        self._uses_residual_fused_export = False
+        self._apply_observation_config(self._default_observation_config)
+
+        export_spec = metadata.get("policy_export_spec")
+        if isinstance(export_spec, dict) and export_spec.get("kind") == "wbt_student_residual_fused":
+            self._residual_fused_export_spec = export_spec
+            self._uses_residual_fused_export = True
+            self._apply_observation_config(self._build_residual_fused_observation_config(export_spec))
+            if self._residual_di_mode() == "fused":
+                self._setup_fused_depth_provider()
+            else:
+                self._setup_separate_di_provider(model_path, export_spec)
 
         if self.onnx_kp is not None:
-            from pathlib import Path
-
             logger.info(f"Loaded KP/KD from ONNX metadata: {Path(model_path).name}")
+        if self._uses_residual_fused_export:
+            if self._residual_di_mode() == "fused":
+                logger.info("Configured WBT inference for one-file fused DI+student+residual policy.")
+            else:
+                logger.info("Configured WBT inference for legacy fused student+residual policy with separate DI.")
 
         # get initial command and ref quat xyzw at the configured start timestep
         time_step = np.array([[self.config.task.motion_start_timestep]], dtype=np.float32)
 
         # Use configured observation dimensions (including history) instead of a hard-coded value.
-        actor_obs_template = self.obs_buf_dict.get("actor_obs")
-        if actor_obs_template is None:
-            raise ValueError("Observation group 'actor_obs' must be configured for WBT policy.")
-        obs = actor_obs_template.copy()
+        if self._uses_residual_fused_export:
+            shared_obs_template = self.obs_buf_dict.get("shared_obs")
+            if shared_obs_template is None:
+                raise ValueError("Residual fused WBT policy requires 'shared_obs' group.")
+            if self._residual_di_mode() == "fused":
+                assert self._residual_fused_export_spec is not None
+                depth_flat_dim = int(self._residual_fused_export_spec["depth_window_flat_dim"])
+                depth_flat = np.zeros((1, depth_flat_dim), dtype=np.float32)
+                obs = np.concatenate([shared_obs_template, depth_flat], axis=1).astype(np.float32, copy=False)
+            else:
+                latent_template = self.obs_buf_dict.get("di_ae_latent")
+                if latent_template is None:
+                    raise ValueError("Residual fused WBT policy requires 'di_ae_latent' group in separate mode.")
+                obs = np.concatenate([shared_obs_template, latent_template], axis=1).astype(np.float32, copy=False)
+        else:
+            actor_obs_template = self.obs_buf_dict.get("actor_obs")
+            if actor_obs_template is None:
+                raise ValueError("Observation group 'actor_obs' must be configured for WBT policy.")
+            obs = actor_obs_template.copy()
         input_feed = {"obs": obs, "time_step": time_step}
         outputs = self.onnx_policy_session.run(["joint_pos", "joint_vel", "ref_quat_xyzw"], input_feed)
 
@@ -177,12 +397,32 @@ class WholeBodyTrackingPolicy(BasePolicy):
             {
                 "motion_command_0": self.motion_command_0.copy(),
                 "ref_quat_xyzw_0": self.ref_quat_xyzw_0.copy(),
+                "obs_config": self.obs_config,
+                "residual_fused_export_spec": self._residual_fused_export_spec,
+                "uses_residual_fused_export": self._uses_residual_fused_export,
+                "di_onnx_session": self._di_onnx_session,
+                "di_onnx_input_names": list(self._di_onnx_input_names),
+                "di_onnx_output_names": list(self._di_onnx_output_names),
+                "di_model_path": self._di_model_path,
+                "static_di_latent": None if self._static_di_latent is None else self._static_di_latent.copy(),
+                "static_depth_window": None if self._static_depth_window is None else self._static_depth_window.copy(),
             }
         )
         return state
 
     def _restore_policy_state(self, state):
         super()._restore_policy_state(state)
+        self._apply_observation_config(state.get("obs_config", self._default_observation_config))
+        self._residual_fused_export_spec = state.get("residual_fused_export_spec")
+        self._uses_residual_fused_export = bool(state.get("uses_residual_fused_export", False))
+        self._di_onnx_session = state.get("di_onnx_session")
+        self._di_onnx_input_names = list(state.get("di_onnx_input_names", []))
+        self._di_onnx_output_names = list(state.get("di_onnx_output_names", []))
+        self._di_model_path = state.get("di_model_path")
+        static_di_latent = state.get("static_di_latent")
+        self._static_di_latent = None if static_di_latent is None else static_di_latent.copy()
+        static_depth_window = state.get("static_depth_window")
+        self._static_depth_window = None if static_depth_window is None else static_depth_window.copy()
         self.motion_command_0 = state["motion_command_0"].copy()
         self.ref_quat_xyzw_0 = state["ref_quat_xyzw_0"].copy()
         self.motion_clip_progressing = False
@@ -215,8 +455,14 @@ class WholeBodyTrackingPolicy(BasePolicy):
     def get_current_obs_buffer_dict(self, robot_state_data):
         current_obs_buffer_dict = {}
 
-        # motion_command
-        current_obs_buffer_dict["motion_command"] = self.motion_command_t
+        if self._uses_residual_fused_export:
+            current_obs_buffer_dict["motion_command_joint_pos"] = self.motion_command_t[:, : self.num_dofs]
+            current_obs_buffer_dict["obj_type_one_hot"] = self._get_object_type_one_hot()
+            if self._residual_di_mode() != "fused":
+                current_obs_buffer_dict["di_ae_latent"] = self._get_di_latent()
+        else:
+            # motion_command
+            current_obs_buffer_dict["motion_command"] = self.motion_command_t
 
         # motion_ref_ori_b
         motion_ref_ori = xyzw_to_wxyz(self.ref_quat_xyzw_t)  # wxyz
@@ -244,6 +490,36 @@ class WholeBodyTrackingPolicy(BasePolicy):
         current_obs_buffer_dict["actions"] = self.last_policy_action
 
         return current_obs_buffer_dict
+
+    def prepare_obs_for_rl(self, robot_state_data):
+        if not self._uses_residual_fused_export:
+            return super().prepare_obs_for_rl(robot_state_data)
+
+        group_outputs = self._prepare_group_observations(robot_state_data)
+        if "shared_obs" not in group_outputs:
+            raise KeyError("Residual fused WBT policy requires 'shared_obs' observation group.")
+        shared_obs = group_outputs["shared_obs"].astype(np.float32, copy=False)
+        if self._residual_di_mode() == "fused":
+            depth_window = self._get_current_depth_window()
+            if depth_window is None:
+                raise RuntimeError(
+                    "Fused residual WBT ONNX requires a depth window. "
+                    "Provide `--task.depth-window-npy-path` for offline testing or expose "
+                    "`interface.get_depth_window()` in the runtime interface."
+                )
+            actor_obs = np.concatenate(
+                [shared_obs, depth_window.reshape(depth_window.shape[0], -1)],
+                axis=1,
+            ).astype(np.float32, copy=False)
+        else:
+            if "di_ae_latent" not in group_outputs:
+                raise KeyError("Residual fused WBT policy requires 'di_ae_latent' group in separate mode.")
+            latent = group_outputs["di_ae_latent"].astype(np.float32, copy=False)
+            actor_obs = np.concatenate([shared_obs, latent], axis=1).astype(np.float32, copy=False)
+
+        obs_dict = dict(group_outputs)
+        obs_dict["actor_obs"] = actor_obs
+        return obs_dict
 
     def rl_inference(self, robot_state_data):
         # prepare obs, run policy inference

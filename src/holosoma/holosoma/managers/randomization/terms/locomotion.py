@@ -137,6 +137,25 @@ def _transform_bounds(bounds: np.ndarray, translation: np.ndarray, rotation: np.
     return np.stack([transformed.min(axis=0), transformed.max(axis=0)], axis=0).astype(np.float32)
 
 
+def _resolve_urdf_referenced_file(urdf_dir: Path, referenced_path: str) -> Path:
+    """Resolve a URDF-referenced mesh path against common project layouts."""
+    path = Path(referenced_path)
+    if path.is_absolute():
+        return path.resolve()
+
+    candidates = [(urdf_dir / path).resolve()]
+    parents = list(urdf_dir.parents)
+    if len(parents) >= 2:
+        candidates.append((parents[1] / path).resolve())
+    candidates.append(Path(resolve_data_file_path(referenced_path)).resolve())
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    return candidates[0]
+
+
 def _load_urdf_geometry_bounds(geometry_elem: ET.Element, urdf_dir: Path) -> np.ndarray | None:
     """Load local bounds for a URDF geometry element."""
     try:
@@ -149,9 +168,7 @@ def _load_urdf_geometry_bounds(geometry_elem: ET.Element, urdf_dir: Path) -> np.
         filename = mesh_elem.get("filename")
         if not filename:
             return None
-        mesh_path = Path(filename)
-        if not mesh_path.is_absolute():
-            mesh_path = (urdf_dir / mesh_path).resolve()
+        mesh_path = _resolve_urdf_referenced_file(urdf_dir, filename)
         mesh = trimesh.load(mesh_path, force="mesh")
         if isinstance(mesh, trimesh.Scene):
             mesh = trimesh.util.concatenate(tuple(mesh.geometry.values()))
@@ -180,6 +197,102 @@ def _load_urdf_geometry_bounds(geometry_elem: ET.Element, urdf_dir: Path) -> np.
         return np.stack([-half, half], axis=0).astype(np.float32)
 
     return None
+
+
+def _load_urdf_geometry_support_points(geometry_elem: ET.Element, urdf_dir: Path) -> np.ndarray | None:
+    """Load representative support points for a URDF geometry element."""
+    mesh_elem = geometry_elem.find("mesh")
+    if mesh_elem is not None:
+        try:
+            import trimesh
+        except ImportError as exc:  # pragma: no cover - defensive
+            raise RuntimeError("URDF mesh support extraction requires trimesh.") from exc
+
+        filename = mesh_elem.get("filename")
+        if not filename:
+            return None
+        mesh_path = _resolve_urdf_referenced_file(urdf_dir, filename)
+        mesh = trimesh.load(mesh_path, force="mesh")
+        if isinstance(mesh, trimesh.Scene):
+            mesh = trimesh.util.concatenate(tuple(mesh.geometry.values()))
+
+        try:
+            support_mesh = mesh.convex_hull
+        except Exception:  # pragma: no cover - robust fallback
+            support_mesh = mesh
+
+        points = np.asarray(support_mesh.vertices, dtype=np.float32)
+        scale = _parse_xyz_attr(mesh_elem.get("scale"), default=(1.0, 1.0, 1.0))
+        return points * scale[None, :]
+
+    box_elem = geometry_elem.find("box")
+    if box_elem is not None:
+        size = _parse_xyz_attr(box_elem.get("size"))
+        half = 0.5 * size
+        return _aabb_corners(np.stack([-half, half], axis=0).astype(np.float32))
+
+    sphere_elem = geometry_elem.find("sphere")
+    if sphere_elem is not None:
+        radius = float(sphere_elem.get("radius", "0.0"))
+        return np.asarray(
+            [
+                [radius, 0.0, 0.0],
+                [-radius, 0.0, 0.0],
+                [0.0, radius, 0.0],
+                [0.0, -radius, 0.0],
+                [0.0, 0.0, radius],
+                [0.0, 0.0, -radius],
+            ],
+            dtype=np.float32,
+        )
+
+    cylinder_elem = geometry_elem.find("cylinder")
+    if cylinder_elem is not None:
+        radius = float(cylinder_elem.get("radius", "0.0"))
+        length = float(cylinder_elem.get("length", "0.0"))
+        angles = np.linspace(0.0, 2.0 * np.pi, num=16, endpoint=False, dtype=np.float32)
+        circle = np.stack([radius * np.cos(angles), radius * np.sin(angles)], axis=1)
+        top = np.concatenate([circle, np.full((circle.shape[0], 1), 0.5 * length, dtype=np.float32)], axis=1)
+        bottom = np.concatenate([circle, np.full((circle.shape[0], 1), -0.5 * length, dtype=np.float32)], axis=1)
+        return np.concatenate([top, bottom], axis=0).astype(np.float32)
+
+    return None
+
+
+def _extract_urdf_collision_support_points(urdf_path: str) -> np.ndarray | None:
+    """Collect representative collision/support points in the URDF root frame."""
+    urdf_path = resolve_data_file_path(urdf_path)
+    urdf_file = Path(urdf_path).resolve()
+    root = ET.parse(urdf_file).getroot()
+
+    support_points: list[np.ndarray] = []
+    urdf_dir = urdf_file.parent
+    for link_elem in root.findall("link"):
+        collision_elems = list(link_elem.findall("collision"))
+        if not collision_elems:
+            collision_elems = list(link_elem.findall("visual"))
+
+        for collision_elem in collision_elems:
+            geometry_elem = collision_elem.find("geometry")
+            if geometry_elem is None:
+                continue
+
+            local_points = _load_urdf_geometry_support_points(geometry_elem, urdf_dir)
+            if local_points is None or local_points.size == 0:
+                continue
+
+            origin_elem = collision_elem.find("origin")
+            translation = _parse_xyz_attr(None if origin_elem is None else origin_elem.get("xyz"))
+            rotation = _rpy_to_rotation_matrix(
+                _parse_xyz_attr(None if origin_elem is None else origin_elem.get("rpy"))
+            )
+            transformed = (rotation @ local_points.T).T + translation[None, :]
+            support_points.append(transformed.astype(np.float32))
+
+    if not support_points:
+        return None
+
+    return np.concatenate(support_points, axis=0).astype(np.float32)
 
 
 def _extract_urdf_collision_bounds(urdf_path: str) -> np.ndarray | None:
@@ -244,6 +357,7 @@ def _setup_object_scale_reference_bounds(env: Any, object_names: Sequence[str], 
 
     env.object_local_bbox_center_by_actor = {}
     env.object_local_bbox_half_extent_by_actor = {}
+    env.object_local_support_points_by_actor = {}
 
     for actor_name in object_names:
         urdf_path = object_actor_paths.get(actor_name)
@@ -265,6 +379,11 @@ def _setup_object_scale_reference_bounds(env: Any, object_names: Sequence[str], 
         env.object_local_bbox_half_extent_by_actor[actor_name] = torch.tensor(
             half_extent, device=env.device, dtype=torch.float32
         )
+        support_points = _extract_urdf_collision_support_points(urdf_path)
+        if support_points is not None and support_points.size > 0:
+            env.object_local_support_points_by_actor[actor_name] = torch.tensor(
+                support_points, device=env.device, dtype=torch.float32
+            )
         logger.info(
             f"[Randomization] Object bounds for '{actor_name}': "
             f"min={mins.tolist()}, max={maxs.tolist()}, height={float(maxs[2] - mins[2]):.4f}"

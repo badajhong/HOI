@@ -400,10 +400,11 @@ def run_simulator(args_cli: DataConversionConfig):
     # Load Mujoco model
     object_name = constants.OBJECT_NAME
     robot_model_path = constants.ROBOT_URDF_FILE
+    scene_xml_file = getattr(constants, "SCENE_XML_FILE", "")
     if object_name == "ground":
         robot_xml_path = robot_model_path.replace(".urdf", ".xml")
-    elif object_name == "multi_boxes":
-        robot_xml_path = constants.SCENE_XML_FILE
+    elif scene_xml_file:
+        robot_xml_path = scene_xml_file
     else:
         if object_name is None:
             raise ValueError("object_name cannot be None when it's not 'ground' or 'multi_boxes'")

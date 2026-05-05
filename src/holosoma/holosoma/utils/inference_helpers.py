@@ -62,6 +62,9 @@ def _extract_actor_model_and_input_dim(actor_wrapper) -> Tuple[torch.nn.Module, 
     The returned actor_model includes observation normalization if present,
     so it can be called directly with raw observations.
     """
+    if hasattr(actor_wrapper, "onnx_input_dim"):
+        return actor_wrapper, int(actor_wrapper.onnx_input_dim)
+
     # If it's already a complete wrapper (from actor_onnx_wrapper), use it directly
     if hasattr(actor_wrapper, "forward") and hasattr(actor_wrapper, "actor"):
         # Use the complete wrapper that includes obs normalization
@@ -225,6 +228,77 @@ def export_motion_and_policy_as_onnx(
 ):
     policy_exporter = _OnnxMotionPolicyExporter(motion_command, actor, device)
     policy_exporter.export(onnx_file_path)
+
+
+def export_depth_latent_encoder_as_onnx(
+    checkpoint_path: str,
+    onnx_file_path: str,
+    device: str,
+) -> dict[str, Any]:
+    """Export a DI latent encoder checkpoint as a standalone ONNX model."""
+
+    from holosoma.ae_joint_train import CLIPTextFeatureExtractor, load_joint_model
+
+    class _OnnxDepthLatentExporter(torch.nn.Module):
+        def __init__(self, checkpoint_path: str, device: str):
+            super().__init__()
+            self.device = device
+            self.model, self.payload = load_joint_model(checkpoint_path, device=device)
+
+            feature_mean = self.payload["di_feature_mean"].to(device=device, dtype=torch.float32)
+            feature_std = self.payload["di_feature_std"].to(device=device, dtype=torch.float32).clamp_min(1e-6)
+            self.register_buffer("feature_mean", feature_mean)
+            self.register_buffer("feature_std", feature_std)
+
+            clip_cfg = self.payload["clip"]
+            text_extractor = CLIPTextFeatureExtractor(
+                model_id=clip_cfg["model_id"],
+                device=device,
+                cache_dir=clip_cfg["cache_dir"],
+                local_files_only=clip_cfg["local_files_only"],
+                quiet_load=True,
+            )
+            text_features = text_extractor.encode([self.payload["condition_text"]]).to(device=device, dtype=torch.float32)
+            self.register_buffer("text_features", text_features)
+
+            self.depth_shape = tuple(int(value) for value in self.payload["input_shape"])
+            self.latent_dim = int(self.payload["config"]["latent_dim"])
+
+        def forward(self, depth_window: torch.Tensor) -> torch.Tensor:
+            normalized = (depth_window - self.feature_mean.unsqueeze(0)) / self.feature_std.unsqueeze(0)
+            text_features = self.text_features.expand(depth_window.shape[0], -1)
+            mu, _ = self.model.encode_di(normalized, text_features)
+            return mu
+
+        def export(self, onnx_file_path: str) -> None:
+            onnx_file_dir = os.path.dirname(onnx_file_path)
+            os.makedirs(onnx_file_dir, exist_ok=True)
+            self.to("cpu")
+            depth_window = torch.zeros(1, *self.depth_shape, dtype=torch.float32)
+            torch.onnx.export(
+                self,
+                depth_window,
+                onnx_file_path,
+                export_params=True,
+                opset_version=13,
+                verbose=False,
+                input_names=["depth_window"],
+                output_names=["latent"],
+                dynamo=False,
+            )
+            self.to(self.device)
+
+    exporter = _OnnxDepthLatentExporter(checkpoint_path=checkpoint_path, device=device)
+    exporter.export(onnx_file_path)
+
+    metadata = {
+        "model_kind": "di_latent_encoder",
+        "depth_window_shape": list(exporter.depth_shape),
+        "latent_dim": exporter.latent_dim,
+        "condition_text": exporter.payload["condition_text"],
+    }
+    attach_onnx_metadata(onnx_path=onnx_file_path, metadata=metadata)
+    return metadata
 
 
 def attach_onnx_metadata(onnx_path: str, metadata: dict[str, Any]) -> None:

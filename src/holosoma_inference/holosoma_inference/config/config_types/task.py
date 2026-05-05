@@ -78,5 +78,17 @@ class TaskConfig:
     motion_end_timestep: int | None = None
     """Ending timestep for motion clip playback. If None, plays until the end."""
 
+    di_model_path: str = ""
+    """Legacy override for older two-stage exports that still use a separate DI encoder ONNX."""
+
+    di_latent_path: str = ""
+    """Legacy override for older two-stage exports that inject a precomputed DI latent vector."""
+
+    depth_window_npy_path: str = ""
+    """Optional path to a `.npy` depth window for fused WBT ONNX offline testing."""
+
+    object_type_id: int = 0
+    """Object type index used to build `obj_type_one_hot` for residual WBT exports."""
+
     debug: DebugConfig = DebugConfig()
     """Debug overrides for quick testing."""

@@ -122,7 +122,7 @@ dagger_student = DaggerStudentAlgoConfig(
         module_dict=ActorOnlyModuleDictConfig(
             actor=ModuleConfig(
                 type="MLP",
-                input_dim=["actor_obs", "ir_ae_latent"],
+                input_dim=["actor_obs", "ae_latent"],
                 output_dim=["robot_action_dim"],
                 layer_config=LayerConfig(hidden_dims=[512, 256, 128], activation="ELU"),
             )

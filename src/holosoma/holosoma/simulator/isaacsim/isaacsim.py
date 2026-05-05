@@ -82,6 +82,14 @@ class IsaacSim(BaseSimulator):
         self.robot_depth_camera_prim_name = "realsense_d435_depth"
         self.robot_depth_camera_resolution = (80, 60)
         self.robot_depth_camera_use_tiled = self.training_config.num_envs > 1
+        self.robot_depth_camera_fallback_parent_link_name = "torso_link"
+        self.robot_depth_camera_fallback_pos = (0.075, 0.0, 0.42)
+        self.robot_depth_camera_fallback_rot = (
+            0.2705950505259776,
+            -0.6532817309240402,
+            0.6532827248883822,
+            -0.27059745016194003,
+        )
 
         # Scale GPU rigid patch buffer with env count to avoid PhysX patch-buffer overflow
         # in large batched scenes (e.g., 24k+ envs with rich contacts).
@@ -481,14 +489,26 @@ class IsaacSim(BaseSimulator):
         nested_optical_frame_prim = (
             f"/World/envs/env_0/Robot/realsense_d435_link/{self.robot_depth_camera_link_name}"
         )
+        fallback_parent_prim = f"/World/envs/env_0/Robot/{self.robot_depth_camera_fallback_parent_link_name}"
+        fallback_mount_used = False
         if is_prim_path_valid(direct_optical_frame_prim):
             camera_mount_path = f"/World/envs/env_.*/Robot/{self.robot_depth_camera_link_name}"
+            camera_offset_pos = (0.0, 0.0, 0.0)
+            camera_offset_rot = (1.0, 0.0, 0.0, 0.0)
         elif is_prim_path_valid(nested_optical_frame_prim):
             camera_mount_path = f"/World/envs/env_.*/Robot/realsense_d435_link/{self.robot_depth_camera_link_name}"
+            camera_offset_pos = (0.0, 0.0, 0.0)
+            camera_offset_rot = (1.0, 0.0, 0.0, 0.0)
+        elif is_prim_path_valid(fallback_parent_prim):
+            camera_mount_path = f"/World/envs/env_.*/Robot/{self.robot_depth_camera_fallback_parent_link_name}"
+            camera_offset_pos = self.robot_depth_camera_fallback_pos
+            camera_offset_rot = self.robot_depth_camera_fallback_rot
+            fallback_mount_used = True
         else:
             logger.warning(
                 "Robot depth camera optical frame prim not found. "
-                f"Tried '{direct_optical_frame_prim}' and '{nested_optical_frame_prim}'."
+                f"Tried '{direct_optical_frame_prim}', '{nested_optical_frame_prim}', "
+                f"and fallback parent '{fallback_parent_prim}'."
             )
             return
 
@@ -507,8 +527,8 @@ class IsaacSim(BaseSimulator):
                 clipping_range=(0.05, 20.0),
             ),
             offset=camera_cfg_cls.OffsetCfg(
-                pos=(0.0, 0.0, 0.0),
-                rot=(1.0, 0.0, 0.0, 0.0),
+                pos=camera_offset_pos,
+                rot=camera_offset_rot,
                 convention="ros",
             ),
         )
@@ -517,11 +537,18 @@ class IsaacSim(BaseSimulator):
         else:
             self.robot_depth_camera = Camera(camera_cfg)
         self.scene.sensors["robot_depth_camera"] = self.robot_depth_camera
-        logger.info(
-            "IsaacSim: registered robot-mounted depth camera sensor at "
-            f"{camera_cfg.prim_path} from URDF link '{self.robot_depth_camera_link_name}' with "
-            f"resolution={self.robot_depth_camera_resolution}, tiled={self.robot_depth_camera_use_tiled}"
-        )
+        if fallback_mount_used:
+            logger.info(
+                "IsaacSim: registered robot-mounted depth camera sensor using fallback torso mount at "
+                f"{camera_cfg.prim_path} with offset pos={camera_offset_pos}, rot={camera_offset_rot}, "
+                f"resolution={self.robot_depth_camera_resolution}, tiled={self.robot_depth_camera_use_tiled}"
+            )
+        else:
+            logger.info(
+                "IsaacSim: registered robot-mounted depth camera sensor at "
+                f"{camera_cfg.prim_path} from URDF link '{self.robot_depth_camera_link_name}' with "
+                f"resolution={self.robot_depth_camera_resolution}, tiled={self.robot_depth_camera_use_tiled}"
+            )
 
     def get_robot_depth_frame(self, env_id: int) -> torch.Tensor:
         if self.robot_depth_camera is None:

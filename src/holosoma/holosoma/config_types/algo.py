@@ -348,6 +348,9 @@ class DaggerStudentConfig:
     stack_buffer: int = 6_400_000
     """Maximum number of samples kept in the rolling supervised buffer."""
 
+    buffer_device: str = "auto"
+    """Storage device for the DAgger supervised buffer: ``auto``, ``cpu``, ``gpu``, or an explicit torch device."""
+
     max_grad_norm: float = 1.0
     """Maximum gradient norm for clipping."""
 

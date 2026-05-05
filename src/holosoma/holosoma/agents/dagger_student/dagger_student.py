@@ -28,12 +28,24 @@ from holosoma.utils.inference_helpers import (
 
 
 class StackDaggerBuffer:
-    def __init__(self, capacity: int, obs_dim: int, action_dim: int):
+    def __init__(self, capacity: int, obs_dim: int, action_dim: int, storage_device: str | torch.device):
         if capacity <= 0:
             raise ValueError(f"Stack buffer capacity must be positive, got {capacity}")
         self.capacity = int(capacity)
-        self.obs = torch.empty((self.capacity, obs_dim), dtype=torch.float32, device="cpu")
-        self.actions = torch.empty((self.capacity, action_dim), dtype=torch.float32, device="cpu")
+        self.storage_device = torch.device(storage_device)
+        self.pin_memory = self.storage_device.type == "cpu"
+        self.obs = torch.empty(
+            (self.capacity, obs_dim),
+            dtype=torch.float32,
+            device=self.storage_device,
+            pin_memory=self.pin_memory,
+        )
+        self.actions = torch.empty(
+            (self.capacity, action_dim),
+            dtype=torch.float32,
+            device=self.storage_device,
+            pin_memory=self.pin_memory,
+        )
         self.size = 0
         self.write_idx = 0
 
@@ -44,39 +56,53 @@ class StackDaggerBuffer:
         if obs.shape[0] != actions.shape[0]:
             raise ValueError(f"Buffer add mismatch: obs batch {obs.shape[0]} vs actions batch {actions.shape[0]}")
 
-        obs_cpu = obs.detach().to(device="cpu", dtype=torch.float32)
-        actions_cpu = actions.detach().to(device="cpu", dtype=torch.float32)
-        batch_size = int(obs_cpu.shape[0])
+        obs_storage = obs.detach().to(
+            device=self.storage_device,
+            dtype=torch.float32,
+            non_blocking=self.pin_memory,
+        )
+        actions_storage = actions.detach().to(
+            device=self.storage_device,
+            dtype=torch.float32,
+            non_blocking=self.pin_memory,
+        )
+        batch_size = int(obs_storage.shape[0])
         if batch_size == 0:
             return
 
         if batch_size >= self.capacity:
-            obs_cpu = obs_cpu[-self.capacity :]
-            actions_cpu = actions_cpu[-self.capacity :]
+            obs_storage = obs_storage[-self.capacity :]
+            actions_storage = actions_storage[-self.capacity :]
             batch_size = self.capacity
 
         end_idx = self.write_idx + batch_size
         if end_idx <= self.capacity:
-            self.obs[self.write_idx : end_idx].copy_(obs_cpu)
-            self.actions[self.write_idx : end_idx].copy_(actions_cpu)
+            self.obs[self.write_idx : end_idx].copy_(obs_storage, non_blocking=self.pin_memory)
+            self.actions[self.write_idx : end_idx].copy_(actions_storage, non_blocking=self.pin_memory)
         else:
             first_chunk = self.capacity - self.write_idx
             second_chunk = batch_size - first_chunk
-            self.obs[self.write_idx :].copy_(obs_cpu[:first_chunk])
-            self.actions[self.write_idx :].copy_(actions_cpu[:first_chunk])
-            self.obs[:second_chunk].copy_(obs_cpu[first_chunk:])
-            self.actions[:second_chunk].copy_(actions_cpu[first_chunk:])
+            self.obs[self.write_idx :].copy_(obs_storage[:first_chunk], non_blocking=self.pin_memory)
+            self.actions[self.write_idx :].copy_(actions_storage[:first_chunk], non_blocking=self.pin_memory)
+            self.obs[:second_chunk].copy_(obs_storage[first_chunk:], non_blocking=self.pin_memory)
+            self.actions[:second_chunk].copy_(actions_storage[first_chunk:], non_blocking=self.pin_memory)
 
         self.write_idx = (self.write_idx + batch_size) % self.capacity
         self.size = min(self.capacity, self.size + batch_size)
 
-    def sample(self, batch_size: int, device: str) -> tuple[torch.Tensor, torch.Tensor]:
+    def sample(self, batch_size: int, device: str | torch.device | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         if self.size == 0:
             raise RuntimeError("Cannot sample from an empty DAgger buffer.")
 
-        indices = torch.randint(0, self.size, (batch_size,), device="cpu")
-        obs = self.obs.index_select(0, indices).to(device=device, dtype=torch.float32, non_blocking=False)
-        actions = self.actions.index_select(0, indices).to(device=device, dtype=torch.float32, non_blocking=False)
+        indices = torch.randint(0, self.size, (batch_size,), device=self.storage_device)
+        obs = self.obs.index_select(0, indices)
+        actions = self.actions.index_select(0, indices)
+
+        if device is not None:
+            target_device = torch.device(device)
+            if target_device != self.storage_device:
+                obs = obs.to(device=target_device, dtype=torch.float32, non_blocking=self.pin_memory)
+                actions = actions.to(device=target_device, dtype=torch.float32, non_blocking=self.pin_memory)
         return obs, actions
 
 
@@ -185,10 +211,13 @@ class DaggerStudent(BaseAlgo):
 
     def _setup_buffer(self) -> None:
         actor_obs_dim = self._get_obs_dim(self.actor_obs_keys)
-        self.buffer = StackDaggerBuffer(self.config.stack_buffer, actor_obs_dim, self.num_act)
+        buffer_device = self._resolve_buffer_device()
+        self.buffer = StackDaggerBuffer(self.config.stack_buffer, actor_obs_dim, self.num_act, buffer_device)
+        buffer_bytes = self.config.stack_buffer * (actor_obs_dim + self.num_act) * torch.finfo(torch.float32).bits // 8
         logger.info(
             f"Allocated DAgger stack buffer with capacity={self.config.stack_buffer}, "
-            f"actor_obs_dim={actor_obs_dim}, action_dim={self.num_act}"
+            f"actor_obs_dim={actor_obs_dim}, action_dim={self.num_act}, "
+            f"storage_device={self.buffer.storage_device}, footprint={buffer_bytes / (1024**3):.2f} GiB"
         )
 
     def _get_obs_dim(self, obs_keys: list[str]) -> int:
@@ -203,6 +232,17 @@ class DaggerStudent(BaseAlgo):
     def _get_zero_input(self) -> torch.Tensor:
         actor_obs_dim = self._get_obs_dim(self.actor_obs_keys)
         return torch.zeros(1, actor_obs_dim, device=self.device)
+
+    def _resolve_buffer_device(self) -> str:
+        requested = str(self.config.buffer_device).strip()
+        requested_lower = requested.lower()
+        if requested_lower == "auto":
+            return self.device if str(self.device).startswith("cuda") else "cpu"
+        if requested_lower == "gpu":
+            if not str(self.device).startswith("cuda"):
+                raise ValueError("buffer_device='gpu' requires a CUDA training device.")
+            return self.device
+        return requested
 
     def _train_mode(self) -> None:
         self.actor.train()
@@ -279,6 +319,10 @@ class DaggerStudent(BaseAlgo):
             student_actions = self.actor.act_inference({"actor_obs": actor_obs})
             teacher_actions = self.teacher_actor.act_inference({"actor_obs": teacher_obs})
 
+            # Keep the student's autoregressive previous-action feature aligned
+            # with the action that is about to be applied this step.
+            self.env.student_prev_actions[:] = student_actions
+            self.env.student_base_actions[:] = student_actions
             next_obs_dict, rewards, dones, infos = self.env.step({"actions": student_actions})
             for obs_key, value in next_obs_dict.items():
                 next_obs_dict[obs_key] = value.to(self.device)
