@@ -753,7 +753,7 @@ class TrainConfig:
     early_stop_patience: int = 1000
     seed: int = 42
     device: str = "cuda"
-    log_interval: int = 100
+    log_interval: int = 10
     eval_interval: int = 100
     split_mode: str = "episode"
     depth_input_noise_std: float = 0.0
