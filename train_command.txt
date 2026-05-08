@@ -91,10 +91,10 @@ python src/holosoma/holosoma/train_agent.py \
   logger:wandb \
   --command.setup-terms.motion-command.params.motion-config.motion-file="/home/rllab/haechan/holosoma/src/holosoma_retargeting/holosoma_retargeting/converted_res/object_interaction/sub1_suitcase_001.npz" \
   --robot.object.object-urdf-path="/home/rllab/haechan/holosoma/src/holosoma_retargeting/holosoma_retargeting/models/objects/suitcase/suitcase.urdf" \
-  --training.num-envs 4096 \
+  --training.num-envs 5000 \
   --algo.config.save-interval 1000 \
-  --algo.config.module-dict.actor.layer-config.hidden-dims '[512,256,128]' \
-  --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob 1.0 \
+  --algo.config.module-dict.actor.layer-config.hidden-dims '[1024, 512,256,128]' \
+  --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob 1.0  \
   --student="/home/rllab/haechan/holosoma/logs/WholeBodyTracking/student_suitcase/model_11000.pt" \
   --di_ae="/home/rllab/haechan/holosoma/logs/AE/ae_suitcase/best.pt" \
   --simulator.config.scene.env-spacing 5.0 \

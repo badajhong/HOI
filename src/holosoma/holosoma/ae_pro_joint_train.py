@@ -24,7 +24,7 @@ from holosoma.utils.experiment_paths import get_timestamp
 from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.wandb import get_wandb
 
-DEFAULT_DATA_DIR = "/home/rllab/haechan/holosoma/logs/ir_di_pro_suitcase/ae_train/telemetry"
+DEFAULT_DATA_DIR = "/home/rllab/haechan/holosoma/logs/ir_di_pro_suitcase/20260508_ae_train/telemetry"
 DEFAULT_OUTPUT_ROOT = "/home/rllab/haechan/holosoma/logs/AE/"
 DEFAULT_CONDITION_TEXT = "Push the suitcase, and set it back down."
 DEFAULT_CLIP_MODEL_ID = "openai/clip-vit-base-patch32"
@@ -36,6 +36,7 @@ class EpisodePairedWindows:
     episode_id: str
     ir_windows: np.ndarray
     depth_windows: np.ndarray
+    proprioception_windows: np.ndarray | None = None
 
 
 @dataclass
@@ -43,6 +44,9 @@ class TelemetryMetadata:
     depth_input_shape: tuple[int, int, int]
     ir_window_shape: tuple[int, int]
     ir_window_body_source: str = "all"
+    proprioception_window_shape: tuple[int, int] | None = None
+    proprioception_term_dims: dict[str, int] | None = None
+    proprioception_dof_names: tuple[str, ...] = ()
     depth_resolution: tuple[int, int] | None = None
     ir_t_mode: str | None = None
     ir_t_components: tuple[str, ...] = ()
@@ -63,93 +67,6 @@ class TextConditionProjector(nn.Module):
         return self.net(text_features)
 
 
-class SharedFrameCNN(nn.Module):
-    def __init__(self, frame_feature_dim: int):
-        super().__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(1, 16, kernel_size=5, stride=2, padding=2),
-            nn.ELU(),
-            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
-            nn.ELU(),
-            nn.Conv2d(32, 32, kernel_size=3, stride=2, padding=1),
-            nn.ELU(),
-            nn.AdaptiveAvgPool2d((4, 5)),
-        )
-        self.projection = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(32 * 4 * 5, frame_feature_dim),
-            nn.LayerNorm(frame_feature_dim),
-            nn.Tanh(),
-        )
-
-    def forward(self, frames: torch.Tensor) -> torch.Tensor:
-        return self.projection(self.features(frames))
-
-
-class DepthWindowLatentEncoder(nn.Module):
-    def __init__(
-        self,
-        input_shape: Sequence[int],
-        text_feature_dim: int,
-        condition_dim: int,
-        hidden_dims: Sequence[int],
-        latent_dim: int,
-        *,
-        logvar_clamp_min: float = -10.0,
-        logvar_clamp_max: float = 10.0,
-    ):
-        super().__init__()
-        if len(input_shape) != 3:
-            raise ValueError(f"Depth input shape must have length 3, got {input_shape}")
-        if len(hidden_dims) != 2:
-            raise ValueError(f"Expected hidden_dims=(frame_feature_dim, temporal_hidden_dim), got {hidden_dims}")
-
-        self.window_size = int(input_shape[0])
-        self.height = int(input_shape[1])
-        self.width = int(input_shape[2])
-        self.frame_feature_dim = int(hidden_dims[0])
-        self.temporal_hidden_dim = int(hidden_dims[1])
-        self.text_projector = TextConditionProjector(text_feature_dim, condition_dim)
-        self.frame_encoder = SharedFrameCNN(self.frame_feature_dim)
-        self.temporal_encoder = nn.GRU(
-            input_size=self.frame_feature_dim,
-            hidden_size=self.temporal_hidden_dim,
-            batch_first=True,
-        )
-        self.latent_head = nn.Sequential(
-            nn.Linear(self.temporal_hidden_dim + condition_dim, self.temporal_hidden_dim),
-            nn.LayerNorm(self.temporal_hidden_dim),
-            nn.Tanh(),
-        )
-        self.mu = nn.Linear(self.temporal_hidden_dim, latent_dim)
-        self.logvar = nn.Linear(self.temporal_hidden_dim, latent_dim)
-        self.logvar_clamp_min = float(logvar_clamp_min)
-        self.logvar_clamp_max = float(logvar_clamp_max)
-
-    def forward(self, x: torch.Tensor, text_features: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        if x.ndim != 4:
-            raise ValueError(f"Expected depth batch shape [B, T, H, W], got {tuple(x.shape)}")
-        batch_size, window_size, height, width = x.shape
-        if (window_size, height, width) != (self.window_size, self.height, self.width):
-            raise ValueError(
-                f"Expected depth batch spatial shape {(self.window_size, self.height, self.width)}, "
-                f"got {(window_size, height, width)}"
-            )
-
-        frame_tensor = x.reshape(batch_size * window_size, 1, height, width)
-        frame_features = self.frame_encoder(frame_tensor)
-        frame_features = frame_features.reshape(batch_size, window_size, self.frame_feature_dim)
-
-        _, hidden = self.temporal_encoder(frame_features)
-        temporal_feature = hidden[-1]
-        condition = self.text_projector(text_features)
-        latent_hidden = self.latent_head(torch.cat([temporal_feature, condition], dim=-1))
-        mu = self.mu(latent_hidden)
-        logvar = self.logvar(latent_hidden)
-        logvar = torch.clamp(logvar, min=self.logvar_clamp_min, max=self.logvar_clamp_max)
-        return mu, logvar
-
-
 def iterate_batch_indices(num_samples: int, batch_size: int, *, shuffle: bool, seed: int):
     if shuffle:
         generator = torch.Generator(device="cpu")
@@ -162,175 +79,292 @@ def iterate_batch_indices(num_samples: int, batch_size: int, *, shuffle: bool, s
         yield indices[start : start + batch_size]
 
 
+def _select_ir_windows_body_source(ir_windows_array: np.ndarray, body_source: str) -> np.ndarray:
+    if ir_windows_array.ndim != 3:
+        return ir_windows_array
+    indices = _selected_component_indices_for_body_source(int(ir_windows_array.shape[2]), body_source)
+    if len(indices) == int(ir_windows_array.shape[2]):
+        return ir_windows_array
+    return ir_windows_array[:, :, indices]
+
+
+def _build_telemetry_metadata(
+    payload: dict[str, Any],
+    *,
+    expected_ir_shape: tuple[int, int],
+    expected_depth_shape: tuple[int, int, int],
+    ir_window_body_source: str,
+    expected_proprioception_shape: tuple[int, int] | None,
+    dataset_has_proprioception: bool | None,
+    source_id: str,
+) -> TelemetryMetadata:
+    ir_t_components_value = payload.get("ir_t_components")
+    ir_t_components = ()
+    if isinstance(ir_t_components_value, list):
+        ir_t_components = tuple(str(value) for value in ir_t_components_value)
+
+    ir_t_mode_value = payload.get("ir_t_mode")
+    ir_t_mode = str(ir_t_mode_value) if isinstance(ir_t_mode_value, str) else None
+
+    ir_t_dim_value = payload.get("ir_t_dim")
+    ir_t_dim = int(ir_t_dim_value) if isinstance(ir_t_dim_value, int | float) else None
+    if ir_t_components and len(ir_t_components) != expected_ir_shape[1]:
+        selected_components = _selected_component_names_for_body_source(
+            ir_t_components,
+            input_feature_dim=expected_ir_shape[1],
+            body_source=ir_window_body_source,
+        )
+        if len(selected_components) == expected_ir_shape[1]:
+            logger.info(
+                f"Telemetry metadata has {len(ir_t_components)} original ir_t components; "
+                f"using {ir_window_body_source}-selected metadata with {len(selected_components)} components."
+            )
+            ir_t_components = selected_components
+            ir_t_dim = expected_ir_shape[1]
+    if ir_window_body_source != "all" and ir_t_dim is not None and ir_t_dim != expected_ir_shape[1]:
+        logger.info(
+            f"Telemetry metadata has original ir_t_dim={ir_t_dim}; "
+            f"using {ir_window_body_source}-selected ir_t_dim={expected_ir_shape[1]}."
+        )
+        ir_t_dim = expected_ir_shape[1]
+    if ir_window_body_source != "all" and ir_t_mode is not None:
+        suffix = f"_{ir_window_body_source}_only"
+        if not ir_t_mode.endswith(suffix):
+            ir_t_mode = f"{ir_t_mode}{suffix}"
+    if ir_t_dim is not None and ir_t_dim != expected_ir_shape[1]:
+        raise ValueError(
+            f"Telemetry metadata ir_t_dim={ir_t_dim} does not match extracted ir_window feature dim="
+            f"{expected_ir_shape[1]} for {source_id}."
+        )
+    if ir_t_components and len(ir_t_components) != expected_ir_shape[1]:
+        raise ValueError(
+            f"Telemetry metadata lists {len(ir_t_components)} ir_t components, but extracted ir_window "
+            f"feature dim is {expected_ir_shape[1]} for {source_id}."
+        )
+
+    depth_resolution_value = payload.get("depth_resolution")
+    depth_resolution = None
+    if isinstance(depth_resolution_value, list) and len(depth_resolution_value) == 2:
+        depth_resolution = (int(depth_resolution_value[0]), int(depth_resolution_value[1]))
+
+    proprioception_window_shape = None
+    proprioception_window_shape_value = payload.get("proprioception_window_shape")
+    if dataset_has_proprioception:
+        if isinstance(proprioception_window_shape_value, list) and len(proprioception_window_shape_value) == 2:
+            proprioception_window_shape = (
+                int(proprioception_window_shape_value[0]),
+                int(proprioception_window_shape_value[1]),
+            )
+        else:
+            proprioception_window_shape = expected_proprioception_shape
+        if expected_proprioception_shape is not None and proprioception_window_shape != expected_proprioception_shape:
+            raise ValueError(
+                "Telemetry metadata proprioception_window_shape does not match extracted tensor shape. "
+                f"metadata={proprioception_window_shape}, extracted={expected_proprioception_shape}, "
+                f"source={source_id}"
+            )
+
+    proprioception_term_dims_value = payload.get("proprioception_term_dims")
+    proprioception_term_dims = None
+    if isinstance(proprioception_term_dims_value, dict):
+        proprioception_term_dims = {
+            str(key): int(value)
+            for key, value in proprioception_term_dims_value.items()
+        }
+
+    proprioception_dof_names_value = payload.get("proprioception_dof_names")
+    proprioception_dof_names: tuple[str, ...] = ()
+    if isinstance(proprioception_dof_names_value, list):
+        proprioception_dof_names = tuple(str(value) for value in proprioception_dof_names_value)
+
+    return TelemetryMetadata(
+        depth_input_shape=expected_depth_shape,
+        ir_window_shape=expected_ir_shape,
+        ir_window_body_source=ir_window_body_source,
+        proprioception_window_shape=proprioception_window_shape,
+        proprioception_term_dims=proprioception_term_dims,
+        proprioception_dof_names=proprioception_dof_names,
+        depth_resolution=depth_resolution,
+        ir_t_mode=ir_t_mode,
+        ir_t_components=ir_t_components,
+        ir_t_dim=ir_t_dim,
+        source_episode_id=source_id,
+    )
+
+
 def extract_episode_paired_windows(
     data_dir: Path,
     ir_window_body_source: str = "all",
 ) -> tuple[list[EpisodePairedWindows], TelemetryMetadata]:
     ir_window_body_source = normalize_ir_window_body_source(ir_window_body_source)
-    json_paths = sorted(data_dir.glob("episode_env*_idx*.json"))
-    if not json_paths:
-        raise FileNotFoundError(f"No episode JSON files found under: {data_dir}")
+    hdf5_path = data_dir / "telemetry.h5"
+    if hdf5_path.exists():
+        try:
+            import h5py  # noqa: PLC0415
+        except ImportError as exc:
+            raise ImportError(
+                f"Found HDF5 telemetry at {hdf5_path}, but h5py is not installed. "
+                "Install h5py to read telemetry.h5."
+            ) from exc
 
-    logger.info(
-        f"Scanning {len(json_paths)} telemetry JSON files under: {data_dir} "
-        f"with ir_window_body_source='{ir_window_body_source}'"
-    )
-
-    episodes: list[EpisodePairedWindows] = []
-    expected_ir_shape: tuple[int, int] | None = None
-    expected_depth_shape: tuple[int, int, int] | None = None
-    total_windows = 0
-    metadata: TelemetryMetadata | None = None
-
-    for file_index, json_path in enumerate(json_paths, start=1):
-        if file_index == 1 or file_index % 10 == 0 or file_index == len(json_paths):
-            logger.info(f"Reading paired ir_window/depth_window values from file {file_index}/{len(json_paths)}: {json_path.name}")
-
-        payload = json.loads(json_path.read_text(encoding="utf-8"))
-        entries = payload.get("entries", [])
-        if not isinstance(entries, list) or not entries:
-            continue
-
-        episode_ir_windows: list[np.ndarray] = []
-        episode_depth_windows: list[np.ndarray] = []
-        for entry_index, entry in enumerate(entries):
-            if "ir_window" not in entry or "depth_window" not in entry:
-                raise ValueError(
-                    f"Expected both ir_window and depth_window in {json_path} entry {entry_index}, "
-                    f"available keys={sorted(entry.keys())}."
-                )
-
-            ir_window = np.asarray(entry["ir_window"], dtype=np.float32)
-            ir_window = _select_ir_window_body_source(ir_window, ir_window_body_source)
-            depth_window = np.asarray(entry["depth_window"], dtype=np.float32)
-
-            if ir_window.ndim != 2:
-                raise ValueError(
-                    f"Expected ir_window to have rank 2, got shape {ir_window.shape} "
-                    f"in {json_path} entry {entry_index}."
-                )
-            if depth_window.ndim != 3:
-                raise ValueError(
-                    f"Expected depth_window to have rank 3, got shape {depth_window.shape} "
-                    f"in {json_path} entry {entry_index}."
-                )
-
-            current_ir_shape = (int(ir_window.shape[0]), int(ir_window.shape[1]))
-            current_depth_shape = (int(depth_window.shape[0]), int(depth_window.shape[1]), int(depth_window.shape[2]))
-            if expected_ir_shape is None:
-                expected_ir_shape = current_ir_shape
-            elif current_ir_shape != expected_ir_shape:
-                raise ValueError(
-                    f"Inconsistent ir_window shape. Expected {expected_ir_shape}, got {ir_window.shape} "
-                    f"in {json_path} entry {entry_index}."
-                )
-
-            if expected_depth_shape is None:
-                expected_depth_shape = current_depth_shape
-            elif current_depth_shape != expected_depth_shape:
-                raise ValueError(
-                    f"Inconsistent depth_window shape. Expected {expected_depth_shape}, got {depth_window.shape} "
-                    f"in {json_path} entry {entry_index}."
-                )
-
-            episode_ir_windows.append(ir_window)
-            episode_depth_windows.append(depth_window)
-
-        if not episode_ir_windows:
-            continue
-
-        episodes.append(
-            EpisodePairedWindows(
-                episode_id=json_path.stem,
-                ir_windows=np.stack(episode_ir_windows, axis=0),
-                depth_windows=np.stack(episode_depth_windows, axis=0),
-            )
-        )
-        total_windows += len(episode_ir_windows)
-
-        if metadata is None:
-            assert expected_ir_shape is not None
-            assert expected_depth_shape is not None
-            ir_t_components_value = payload.get("ir_t_components")
-            ir_t_components = ()
-            if isinstance(ir_t_components_value, list):
-                ir_t_components = tuple(str(value) for value in ir_t_components_value)
-
-            ir_t_mode_value = payload.get("ir_t_mode")
-            ir_t_mode = str(ir_t_mode_value) if isinstance(ir_t_mode_value, str) else None
-
-            ir_t_dim_value = payload.get("ir_t_dim")
-            ir_t_dim = int(ir_t_dim_value) if isinstance(ir_t_dim_value, int | float) else None
-            if ir_t_components and len(ir_t_components) != expected_ir_shape[1]:
-                selected_components = _selected_component_names_for_body_source(
-                    ir_t_components,
-                    input_feature_dim=expected_ir_shape[1],
-                    body_source=ir_window_body_source,
-                )
-                if len(selected_components) == expected_ir_shape[1]:
-                    logger.info(
-                        f"Telemetry metadata has {len(ir_t_components)} original ir_t components; "
-                        f"using {ir_window_body_source}-selected metadata with {len(selected_components)} components."
-                    )
-                    ir_t_components = selected_components
-                    ir_t_dim = expected_ir_shape[1]
-            if ir_window_body_source != "all" and ir_t_dim is not None and ir_t_dim != expected_ir_shape[1]:
-                logger.info(
-                    f"Telemetry metadata has original ir_t_dim={ir_t_dim}; "
-                    f"using {ir_window_body_source}-selected ir_t_dim={expected_ir_shape[1]}."
-                )
-                ir_t_dim = expected_ir_shape[1]
-            if ir_window_body_source != "all" and ir_t_mode is not None:
-                suffix = f"_{ir_window_body_source}_only"
-                if not ir_t_mode.endswith(suffix):
-                    ir_t_mode = f"{ir_t_mode}{suffix}"
-            if ir_t_dim is not None and ir_t_dim != expected_ir_shape[1]:
-                raise ValueError(
-                    f"Telemetry metadata ir_t_dim={ir_t_dim} does not match extracted ir_window feature dim="
-                    f"{expected_ir_shape[1]} for {json_path}."
-                )
-            if ir_t_components and len(ir_t_components) != expected_ir_shape[1]:
-                raise ValueError(
-                    f"Telemetry metadata lists {len(ir_t_components)} ir_t components, but extracted ir_window "
-                    f"feature dim is {expected_ir_shape[1]} for {json_path}."
-                )
-
-            depth_resolution_value = payload.get("depth_resolution")
-            depth_resolution = None
-            if isinstance(depth_resolution_value, list) and len(depth_resolution_value) == 2:
-                depth_resolution = (int(depth_resolution_value[0]), int(depth_resolution_value[1]))
-                # IR telemetry stores camera depth_resolution as metadata, but
-                # the nested depth_window list itself is the training tensor.
-                # Do not transpose/flip here; keep the saved [T, H, W] layout.
-
-            metadata = TelemetryMetadata(
-                depth_input_shape=expected_depth_shape,
-                ir_window_shape=expected_ir_shape,
-                ir_window_body_source=ir_window_body_source,
-                depth_resolution=depth_resolution,
-                ir_t_mode=ir_t_mode,
-                ir_t_components=ir_t_components,
-                ir_t_dim=ir_t_dim,
-                source_episode_id=json_path.stem,
-            )
-
-    if not episodes or metadata is None:
-        raise ValueError(f"No valid paired ir_window/depth_window entries found under: {data_dir}")
-
-    logger.info(
-        f"Loaded {total_windows} paired samples from {len(episodes)} episode files with "
-        f"ir_window_shape={metadata.ir_window_shape}, depth_window_shape={metadata.depth_input_shape}, "
-        f"ir_window_body_source='{metadata.ir_window_body_source}'"
-    )
-    if metadata.ir_t_mode is not None:
         logger.info(
-            f"Telemetry metadata: ir_t_mode={metadata.ir_t_mode}, "
-            f"ir_t_dim={metadata.ir_t_dim or metadata.ir_window_shape[1]}, "
-            f"depth_resolution={metadata.depth_resolution}, "
-            f"source={metadata.source_episode_id}"
+            f"Scanning HDF5 telemetry file: {hdf5_path} "
+            f"with ir_window_body_source='{ir_window_body_source}'"
         )
+        episodes: list[EpisodePairedWindows] = []
+        expected_ir_shape: tuple[int, int] | None = None
+        expected_depth_shape: tuple[int, int, int] | None = None
+        expected_proprioception_shape: tuple[int, int] | None = None
+        dataset_has_proprioception: bool | None = None
+        total_windows = 0
+        metadata: TelemetryMetadata | None = None
 
-    return episodes, metadata
+        with h5py.File(hdf5_path, "r") as hdf5_file:
+            if "episodes" not in hdf5_file:
+                raise ValueError(f"HDF5 telemetry file does not contain an 'episodes' group: {hdf5_path}")
+            episodes_group = hdf5_file["episodes"]
+            group_names = sorted(str(name) for name in episodes_group.keys())
+            if not group_names:
+                raise ValueError(f"HDF5 telemetry file contains no episode groups: {hdf5_path}")
+
+            for file_index, group_name in enumerate(group_names, start=1):
+                if file_index == 1 or file_index % 50 == 0 or file_index == len(group_names):
+                    logger.info(
+                        f"Reading paired ir_window/depth_window arrays from HDF5 group "
+                        f"{file_index}/{len(group_names)}: {group_name}"
+                    )
+                group = episodes_group[group_name]
+                if "ir_windows" not in group or "depth_windows" not in group:
+                    raise ValueError(f"Expected ir_windows and depth_windows datasets in HDF5 group {group.name}.")
+                ir_windows = np.asarray(group["ir_windows"][()], dtype=np.float32)
+                ir_windows = _select_ir_windows_body_source(ir_windows, ir_window_body_source)
+                depth_windows = np.asarray(group["depth_windows"][()], dtype=np.float32)
+                has_proprioception_window = "proprioception_windows" in group
+                proprioception_windows = (
+                    np.asarray(group["proprioception_windows"][()], dtype=np.float32)
+                    if has_proprioception_window
+                    else None
+                )
+                metadata_json = group.attrs.get("metadata_json", "{}")
+                if isinstance(metadata_json, bytes):
+                    metadata_json = metadata_json.decode("utf-8")
+                payload = json.loads(str(metadata_json))
+
+                if dataset_has_proprioception is None:
+                    dataset_has_proprioception = has_proprioception_window
+                elif dataset_has_proprioception != has_proprioception_window:
+                    raise ValueError(
+                        "Mixed telemetry is not supported: some HDF5 groups include proprioception_windows "
+                        f"but others do not. First mismatch found in {group.name}."
+                    )
+                if ir_windows.ndim != 3:
+                    raise ValueError(
+                        f"Expected ir_windows to have rank 3, got shape {ir_windows.shape} in {group.name}."
+                    )
+                if depth_windows.ndim != 4:
+                    raise ValueError(
+                        f"Expected depth_windows to have rank 4, got shape {depth_windows.shape} in {group.name}."
+                    )
+                if int(ir_windows.shape[0]) != int(depth_windows.shape[0]):
+                    raise ValueError(
+                        f"HDF5 sample count mismatch in {group.name}: "
+                        f"ir={ir_windows.shape[0]}, depth={depth_windows.shape[0]}."
+                    )
+                if proprioception_windows is not None:
+                    if proprioception_windows.ndim != 3:
+                        raise ValueError(
+                            "Expected proprioception_windows to have rank 3, "
+                            f"got shape {proprioception_windows.shape} in {group.name}."
+                        )
+                    if int(proprioception_windows.shape[0]) != int(ir_windows.shape[0]):
+                        raise ValueError(
+                            f"HDF5 sample count mismatch in {group.name}: "
+                            f"ir={ir_windows.shape[0]}, proprioception={proprioception_windows.shape[0]}."
+                        )
+
+                current_ir_shape = (int(ir_windows.shape[1]), int(ir_windows.shape[2]))
+                current_depth_shape = (
+                    int(depth_windows.shape[1]),
+                    int(depth_windows.shape[2]),
+                    int(depth_windows.shape[3]),
+                )
+                if expected_ir_shape is None:
+                    expected_ir_shape = current_ir_shape
+                elif current_ir_shape != expected_ir_shape:
+                    raise ValueError(
+                        f"Inconsistent ir_windows shape. Expected {expected_ir_shape}, got {current_ir_shape} "
+                        f"in {group.name}."
+                    )
+                if expected_depth_shape is None:
+                    expected_depth_shape = current_depth_shape
+                elif current_depth_shape != expected_depth_shape:
+                    raise ValueError(
+                        f"Inconsistent depth_windows shape. Expected {expected_depth_shape}, got {current_depth_shape} "
+                        f"in {group.name}."
+                    )
+                if proprioception_windows is not None:
+                    current_proprioception_shape = (
+                        int(proprioception_windows.shape[1]),
+                        int(proprioception_windows.shape[2]),
+                    )
+                    if expected_proprioception_shape is None:
+                        expected_proprioception_shape = current_proprioception_shape
+                    elif current_proprioception_shape != expected_proprioception_shape:
+                        raise ValueError(
+                            "Inconsistent proprioception_windows shape. "
+                            f"Expected {expected_proprioception_shape}, got {current_proprioception_shape} "
+                            f"in {group.name}."
+                        )
+
+                episodes.append(
+                    EpisodePairedWindows(
+                        episode_id=group_name,
+                        ir_windows=ir_windows.astype(np.float32, copy=False),
+                        depth_windows=depth_windows.astype(np.float32, copy=False),
+                        proprioception_windows=(
+                            proprioception_windows.astype(np.float32, copy=False)
+                            if proprioception_windows is not None
+                            else None
+                        ),
+                    )
+                )
+                total_windows += int(ir_windows.shape[0])
+
+                if metadata is None:
+                    assert expected_ir_shape is not None
+                    assert expected_depth_shape is not None
+                    metadata = _build_telemetry_metadata(
+                        payload,
+                        expected_ir_shape=expected_ir_shape,
+                        expected_depth_shape=expected_depth_shape,
+                        ir_window_body_source=ir_window_body_source,
+                        expected_proprioception_shape=expected_proprioception_shape,
+                        dataset_has_proprioception=dataset_has_proprioception,
+                        source_id=group_name,
+                    )
+
+        if not episodes or metadata is None:
+            raise ValueError(f"No valid paired ir_window/depth_window arrays found in: {hdf5_path}")
+
+        logger.info(
+            f"Loaded {total_windows} paired samples from {len(episodes)} HDF5 episode groups with "
+            f"ir_window_shape={metadata.ir_window_shape}, depth_window_shape={metadata.depth_input_shape}, "
+            f"proprioception_window_shape={metadata.proprioception_window_shape}, "
+            f"ir_window_body_source='{metadata.ir_window_body_source}'"
+        )
+        if metadata.ir_t_mode is not None:
+            logger.info(
+                f"Telemetry metadata: ir_t_mode={metadata.ir_t_mode}, "
+                f"ir_t_dim={metadata.ir_t_dim or metadata.ir_window_shape[1]}, "
+                f"depth_resolution={metadata.depth_resolution}, "
+                f"source={metadata.source_episode_id}"
+            )
+        return episodes, metadata
+
+    raise FileNotFoundError(
+        f"Expected HDF5 telemetry file at {hdf5_path}. "
+        "Re-run ir_di_pro_agent.py and collect telemetry.h5 before training."
+    )
 
 
 def flatten_episode_split(
@@ -338,19 +372,40 @@ def flatten_episode_split(
     indices: Sequence[int],
     ir_window_shape: tuple[int, int],
     depth_window_shape: tuple[int, int, int],
-) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    proprioception_window_shape: tuple[int, int] | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, list[str]]:
     selected = [episodes[index] for index in indices]
     episode_ids = [episode.episode_id for episode in selected]
     if not selected:
         return (
             np.empty((0, ir_window_shape[0], ir_window_shape[1]), dtype=np.float32),
             np.empty((0, depth_window_shape[0], depth_window_shape[1], depth_window_shape[2]), dtype=np.float32),
+            (
+                np.empty((0, proprioception_window_shape[0], proprioception_window_shape[1]), dtype=np.float32)
+                if proprioception_window_shape is not None
+                else None
+            ),
             episode_ids,
         )
 
     stacked_ir = np.concatenate([episode.ir_windows for episode in selected], axis=0).astype(np.float32, copy=False)
     stacked_depth = np.concatenate([episode.depth_windows for episode in selected], axis=0).astype(np.float32, copy=False)
-    return stacked_ir, stacked_depth, episode_ids
+    if proprioception_window_shape is None:
+        stacked_proprioception = None
+    else:
+        missing_episode_ids = [
+            episode.episode_id for episode in selected if episode.proprioception_windows is None
+        ]
+        if missing_episode_ids:
+            raise ValueError(
+                "Expected proprioception_windows for every selected episode, but some were missing: "
+                f"{missing_episode_ids}"
+            )
+        stacked_proprioception = np.concatenate(
+            [episode.proprioception_windows for episode in selected if episode.proprioception_windows is not None],
+            axis=0,
+        ).astype(np.float32, copy=False)
+    return stacked_ir, stacked_depth, stacked_proprioception, episode_ids
 
 @dataclass
 class RunPaths:
@@ -471,15 +526,6 @@ def _selected_component_indices_for_body_source(feature_dim: int, body_source: s
         f"Cannot select ir_window_body_source='{body_source}' from ir_window feature dim={feature_dim}. "
         "Expected dims: all=39, hands=26, pelvis=13, or all-mode 39D telemetry."
     )
-
-
-def _select_ir_window_body_source(ir_window_array: np.ndarray, body_source: str) -> np.ndarray:
-    if ir_window_array.ndim != 2:
-        return ir_window_array
-    indices = _selected_component_indices_for_body_source(int(ir_window_array.shape[1]), body_source)
-    if len(indices) == int(ir_window_array.shape[1]):
-        return ir_window_array
-    return ir_window_array[:, indices]
 
 
 def _selected_component_names_for_body_source(
@@ -666,7 +712,6 @@ BEST_VAL_METRIC_CHOICES = (
     "val_ir_value_rmse",
     "val_alignment_mu_mse",
     "val_alignment_mu_rmse",
-    "val_alignment_contrastive_loss",
 )
 
 
@@ -683,7 +728,9 @@ class TrainConfig:
     di_conv_channels: tuple[int, int, int] = (64, 128, 128)
     di_pool_size: tuple[int, int] = (8, 10)
     di_hidden_dim: int = 512
-    batch_size: int = 4096
+    use_proprioception_window: bool = True
+    proprio_hidden_dim: int = 64
+    batch_size: int = 2048
     epochs: int = 2000
     learning_rate: float = 3e-4
     weight_decay: float = 1e-2
@@ -692,12 +739,10 @@ class TrainConfig:
     ir_value_loss_weight: float = 1.0
     di_value_loss_weight: float = 1.0
     latent_alignment_weight: float = 2.0
-    contrastive_loss_weight: float = 0.01
-    contrastive_temperature: float = 0.1
     decoder_train_samples: int = 1
     decoder_eval_samples: int = 1
     di_loss_updates_decoder: bool = False
-    freeze_ir_after_epochs: int = 0
+    freeze_ir_after_epochs: int = 500
     best_val_metric: str = "val_alignment_mu_rmse"
     min_feature_std: float = 1e-4
     max_grad_norm: float = 1.0
@@ -705,10 +750,11 @@ class TrainConfig:
     lr_plateau_patience: int = 100
     lr_plateau_factor: float = 0.5
     min_learning_rate: float = 1e-5
-    early_stop_patience: int = 500
+    early_stop_patience: int = 1000
     seed: int = 42
     device: str = "cuda"
     log_interval: int = 100
+    eval_interval: int = 100
     split_mode: str = "episode"
     depth_input_noise_std: float = 0.0
     val_ratio: float = 0.1
@@ -767,22 +813,6 @@ def posterior_mu_alignment(ir_mu: torch.Tensor, depth_mu: torch.Tensor) -> torch
     return (ir_mu - depth_mu).pow(2).mean()
 
 
-def teacher_student_infonce_loss(
-    teacher_mu: torch.Tensor,
-    student_mu: torch.Tensor,
-    *,
-    temperature: float,
-) -> torch.Tensor:
-    if temperature <= 0.0:
-        raise ValueError(f"contrastive temperature must be positive, got {temperature}.")
-    teacher = nn.functional.normalize(teacher_mu.detach(), dim=-1)
-    student = nn.functional.normalize(student_mu, dim=-1)
-    logits = student @ teacher.transpose(0, 1)
-    logits = logits / temperature
-    targets = torch.arange(student.shape[0], device=student.device)
-    return nn.functional.cross_entropy(logits, targets)
-
-
 class IRWindowEncoder(nn.Module):
     def __init__(self, input_dim: int, condition_dim: int, hidden_dims: Sequence[int], latent_dim: int):
         super().__init__()
@@ -828,6 +858,9 @@ class TemporalDepthEncoder(nn.Module):
         pool_size: Sequence[int],
         hidden_dim: int,
         latent_dim: int,
+        *,
+        proprioception_input_shape: Sequence[int] | None = None,
+        proprio_hidden_dim: int = 64,
     ):
         super().__init__()
         if len(input_shape) != 3:
@@ -840,6 +873,12 @@ class TemporalDepthEncoder(nn.Module):
         self.height = int(input_shape[1])
         self.width = int(input_shape[2])
         self.hidden_dim = int(hidden_dim)
+        self.proprioception_input_shape = (
+            tuple(int(value) for value in proprioception_input_shape)
+            if proprioception_input_shape is not None
+            else None
+        )
+        self.uses_proprioception = self.proprioception_input_shape is not None
         self.pool_height = int(pool_size[0])
         self.pool_width = int(pool_size[1])
         c1, c2, c3 = (int(value) for value in conv_channels)
@@ -858,6 +897,33 @@ class TemporalDepthEncoder(nn.Module):
             nn.LayerNorm(self.hidden_dim),
             nn.ELU(),
         )
+        self.proprio_hidden_dim = int(proprio_hidden_dim)
+        if self.uses_proprioception:
+            assert self.proprioception_input_shape is not None
+            self.proprio_window_size = int(self.proprioception_input_shape[0])
+            self.proprio_feature_dim = int(self.proprioception_input_shape[1])
+            if self.proprio_window_size != self.window_size:
+                raise ValueError(
+                    "Depth/proprio window lengths must match for fused encoding, "
+                    f"got depth={self.window_size}, proprio={self.proprio_window_size}."
+                )
+            self.proprio_frame_projection = nn.Sequential(
+                nn.Linear(self.proprio_feature_dim, self.proprio_hidden_dim),
+                nn.LayerNorm(self.proprio_hidden_dim),
+                nn.ELU(),
+                nn.Linear(self.proprio_hidden_dim, self.proprio_hidden_dim),
+                nn.LayerNorm(self.proprio_hidden_dim),
+                nn.ELU(),
+            )
+            self.temporal_fusion = nn.Sequential(
+                nn.Linear(self.hidden_dim + self.proprio_hidden_dim, self.hidden_dim),
+                nn.LayerNorm(self.hidden_dim),
+                nn.ELU(),
+            )
+        else:
+            self.proprio_window_size = 0
+            self.proprio_feature_dim = 0
+            self.temporal_fusion = nn.Identity()
         self.temporal_encoder = nn.GRU(self.hidden_dim, self.hidden_dim, batch_first=True)
         self.latent_head = nn.Sequential(
             nn.Linear(self.hidden_dim + condition_dim, self.hidden_dim),
@@ -870,7 +936,12 @@ class TemporalDepthEncoder(nn.Module):
         self.mu = nn.Linear(self.hidden_dim, latent_dim)
         self.logvar = nn.Linear(self.hidden_dim, latent_dim)
 
-    def forward(self, depth_window: torch.Tensor, condition: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        depth_window: torch.Tensor,
+        condition: torch.Tensor,
+        proprioception_window: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if depth_window.ndim != 4:
             raise ValueError(f"Expected depth_window batch [B, T, H, W], got {tuple(depth_window.shape)}.")
         batch_size, window_size, height, width = depth_window.shape
@@ -882,7 +953,38 @@ class TemporalDepthEncoder(nn.Module):
         frames = depth_window.reshape(batch_size * window_size, 1, height, width)
         frame_features = self.frame_projection(self.frame_features(frames))
         frame_features = frame_features.reshape(batch_size, window_size, self.hidden_dim)
-        _, hidden = self.temporal_encoder(frame_features)
+        temporal_features = frame_features
+        if self.uses_proprioception:
+            if proprioception_window is None:
+                raise ValueError(
+                    "This depth encoder checkpoint expects proprioception_window input, but none was provided."
+                )
+            if proprioception_window.ndim != 3:
+                raise ValueError(
+                    "Expected proprioception_window batch [B, T, F], "
+                    f"got {tuple(proprioception_window.shape)}."
+                )
+            if tuple(proprioception_window.shape[1:]) != (
+                self.proprio_window_size,
+                self.proprio_feature_dim,
+            ):
+                raise ValueError(
+                    "Expected proprioception window shape "
+                    f"{(self.proprio_window_size, self.proprio_feature_dim)}, "
+                    f"got {tuple(proprioception_window.shape[1:])}."
+                )
+            proprioception_steps = proprioception_window.reshape(
+                batch_size * self.proprio_window_size,
+                self.proprio_feature_dim,
+            )
+            proprioception_steps = self.proprio_frame_projection(proprioception_steps)
+            proprioception_steps = proprioception_steps.reshape(
+                batch_size,
+                self.proprio_window_size,
+                self.proprio_hidden_dim,
+            )
+            temporal_features = self.temporal_fusion(torch.cat([frame_features, proprioception_steps], dim=-1))
+        _, hidden = self.temporal_encoder(temporal_features)
         hidden = self.latent_head(torch.cat([hidden[-1], condition], dim=-1))
         return self.mu(hidden), torch.clamp(self.logvar(hidden), min=-10.0, max=10.0)
 
@@ -893,6 +995,7 @@ class JointMultimodalAE(nn.Module):
         *,
         ir_input_dim: int,
         depth_input_shape: Sequence[int],
+        proprioception_input_shape: Sequence[int] | None,
         text_feature_dim: int,
         condition_dim: int,
         latent_dim: int,
@@ -900,6 +1003,7 @@ class JointMultimodalAE(nn.Module):
         di_conv_channels: Sequence[int],
         di_pool_size: Sequence[int],
         di_hidden_dim: int,
+        proprio_hidden_dim: int,
     ):
         super().__init__()
         self.text_projector = TextConditionProjector(text_feature_dim, condition_dim)
@@ -911,6 +1015,8 @@ class JointMultimodalAE(nn.Module):
             di_pool_size,
             di_hidden_dim,
             latent_dim,
+            proprioception_input_shape=proprioception_input_shape,
+            proprio_hidden_dim=proprio_hidden_dim,
         )
         self.decoder = IRWindowDecoder(latent_dim, condition_dim, ir_hidden_dims, ir_input_dim)
 
@@ -920,8 +1026,13 @@ class JointMultimodalAE(nn.Module):
     def encode_ir(self, ir_window_flat: torch.Tensor, text_features: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         return self.ir_encoder(ir_window_flat, self.condition(text_features))
 
-    def encode_di(self, depth_window: torch.Tensor, text_features: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.di_encoder(depth_window, self.condition(text_features))
+    def encode_di(
+        self,
+        depth_window: torch.Tensor,
+        text_features: torch.Tensor,
+        proprioception_window: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.di_encoder(depth_window, self.condition(text_features), proprioception_window)
 
     def decode(self, z: torch.Tensor, text_features: torch.Tensor) -> torch.Tensor:
         return self.decoder(z, self.condition(text_features))
@@ -990,6 +1101,7 @@ def evaluate_model(
     model: JointMultimodalAE,
     ir_windows: torch.Tensor,
     depth_windows: torch.Tensor,
+    proprioception_windows: torch.Tensor | None,
     *,
     base_text_feature: torch.Tensor,
     batch_size: int,
@@ -997,45 +1109,81 @@ def evaluate_model(
     ir_feature_std: torch.Tensor,
     di_feature_mean: torch.Tensor,
     di_feature_std: torch.Tensor,
+    proprio_feature_mean: torch.Tensor | None,
+    proprio_feature_std: torch.Tensor | None,
     value_loss_type: str,
     deterministic_mu_training: bool,
     ir_value_loss_weight: float,
     di_value_loss_weight: float,
     latent_alignment_weight: float,
-    contrastive_loss_weight: float,
-    contrastive_temperature: float,
     decoder_eval_samples: int,
     device: str,
     prefix: str,
+    shuffle_batches: bool = True,
+    batch_shuffle_seed: int = 0,
 ) -> dict[str, float | int]:
     model.eval()
     ir_feature_mean = ir_feature_mean.to(device=device, dtype=torch.float32).unsqueeze(0)
     ir_feature_std = ir_feature_std.to(device=device, dtype=torch.float32).unsqueeze(0)
     di_feature_mean = di_feature_mean.to(device=device, dtype=torch.float32).unsqueeze(0)
     di_feature_std = di_feature_std.to(device=device, dtype=torch.float32).unsqueeze(0)
+    proprio_feature_mean_device = (
+        proprio_feature_mean.to(device=device, dtype=torch.float32).unsqueeze(0)
+        if proprio_feature_mean is not None
+        else None
+    )
+    proprio_feature_std_device = (
+        proprio_feature_std.to(device=device, dtype=torch.float32).unsqueeze(0)
+        if proprio_feature_std is not None
+        else None
+    )
     decoder_eval_samples = max(int(decoder_eval_samples), 1)
 
     total_loss = 0.0
     total_ir_loss = 0.0
     total_depth_loss = 0.0
     total_alignment = 0.0
-    total_contrastive = 0.0
     total_mu_sq = 0.0
     total_latent_values = 0
     seen_samples = 0
     ir_stats: dict[str, Any] = {"abs": 0.0, "sq": 0.0, "elements": 0, "max_abs": 0.0, "abs_by_dim": None, "sq_by_dim": None, "dim_count": 0}
     depth_stats: dict[str, Any] = {"abs": 0.0, "sq": 0.0, "elements": 0, "max_abs": 0.0, "abs_by_dim": None, "sq_by_dim": None, "dim_count": 0}
 
-    for batch_indices in iterate_batch_indices(int(ir_windows.shape[0]), batch_size, shuffle=False, seed=0):
+    for batch_indices in iterate_batch_indices(
+        int(ir_windows.shape[0]),
+        batch_size,
+        shuffle=shuffle_batches,
+        seed=batch_shuffle_seed,
+    ):
         batch_ir = ir_windows.index_select(0, batch_indices).to(device=device, dtype=torch.float32, non_blocking=True)
         batch_depth = depth_windows.index_select(0, batch_indices).to(device=device, dtype=torch.float32, non_blocking=True)
+        if proprioception_windows is not None:
+            batch_proprioception = proprioception_windows.index_select(0, batch_indices).to(
+                device=device,
+                dtype=torch.float32,
+                non_blocking=True,
+            )
+        else:
+            batch_proprioception = None
         batch_ir = batch_ir.reshape(batch_ir.shape[0], -1)
         batch_ir_normalized = (batch_ir - ir_feature_mean) / ir_feature_std
         batch_depth_normalized = (batch_depth - di_feature_mean) / di_feature_std
+        if batch_proprioception is not None:
+            if proprio_feature_mean_device is None or proprio_feature_std_device is None:
+                raise RuntimeError("proprioception_windows were provided but normalization statistics are missing.")
+            batch_proprioception_normalized = (
+                batch_proprioception - proprio_feature_mean_device
+            ) / proprio_feature_std_device
+        else:
+            batch_proprioception_normalized = None
         batch_text = base_text_feature.expand(batch_ir.shape[0], -1)
 
         ir_mu, ir_logvar = model.encode_ir(batch_ir_normalized, batch_text)
-        depth_mu, depth_logvar = model.encode_di(batch_depth_normalized, batch_text)
+        depth_mu, depth_logvar = model.encode_di(
+            batch_depth_normalized,
+            batch_text,
+            batch_proprioception_normalized,
+        )
         target_ir_mu = ir_mu.detach()
         target_ir_logvar = ir_logvar.detach()
         if deterministic_mu_training:
@@ -1047,12 +1195,6 @@ def evaluate_model(
                 depth_mu,
                 depth_logvar,
             )
-        contrastive_alignment = teacher_student_infonce_loss(
-            target_ir_mu,
-            depth_mu,
-            temperature=contrastive_temperature,
-        )
-
         decoded_ir_from_ir_mu = _decode_original_ir(model, ir_mu, batch_text, ir_feature_mean, ir_feature_std)
         decoded_ir_from_depth_mu = _decode_original_ir(model, depth_mu, batch_text, ir_feature_mean, ir_feature_std)
 
@@ -1098,14 +1240,12 @@ def evaluate_model(
             ir_value_loss_weight * batch_ir_value_loss
             + di_value_loss_weight * batch_depth_value_loss
             + latent_alignment_weight * alignment
-            + contrastive_loss_weight * contrastive_alignment
         )
         batch_size_current = int(batch_ir.shape[0])
         total_loss += batch_loss.item() * batch_size_current
         total_ir_loss += batch_ir_value_loss.item() * batch_size_current
         total_depth_loss += batch_depth_value_loss.item() * batch_size_current
         total_alignment += alignment.item() * batch_size_current
-        total_contrastive += contrastive_alignment.item() * batch_size_current
         total_mu_sq += (ir_mu - depth_mu).square().sum().item()
         total_latent_values += int(ir_mu.numel())
         seen_samples += batch_size_current
@@ -1116,7 +1256,6 @@ def evaluate_model(
         f"{prefix}_ir_value_loss": total_ir_loss / seen_samples,
         f"{prefix}_depth_value_loss": total_depth_loss / seen_samples,
         f"{prefix}_alignment_moment": total_alignment / seen_samples,
-        f"{prefix}_alignment_contrastive_loss": total_contrastive / seen_samples,
         f"{prefix}_alignment_mu_mse": total_mu_sq / total_latent_values,
         f"{prefix}_alignment_mu_rmse": math.sqrt(total_mu_sq / total_latent_values),
     }
@@ -1131,11 +1270,14 @@ def make_checkpoint_payload(
     model: JointMultimodalAE,
     input_shape: tuple[int, int, int],
     ir_window_shape: tuple[int, int],
+    proprioception_input_shape: tuple[int, int] | None,
     num_samples: int,
     ir_feature_mean: torch.Tensor,
     ir_feature_std: torch.Tensor,
     di_feature_mean: torch.Tensor,
     di_feature_std: torch.Tensor,
+    proprio_feature_mean: torch.Tensor | None,
+    proprio_feature_std: torch.Tensor | None,
     text_feature_dim: int,
     telemetry_metadata: TelemetryMetadata,
     checkpoint_type: str,
@@ -1155,11 +1297,17 @@ def make_checkpoint_payload(
         "config": asdict(config),
         "input_shape": list(input_shape),
         "ir_window_shape": list(ir_window_shape),
+        "proprioception_input_shape": (
+            list(proprioception_input_shape) if proprioception_input_shape is not None else None
+        ),
+        "uses_proprioception_window": bool(proprioception_input_shape is not None),
         "num_samples": int(num_samples),
         "ir_feature_mean": ir_feature_mean.cpu(),
         "ir_feature_std": ir_feature_std.cpu(),
         "di_feature_mean": di_feature_mean.cpu(),
         "di_feature_std": di_feature_std.cpu(),
+        "proprio_feature_mean": None if proprio_feature_mean is None else proprio_feature_mean.cpu(),
+        "proprio_feature_std": None if proprio_feature_std is None else proprio_feature_std.cpu(),
         "text_feature_dim": int(text_feature_dim),
         "condition_text": config.condition_text,
         "telemetry": asdict(telemetry_metadata),
@@ -1184,8 +1332,8 @@ def validate_config(config: TrainConfig) -> None:
         raise ValueError(f"value_loss_type must be one of {VALUE_LOSS_CHOICES}, got {config.value_loss_type}.")
     if config.split_mode not in SPLIT_MODE_CHOICES:
         raise ValueError(f"split_mode must be one of {SPLIT_MODE_CHOICES}, got {config.split_mode}.")
-    if config.latent_dim <= 0 or config.condition_dim <= 0 or config.di_hidden_dim <= 0:
-        raise ValueError("latent_dim, condition_dim, and di_hidden_dim must be positive.")
+    if config.latent_dim <= 0 or config.condition_dim <= 0 or config.di_hidden_dim <= 0 or config.proprio_hidden_dim <= 0:
+        raise ValueError("latent_dim, condition_dim, di_hidden_dim, and proprio_hidden_dim must be positive.")
     if not config.ir_hidden_dims or any(int(value) <= 0 for value in config.ir_hidden_dims):
         raise ValueError(f"ir_hidden_dims must contain positive values, got {config.ir_hidden_dims}.")
     if len(config.di_conv_channels) != 3 or any(int(value) <= 0 for value in config.di_conv_channels):
@@ -1200,11 +1348,8 @@ def validate_config(config: TrainConfig) -> None:
         config.ir_value_loss_weight < 0
         or config.di_value_loss_weight < 0
         or config.latent_alignment_weight < 0
-        or config.contrastive_loss_weight < 0
     ):
         raise ValueError("Loss weights must be non-negative.")
-    if config.contrastive_temperature <= 0:
-        raise ValueError("contrastive_temperature must be positive.")
     if config.depth_input_noise_std < 0:
         raise ValueError("depth_input_noise_std must be non-negative.")
     if config.decoder_train_samples <= 0 or config.decoder_eval_samples <= 0:
@@ -1213,6 +1358,8 @@ def validate_config(config: TrainConfig) -> None:
         raise ValueError("freeze_ir_after_epochs must be non-negative.")
     if config.max_grad_norm <= 0:
         raise ValueError("max_grad_norm must be positive.")
+    if config.eval_interval <= 0:
+        raise ValueError("eval_interval must be positive.")
     if config.val_improvement_min_delta < 0:
         raise ValueError("val_improvement_min_delta must be non-negative.")
     if config.lr_plateau_patience < 0 or config.early_stop_patience < 0:
@@ -1229,36 +1376,55 @@ def split_paired_arrays(
     val_ratio: float,
     test_ratio: float,
     seed: int,
-) -> tuple[np.ndarray, np.ndarray, list[str], np.ndarray, np.ndarray, list[str], np.ndarray, np.ndarray, list[str]]:
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray | None,
+    list[str],
+    np.ndarray,
+    np.ndarray,
+    np.ndarray | None,
+    list[str],
+    np.ndarray,
+    np.ndarray,
+    np.ndarray | None,
+    list[str],
+]:
     if split_mode == "episode":
         split_indices = split_episode_indices(len(episodes), val_ratio, test_ratio, seed)
-        train_ir_np, train_depth_np, train_episode_ids = flatten_episode_split(
+        train_ir_np, train_depth_np, train_proprioception_np, train_episode_ids = flatten_episode_split(
             episodes,
             split_indices["train"],
             telemetry_metadata.ir_window_shape,
             telemetry_metadata.depth_input_shape,
+            telemetry_metadata.proprioception_window_shape,
         )
-        val_ir_np, val_depth_np, val_episode_ids = flatten_episode_split(
+        val_ir_np, val_depth_np, val_proprioception_np, val_episode_ids = flatten_episode_split(
             episodes,
             split_indices["val"],
             telemetry_metadata.ir_window_shape,
             telemetry_metadata.depth_input_shape,
+            telemetry_metadata.proprioception_window_shape,
         )
-        test_ir_np, test_depth_np, test_episode_ids = flatten_episode_split(
+        test_ir_np, test_depth_np, test_proprioception_np, test_episode_ids = flatten_episode_split(
             episodes,
             split_indices["test"],
             telemetry_metadata.ir_window_shape,
             telemetry_metadata.depth_input_shape,
+            telemetry_metadata.proprioception_window_shape,
         )
         return (
             train_ir_np,
             train_depth_np,
+            train_proprioception_np,
             train_episode_ids,
             val_ir_np,
             val_depth_np,
+            val_proprioception_np,
             val_episode_ids,
             test_ir_np,
             test_depth_np,
+            test_proprioception_np,
             test_episode_ids,
         )
 
@@ -1266,11 +1432,12 @@ def split_paired_arrays(
         raise ValueError(f"split_mode must be one of {SPLIT_MODE_CHOICES}, got {split_mode}.")
 
     all_indices = np.arange(len(episodes))
-    all_ir_np, all_depth_np, all_episode_ids = flatten_episode_split(
+    all_ir_np, all_depth_np, all_proprioception_np, all_episode_ids = flatten_episode_split(
         episodes,
         all_indices,
         telemetry_metadata.ir_window_shape,
         telemetry_metadata.depth_input_shape,
+        telemetry_metadata.proprioception_window_shape,
     )
     num_windows = int(all_ir_np.shape[0])
     if num_windows < 3:
@@ -1301,12 +1468,15 @@ def split_paired_arrays(
     return (
         all_ir_np[train_indices],
         all_depth_np[train_indices],
+        None if all_proprioception_np is None else all_proprioception_np[train_indices],
         [f"window_split_train_{len(train_indices)}_from_{len(all_episode_ids)}_episodes"],
         all_ir_np[val_indices],
         all_depth_np[val_indices],
+        None if all_proprioception_np is None else all_proprioception_np[val_indices],
         [f"window_split_val_{len(val_indices)}_from_{len(all_episode_ids)}_episodes"],
         all_ir_np[test_indices],
         all_depth_np[test_indices],
+        None if all_proprioception_np is None else all_proprioception_np[test_indices],
         [f"window_split_test_{len(test_indices)}_from_{len(all_episode_ids)}_episodes"],
     )
 
@@ -1331,12 +1501,15 @@ def train_joint(config: TrainConfig) -> Path:
         (
             train_ir_np,
             train_depth_np,
+            train_proprioception_np,
             train_episode_ids,
             val_ir_np,
             val_depth_np,
+            val_proprioception_np,
             val_episode_ids,
             test_ir_np,
             test_depth_np,
+            test_proprioception_np,
             test_episode_ids,
         ) = split_paired_arrays(
             episodes,
@@ -1354,13 +1527,53 @@ def train_joint(config: TrainConfig) -> Path:
         train_depth = torch.from_numpy(train_depth_np)
         val_depth = torch.from_numpy(val_depth_np)
         test_depth = torch.from_numpy(test_depth_np)
-        del train_ir_np, val_ir_np, test_ir_np, train_depth_np, val_depth_np, test_depth_np
+        train_proprioception = (
+            torch.from_numpy(train_proprioception_np) if train_proprioception_np is not None else None
+        )
+        val_proprioception = torch.from_numpy(val_proprioception_np) if val_proprioception_np is not None else None
+        test_proprioception = (
+            torch.from_numpy(test_proprioception_np) if test_proprioception_np is not None else None
+        )
+        del (
+            train_ir_np,
+            val_ir_np,
+            test_ir_np,
+            train_depth_np,
+            val_depth_np,
+            test_depth_np,
+            train_proprioception_np,
+            val_proprioception_np,
+            test_proprioception_np,
+        )
 
         train_ir_flat = train_ir.reshape(train_ir.shape[0], -1)
         ir_feature_mean = train_ir_flat.mean(dim=0)
         ir_feature_std = train_ir_flat.std(dim=0).clamp_min(config.min_feature_std)
         di_feature_mean = train_depth.mean(dim=0)
         di_feature_std = train_depth.std(dim=0).clamp_min(config.min_feature_std)
+        use_proprioception_window = (
+            bool(config.use_proprioception_window)
+            and telemetry_metadata.proprioception_window_shape is not None
+        )
+        if bool(config.use_proprioception_window) and telemetry_metadata.proprioception_window_shape is None:
+            logger.info(
+                "Telemetry does not include proprioception_window. Falling back to depth-only DI encoder training."
+            )
+        if not bool(config.use_proprioception_window) and telemetry_metadata.proprioception_window_shape is not None:
+            logger.info("Telemetry includes proprioception_window, but use_proprioception_window=False so it will be ignored.")
+        if use_proprioception_window:
+            if train_proprioception is None or val_proprioception is None or test_proprioception is None:
+                raise RuntimeError(
+                    "Expected train/val/test proprioception tensors because proprioception_window was enabled."
+                )
+            proprio_feature_mean = train_proprioception.mean(dim=0)
+            proprio_feature_std = train_proprioception.std(dim=0).clamp_min(config.min_feature_std)
+        else:
+            train_proprioception = None
+            val_proprioception = None
+            test_proprioception = None
+            proprio_feature_mean = None
+            proprio_feature_std = None
 
         clip_text = CLIPTextFeatureExtractor(
             model_id=config.clip_model_id,
@@ -1375,6 +1588,9 @@ def train_joint(config: TrainConfig) -> Path:
         model = JointMultimodalAE(
             ir_input_dim=int(train_ir_flat.shape[1]),
             depth_input_shape=telemetry_metadata.depth_input_shape,
+            proprioception_input_shape=(
+                telemetry_metadata.proprioception_window_shape if use_proprioception_window else None
+            ),
             text_feature_dim=text_feature_dim,
             condition_dim=config.condition_dim,
             latent_dim=config.latent_dim,
@@ -1382,6 +1598,7 @@ def train_joint(config: TrainConfig) -> Path:
             di_conv_channels=config.di_conv_channels,
             di_pool_size=config.di_pool_size,
             di_hidden_dim=config.di_hidden_dim,
+            proprio_hidden_dim=config.proprio_hidden_dim,
         ).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
         decoder_parameters = model.decoder_parameters()
@@ -1391,30 +1608,41 @@ def train_joint(config: TrainConfig) -> Path:
         ir_feature_std_device = ir_feature_std.to(device=device, dtype=torch.float32).unsqueeze(0)
         di_feature_mean_device = di_feature_mean.to(device=device, dtype=torch.float32).unsqueeze(0)
         di_feature_std_device = di_feature_std.to(device=device, dtype=torch.float32).unsqueeze(0)
+        proprio_feature_mean_device = (
+            proprio_feature_mean.to(device=device, dtype=torch.float32).unsqueeze(0)
+            if proprio_feature_mean is not None
+            else None
+        )
+        proprio_feature_std_device = (
+            proprio_feature_std.to(device=device, dtype=torch.float32).unsqueeze(0)
+            if proprio_feature_std is not None
+            else None
+        )
 
         logger.info(
             f"Training joint AE on train/val/test windows = "
             f"{train_ir.shape[0]}/{val_ir.shape[0]}/{test_ir.shape[0]}, "
             f"ir_window_shape={telemetry_metadata.ir_window_shape}, depth_window_shape={telemetry_metadata.depth_input_shape}, "
+            f"proprioception_window_shape={telemetry_metadata.proprioception_window_shape}, "
+            f"use_proprioception_window={use_proprioception_window}, "
             f"latent_dim={config.latent_dim}, condition_dim={config.condition_dim}, "
-            f"di_pool_size={config.di_pool_size}, split_mode={config.split_mode}, device={device}"
+            f"di_pool_size={config.di_pool_size}, split_mode={config.split_mode}, "
+            f"eval_interval={config.eval_interval}, device={device}"
         )
         objective_terms = [
             f"{config.ir_value_loss_weight}*ir_recon",
             f"{config.di_value_loss_weight}*di_recon",
             f"{config.latent_alignment_weight}*{'mu_alignment_mse' if config.deterministic_mu_training else 'moment_alignment'}",
-            f"{config.contrastive_loss_weight}*contrastive_alignment",
         ]
         logger.info(
             f"Joint objective: same paired ir/depth sample -> aligned {'latent code' if config.deterministic_mu_training else 'posterior latent'}. "
             f"loss={' + '.join(objective_terms)} "
             f"best_val_metric={config.best_val_metric}, "
             f"deterministic_mu_training={config.deterministic_mu_training}, "
-            f"contrastive_temperature={config.contrastive_temperature}, "
             f"depth_input_noise_std={config.depth_input_noise_std}, "
             f"di_loss_updates_decoder={config.di_loss_updates_decoder}, "
             f"freeze_ir_after_epochs={config.freeze_ir_after_epochs}, "
-            "alignment_target=ir_mu_detached, contrastive_alignment=InfoNCE(depth->ir_detached)"
+            "alignment_target=ir_mu_detached"
         )
         if config.deterministic_mu_training and (
             config.decoder_train_samples != 1 or config.decoder_eval_samples != 1
@@ -1432,6 +1660,7 @@ def train_joint(config: TrainConfig) -> Path:
         last_model_state: dict[str, torch.Tensor] | None = None
         epochs_since_best = 0
         ir_anchor_frozen = False
+        last_lr_reduction_epoch = 0
 
         for epoch in range(1, config.epochs + 1):
             if (
@@ -1452,7 +1681,6 @@ def train_joint(config: TrainConfig) -> Path:
                 "ir_value": 0.0,
                 "depth_value": 0.0,
                 "alignment": 0.0,
-                "contrastive": 0.0,
             }
             train_ir_stats: dict[str, Any] = {"abs": 0.0, "sq": 0.0, "elements": 0, "max_abs": 0.0, "abs_by_dim": None, "sq_by_dim": None, "dim_count": 0}
             train_depth_stats: dict[str, Any] = {"abs": 0.0, "sq": 0.0, "elements": 0, "max_abs": 0.0, "abs_by_dim": None, "sq_by_dim": None, "dim_count": 0}
@@ -1471,9 +1699,27 @@ def train_joint(config: TrainConfig) -> Path:
                     dtype=torch.float32,
                     non_blocking=True,
                 )
+                if train_proprioception is not None:
+                    batch_proprioception = train_proprioception.index_select(0, batch_indices).to(
+                        device=device,
+                        dtype=torch.float32,
+                        non_blocking=True,
+                    )
+                else:
+                    batch_proprioception = None
                 batch_ir = batch_ir.reshape(batch_ir.shape[0], -1)
                 batch_ir_normalized = (batch_ir - ir_feature_mean_device) / ir_feature_std_device
                 batch_depth_normalized = (batch_depth - di_feature_mean_device) / di_feature_std_device
+                if batch_proprioception is not None:
+                    if proprio_feature_mean_device is None or proprio_feature_std_device is None:
+                        raise RuntimeError(
+                            "proprioception_window input was loaded but proprio normalization stats are missing."
+                        )
+                    batch_proprioception_normalized = (
+                        batch_proprioception - proprio_feature_mean_device
+                    ) / proprio_feature_std_device
+                else:
+                    batch_proprioception_normalized = None
                 if config.depth_input_noise_std > 0.0:
                     batch_depth_normalized = batch_depth_normalized + torch.randn_like(
                         batch_depth_normalized,
@@ -1482,7 +1728,11 @@ def train_joint(config: TrainConfig) -> Path:
                 batch_text = base_text_feature.expand(batch_size_current, -1)
 
                 ir_mu, ir_logvar = model.encode_ir(batch_ir_normalized, batch_text)
-                depth_mu, depth_logvar = model.encode_di(batch_depth_normalized, batch_text)
+                depth_mu, depth_logvar = model.encode_di(
+                    batch_depth_normalized,
+                    batch_text,
+                    batch_proprioception_normalized,
+                )
                 target_ir_mu = ir_mu.detach()
                 target_ir_logvar = ir_logvar.detach()
                 if config.deterministic_mu_training:
@@ -1494,12 +1744,6 @@ def train_joint(config: TrainConfig) -> Path:
                         depth_mu,
                         depth_logvar,
                     )
-                contrastive_alignment = teacher_student_infonce_loss(
-                    target_ir_mu,
-                    depth_mu,
-                    temperature=config.contrastive_temperature,
-                )
-
                 if config.deterministic_mu_training:
                     decoded_from_ir = _decode_original_ir(
                         model,
@@ -1585,7 +1829,6 @@ def train_joint(config: TrainConfig) -> Path:
                     config.ir_value_loss_weight * ir_value_loss
                     + config.di_value_loss_weight * depth_value_loss
                     + config.latent_alignment_weight * alignment
-                    + config.contrastive_loss_weight * contrastive_alignment
                 )
                 if not torch.isfinite(loss):
                     raise RuntimeError("Joint training loss became non-finite.")
@@ -1599,7 +1842,6 @@ def train_joint(config: TrainConfig) -> Path:
                 totals["ir_value"] += ir_value_loss.item() * batch_size_current
                 totals["depth_value"] += depth_value_loss.item() * batch_size_current
                 totals["alignment"] += alignment.item() * batch_size_current
-                totals["contrastive"] += contrastive_alignment.item() * batch_size_current
                 train_mu_sq += (ir_mu - depth_mu).square().sum().item()
                 train_latent_values += int(ir_mu.numel())
                 seen_samples += batch_size_current
@@ -1610,7 +1852,6 @@ def train_joint(config: TrainConfig) -> Path:
                 "optim_train_ir_value_loss": totals["ir_value"] / seen_samples,
                 "optim_train_depth_value_loss": totals["depth_value"] / seen_samples,
                 "optim_train_alignment_moment": totals["alignment"] / seen_samples,
-                "optim_train_alignment_contrastive_loss": totals["contrastive"] / seen_samples,
                 "optim_train_alignment_mu_mse": train_mu_sq / train_latent_values,
                 "optim_train_alignment_mu_rmse": math.sqrt(train_mu_sq / train_latent_values),
             }
@@ -1618,149 +1859,178 @@ def train_joint(config: TrainConfig) -> Path:
             optim_train_metrics.update(
                 rename_metric_prefix(_finalize_value_stats("train_depth", train_depth_stats), "train_", "optim_train_")
             )
-            train_metrics = evaluate_model(
-                model,
-                train_ir,
-                train_depth,
-                base_text_feature=base_text_feature,
-                batch_size=config.batch_size,
-                ir_feature_mean=ir_feature_mean,
-                ir_feature_std=ir_feature_std,
-                di_feature_mean=di_feature_mean,
-                di_feature_std=di_feature_std,
-                value_loss_type=config.value_loss_type,
-                deterministic_mu_training=config.deterministic_mu_training,
-                ir_value_loss_weight=config.ir_value_loss_weight,
-                di_value_loss_weight=config.di_value_loss_weight,
-                latent_alignment_weight=config.latent_alignment_weight,
-                contrastive_loss_weight=config.contrastive_loss_weight,
-                contrastive_temperature=config.contrastive_temperature,
-                decoder_eval_samples=config.decoder_eval_samples,
-                device=device,
-                prefix="train",
+            should_evaluate = (
+                epoch == 1
+                or epoch % config.eval_interval == 0
+                or epoch == config.epochs
             )
-            val_metrics = evaluate_model(
-                model,
-                val_ir,
-                val_depth,
-                base_text_feature=base_text_feature,
-                batch_size=config.batch_size,
-                ir_feature_mean=ir_feature_mean,
-                ir_feature_std=ir_feature_std,
-                di_feature_mean=di_feature_mean,
-                di_feature_std=di_feature_std,
-                value_loss_type=config.value_loss_type,
-                deterministic_mu_training=config.deterministic_mu_training,
-                ir_value_loss_weight=config.ir_value_loss_weight,
-                di_value_loss_weight=config.di_value_loss_weight,
-                latent_alignment_weight=config.latent_alignment_weight,
-                contrastive_loss_weight=config.contrastive_loss_weight,
-                contrastive_temperature=config.contrastive_temperature,
-                decoder_eval_samples=config.decoder_eval_samples,
-                device=device,
-                prefix="val",
-            )
-            current_val_loss = float(val_metrics["val_loss"])
-            current_val_selection_score = float(val_metrics[config.best_val_metric])
-            if not math.isfinite(current_val_selection_score):
-                raise RuntimeError(f"Validation metric {config.best_val_metric} is not finite.")
-
-            improved = current_val_selection_score < best_val_score - config.val_improvement_min_delta
-            if improved:
-                best_val_score = current_val_selection_score
-                best_val_loss = current_val_loss
-                best_epoch = epoch
-                epochs_since_best = 0
-                best_model_state = clone_state_dict_to_cpu(model)
-                save_checkpoint(
-                    run_paths.best_checkpoint_path,
-                    config=config,
-                    model=model,
-                    input_shape=telemetry_metadata.depth_input_shape,
-                    ir_window_shape=telemetry_metadata.ir_window_shape,
-                    num_samples=train_ir.shape[0],
-                    ir_feature_mean=ir_feature_mean,
-                    ir_feature_std=ir_feature_std,
-                    di_feature_mean=di_feature_mean,
-                    di_feature_std=di_feature_std,
-                    text_feature_dim=text_feature_dim,
-                    telemetry_metadata=telemetry_metadata,
-                    checkpoint_type="best",
-                    epoch=epoch,
-                    val_loss=current_val_loss,
-                    val_selection_metric=config.best_val_metric,
-                    val_selection_score=current_val_selection_score,
-                )
-            else:
-                epochs_since_best += 1
-
-            if (
-                not improved
-                and config.lr_plateau_patience > 0
-                and epochs_since_best > 0
-                and epochs_since_best % config.lr_plateau_patience == 0
-            ):
-                old_lr = float(optimizer.param_groups[0]["lr"])
-                new_lr = max(old_lr * config.lr_plateau_factor, config.min_learning_rate)
-                if new_lr < old_lr:
-                    for group in optimizer.param_groups:
-                        group["lr"] = new_lr
-                    logger.info(
-                        f"Reduced learning rate after {epochs_since_best} epochs without validation improvement: "
-                        f"{old_lr:.6g} -> {new_lr:.6g}"
-                    )
+            if not should_evaluate and best_epoch > 0:
+                epochs_since_best = epoch - best_epoch
             current_learning_rate = float(optimizer.param_groups[0]["lr"])
 
-            epoch_metrics = {
+            epoch_metrics: dict[str, float | int] = {
                 "epoch": epoch,
                 **optim_train_metrics,
-                **train_metrics,
-                **val_metrics,
-                "train/loss": train_metrics["train_loss"],
-                "train/ir_value_loss": train_metrics["train_ir_value_loss"],
-                "train/depth_value_loss": train_metrics["train_depth_value_loss"],
-                "train/alignment_moment": train_metrics["train_alignment_moment"],
-                "train/alignment_contrastive_loss": train_metrics["train_alignment_contrastive_loss"],
-                "train/alignment_mu_mse": train_metrics["train_alignment_mu_mse"],
-                "train/alignment_mu_rmse": train_metrics["train_alignment_mu_rmse"],
-                "train/ir_value_mae": train_metrics["train_ir_value_mae"],
-                "train/ir_value_rmse": train_metrics["train_ir_value_rmse"],
-                "train/depth_value_mae": train_metrics["train_depth_value_mae"],
-                "train/depth_value_rmse": train_metrics["train_depth_value_rmse"],
+                "eval_performed": int(should_evaluate),
                 "train/learning_rate": current_learning_rate,
-                "train/contrastive_loss_weight": config.contrastive_loss_weight,
-                "train/contrastive_temperature": config.contrastive_temperature,
                 "train/ir_anchor_frozen": float(ir_anchor_frozen),
                 "optim_train/loss": optim_train_metrics["optim_train_loss"],
                 "optim_train/ir_value_loss": optim_train_metrics["optim_train_ir_value_loss"],
                 "optim_train/depth_value_loss": optim_train_metrics["optim_train_depth_value_loss"],
                 "optim_train/alignment_moment": optim_train_metrics["optim_train_alignment_moment"],
-                "optim_train/alignment_contrastive_loss": optim_train_metrics["optim_train_alignment_contrastive_loss"],
                 "optim_train/alignment_mu_mse": optim_train_metrics["optim_train_alignment_mu_mse"],
                 "optim_train/alignment_mu_rmse": optim_train_metrics["optim_train_alignment_mu_rmse"],
                 "optim_train/ir_value_mae": optim_train_metrics["optim_train_ir_value_mae"],
                 "optim_train/ir_value_rmse": optim_train_metrics["optim_train_ir_value_rmse"],
                 "optim_train/depth_value_mae": optim_train_metrics["optim_train_depth_value_mae"],
                 "optim_train/depth_value_rmse": optim_train_metrics["optim_train_depth_value_rmse"],
-                "val/loss": val_metrics["val_loss"],
-                "val/ir_value_mae": val_metrics["val_ir_value_mae"],
-                "val/ir_value_rmse": val_metrics["val_ir_value_rmse"],
-                "val/depth_value_mae": val_metrics["val_depth_value_mae"],
-                "val/depth_value_rmse": val_metrics["val_depth_value_rmse"],
-                "val/alignment_mu_mse": val_metrics["val_alignment_mu_mse"],
-                "val/alignment_mu_rmse": val_metrics["val_alignment_mu_rmse"],
-                "val/alignment_contrastive_loss": val_metrics["val_alignment_contrastive_loss"],
-                "val/selection_score": current_val_selection_score,
                 "best_val_loss": best_val_loss,
                 "best_val_score": best_val_score,
                 "best_epoch": best_epoch,
                 "epochs_since_best": epochs_since_best,
             }
+
+            if should_evaluate:
+                train_metrics = evaluate_model(
+                    model,
+                    train_ir,
+                    train_depth,
+                    train_proprioception,
+                    base_text_feature=base_text_feature,
+                    batch_size=config.batch_size,
+                    ir_feature_mean=ir_feature_mean,
+                    ir_feature_std=ir_feature_std,
+                    di_feature_mean=di_feature_mean,
+                    di_feature_std=di_feature_std,
+                    proprio_feature_mean=proprio_feature_mean,
+                    proprio_feature_std=proprio_feature_std,
+                    value_loss_type=config.value_loss_type,
+                    deterministic_mu_training=config.deterministic_mu_training,
+                    ir_value_loss_weight=config.ir_value_loss_weight,
+                    di_value_loss_weight=config.di_value_loss_weight,
+                    latent_alignment_weight=config.latent_alignment_weight,
+                    decoder_eval_samples=config.decoder_eval_samples,
+                    device=device,
+                    prefix="train",
+                    shuffle_batches=True,
+                    batch_shuffle_seed=config.seed,
+                )
+                val_metrics = evaluate_model(
+                    model,
+                    val_ir,
+                    val_depth,
+                    val_proprioception,
+                    base_text_feature=base_text_feature,
+                    batch_size=config.batch_size,
+                    ir_feature_mean=ir_feature_mean,
+                    ir_feature_std=ir_feature_std,
+                    di_feature_mean=di_feature_mean,
+                    di_feature_std=di_feature_std,
+                    proprio_feature_mean=proprio_feature_mean,
+                    proprio_feature_std=proprio_feature_std,
+                    value_loss_type=config.value_loss_type,
+                    deterministic_mu_training=config.deterministic_mu_training,
+                    ir_value_loss_weight=config.ir_value_loss_weight,
+                    di_value_loss_weight=config.di_value_loss_weight,
+                    latent_alignment_weight=config.latent_alignment_weight,
+                    decoder_eval_samples=config.decoder_eval_samples,
+                    device=device,
+                    prefix="val",
+                    shuffle_batches=True,
+                    batch_shuffle_seed=config.seed + 1,
+                )
+                current_val_loss = float(val_metrics["val_loss"])
+                current_val_selection_score = float(val_metrics[config.best_val_metric])
+                if not math.isfinite(current_val_selection_score):
+                    raise RuntimeError(f"Validation metric {config.best_val_metric} is not finite.")
+
+                improved = current_val_selection_score < best_val_score - config.val_improvement_min_delta
+                if improved:
+                    best_val_score = current_val_selection_score
+                    best_val_loss = current_val_loss
+                    best_epoch = epoch
+                    epochs_since_best = 0
+                    best_model_state = clone_state_dict_to_cpu(model)
+                    save_checkpoint(
+                        run_paths.best_checkpoint_path,
+                        config=config,
+                        model=model,
+                        input_shape=telemetry_metadata.depth_input_shape,
+                        ir_window_shape=telemetry_metadata.ir_window_shape,
+                        proprioception_input_shape=(
+                            telemetry_metadata.proprioception_window_shape if use_proprioception_window else None
+                        ),
+                        num_samples=train_ir.shape[0],
+                        ir_feature_mean=ir_feature_mean,
+                        ir_feature_std=ir_feature_std,
+                        di_feature_mean=di_feature_mean,
+                        di_feature_std=di_feature_std,
+                        proprio_feature_mean=proprio_feature_mean,
+                        proprio_feature_std=proprio_feature_std,
+                        text_feature_dim=text_feature_dim,
+                        telemetry_metadata=telemetry_metadata,
+                        checkpoint_type="best",
+                        epoch=epoch,
+                        val_loss=current_val_loss,
+                        val_selection_metric=config.best_val_metric,
+                        val_selection_score=current_val_selection_score,
+                    )
+                else:
+                    epochs_since_best = epoch - best_epoch if best_epoch > 0 else 0
+
+                if (
+                    not improved
+                    and config.lr_plateau_patience > 0
+                    and epochs_since_best >= config.lr_plateau_patience
+                    and epoch - last_lr_reduction_epoch >= config.lr_plateau_patience
+                ):
+                    old_lr = float(optimizer.param_groups[0]["lr"])
+                    new_lr = max(old_lr * config.lr_plateau_factor, config.min_learning_rate)
+                    if new_lr < old_lr:
+                        for group in optimizer.param_groups:
+                            group["lr"] = new_lr
+                        last_lr_reduction_epoch = epoch
+                        logger.info(
+                            f"Reduced learning rate after {epochs_since_best} epochs without validation improvement: "
+                            f"{old_lr:.6g} -> {new_lr:.6g}"
+                        )
+                current_learning_rate = float(optimizer.param_groups[0]["lr"])
+
+                epoch_metrics.update(
+                    {
+                        **train_metrics,
+                        **val_metrics,
+                        "train/loss": train_metrics["train_loss"],
+                        "train/ir_value_loss": train_metrics["train_ir_value_loss"],
+                        "train/depth_value_loss": train_metrics["train_depth_value_loss"],
+                        "train/alignment_moment": train_metrics["train_alignment_moment"],
+                        "train/alignment_mu_mse": train_metrics["train_alignment_mu_mse"],
+                        "train/alignment_mu_rmse": train_metrics["train_alignment_mu_rmse"],
+                        "train/ir_value_mae": train_metrics["train_ir_value_mae"],
+                        "train/ir_value_rmse": train_metrics["train_ir_value_rmse"],
+                        "train/depth_value_mae": train_metrics["train_depth_value_mae"],
+                        "train/depth_value_rmse": train_metrics["train_depth_value_rmse"],
+                        "train/learning_rate": current_learning_rate,
+                        "val/loss": val_metrics["val_loss"],
+                        "val/ir_value_mae": val_metrics["val_ir_value_mae"],
+                        "val/ir_value_rmse": val_metrics["val_ir_value_rmse"],
+                        "val/depth_value_mae": val_metrics["val_depth_value_mae"],
+                        "val/depth_value_rmse": val_metrics["val_depth_value_rmse"],
+                        "val/alignment_mu_mse": val_metrics["val_alignment_mu_mse"],
+                        "val/alignment_mu_rmse": val_metrics["val_alignment_mu_rmse"],
+                        "val/selection_score": current_val_selection_score,
+                        "best_val_loss": best_val_loss,
+                        "best_val_score": best_val_score,
+                        "best_epoch": best_epoch,
+                        "epochs_since_best": epochs_since_best,
+                    }
+                )
+
             metrics_history.append(epoch_metrics)
             if wandb is not None and wandb.run is not None:
                 wandb.log(epoch_metrics, step=epoch)
 
-            if epoch % config.log_interval == 0 or epoch == 1 or epoch == config.epochs:
+            if should_evaluate and (epoch % config.log_interval == 0 or epoch == 1 or epoch == config.epochs):
                 logger.info(
                     f"epoch={epoch:04d} "
                     f"train_loss={train_metrics['train_loss']:.6f} "
@@ -1768,7 +2038,6 @@ def train_joint(config: TrainConfig) -> Path:
                     f"train_depth_mae={train_metrics['train_depth_value_mae']:.6f} "
                     f"train_align_mu_mse={train_metrics['train_alignment_mu_mse']:.6f} "
                     f"train_align_mu_rmse={train_metrics['train_alignment_mu_rmse']:.6f} "
-                    f"train_nce={train_metrics['train_alignment_contrastive_loss']:.6f} "
                     f"optim_train_loss={optim_train_metrics['optim_train_loss']:.6f} "
                     f"val_depth_mae={val_metrics['val_depth_value_mae']:.6f} "
                     f"val_depth_rmse={val_metrics['val_depth_value_rmse']:.6f} "
@@ -1777,7 +2046,6 @@ def train_joint(config: TrainConfig) -> Path:
                     f"val_ir_mae={val_metrics['val_ir_value_mae']:.6f} "
                     f"val_align_mu_mse={val_metrics['val_alignment_mu_mse']:.6f} "
                     f"val_align_mu_rmse={val_metrics['val_alignment_mu_rmse']:.6f} "
-                    f"val_nce={val_metrics['val_alignment_contrastive_loss']:.6f} "
                     f"val_select={current_val_selection_score:.6f} "
                     f"best_val_score={best_val_score:.6f} "
                     f"lr={current_learning_rate:.6g} "
@@ -1785,8 +2053,27 @@ def train_joint(config: TrainConfig) -> Path:
                     f"epochs_since_best={epochs_since_best} "
                     f"best_val_metric={config.best_val_metric}"
                 )
+            elif epoch % config.log_interval == 0 or epoch == config.epochs:
+                next_eval_epoch = min(
+                    ((epoch // config.eval_interval) + 1) * config.eval_interval,
+                    config.epochs,
+                )
+                logger.info(
+                    f"epoch={epoch:04d} "
+                    f"optim_train_loss={optim_train_metrics['optim_train_loss']:.6f} "
+                    f"optim_train_align_mu_rmse={optim_train_metrics['optim_train_alignment_mu_rmse']:.6f} "
+                    f"lr={current_learning_rate:.6g} "
+                    f"ir_anchor_frozen={int(ir_anchor_frozen)} "
+                    f"eval_skipped=1 next_eval_epoch={next_eval_epoch} "
+                    f"best_val_score={best_val_score:.6f} "
+                    f"epochs_since_best={epochs_since_best}"
+                )
 
-            if config.early_stop_patience > 0 and epochs_since_best >= config.early_stop_patience:
+            if (
+                should_evaluate
+                and config.early_stop_patience > 0
+                and epochs_since_best >= config.early_stop_patience
+            ):
                 logger.info(
                     f"Early stopping at epoch={epoch} because {config.best_val_metric} did not improve for "
                     f"{epochs_since_best} epochs. best_epoch={best_epoch}, best_val_score={best_val_score:.6f}"
@@ -1803,11 +2090,16 @@ def train_joint(config: TrainConfig) -> Path:
             model=model,
             input_shape=telemetry_metadata.depth_input_shape,
             ir_window_shape=telemetry_metadata.ir_window_shape,
+            proprioception_input_shape=(
+                telemetry_metadata.proprioception_window_shape if use_proprioception_window else None
+            ),
             num_samples=train_ir.shape[0],
             ir_feature_mean=ir_feature_mean,
             ir_feature_std=ir_feature_std,
             di_feature_mean=di_feature_mean,
             di_feature_std=di_feature_std,
+            proprio_feature_mean=proprio_feature_mean,
+            proprio_feature_std=proprio_feature_std,
             text_feature_dim=text_feature_dim,
             telemetry_metadata=telemetry_metadata,
             checkpoint_type="last",
@@ -1827,44 +2119,50 @@ def train_joint(config: TrainConfig) -> Path:
             model,
             test_ir,
             test_depth,
+            test_proprioception,
             base_text_feature=base_text_feature,
             batch_size=config.batch_size,
             ir_feature_mean=ir_feature_mean,
             ir_feature_std=ir_feature_std,
             di_feature_mean=di_feature_mean,
             di_feature_std=di_feature_std,
+            proprio_feature_mean=proprio_feature_mean,
+            proprio_feature_std=proprio_feature_std,
             value_loss_type=config.value_loss_type,
             deterministic_mu_training=config.deterministic_mu_training,
             ir_value_loss_weight=config.ir_value_loss_weight,
             di_value_loss_weight=config.di_value_loss_weight,
             latent_alignment_weight=config.latent_alignment_weight,
-            contrastive_loss_weight=config.contrastive_loss_weight,
-            contrastive_temperature=config.contrastive_temperature,
             decoder_eval_samples=config.decoder_eval_samples,
             device=device,
             prefix="test",
+            shuffle_batches=True,
+            batch_shuffle_seed=config.seed + 2,
         )
         model.load_state_dict(last_model_state)
         last_test_metrics = evaluate_model(
             model,
             test_ir,
             test_depth,
+            test_proprioception,
             base_text_feature=base_text_feature,
             batch_size=config.batch_size,
             ir_feature_mean=ir_feature_mean,
             ir_feature_std=ir_feature_std,
             di_feature_mean=di_feature_mean,
             di_feature_std=di_feature_std,
+            proprio_feature_mean=proprio_feature_mean,
+            proprio_feature_std=proprio_feature_std,
             value_loss_type=config.value_loss_type,
             deterministic_mu_training=config.deterministic_mu_training,
             ir_value_loss_weight=config.ir_value_loss_weight,
             di_value_loss_weight=config.di_value_loss_weight,
             latent_alignment_weight=config.latent_alignment_weight,
-            contrastive_loss_weight=config.contrastive_loss_weight,
-            contrastive_temperature=config.contrastive_temperature,
             decoder_eval_samples=config.decoder_eval_samples,
             device=device,
             prefix="test",
+            shuffle_batches=True,
+            batch_shuffle_seed=config.seed + 2,
         )
         best_test_metrics_named = rename_metric_prefix(best_test_metrics, "test_", "best_test_")
         last_test_metrics_named = rename_metric_prefix(last_test_metrics, "test_", "last_test_")
@@ -1917,13 +2215,11 @@ def train_joint(config: TrainConfig) -> Path:
                 "best_test/ir_value_mae": best_test_metrics_named["best_test_ir_value_mae"],
                 "best_test/alignment_mu_mse": best_test_metrics_named["best_test_alignment_mu_mse"],
                 "best_test/alignment_mu_rmse": best_test_metrics_named["best_test_alignment_mu_rmse"],
-                "best_test/alignment_contrastive_loss": best_test_metrics_named["best_test_alignment_contrastive_loss"],
                 "last_test/depth_value_mae": last_test_metrics_named["last_test_depth_value_mae"],
                 "last_test/depth_value_rmse": last_test_metrics_named["last_test_depth_value_rmse"],
                 "last_test/ir_value_mae": last_test_metrics_named["last_test_ir_value_mae"],
                 "last_test/alignment_mu_mse": last_test_metrics_named["last_test_alignment_mu_mse"],
                 "last_test/alignment_mu_rmse": last_test_metrics_named["last_test_alignment_mu_rmse"],
-                "last_test/alignment_contrastive_loss": last_test_metrics_named["last_test_alignment_contrastive_loss"],
                 **best_test_metrics_named,
                 **last_test_metrics_named,
                 **test_differences,
@@ -1952,6 +2248,11 @@ def load_joint_autoencoder(checkpoint_path: str, device: str = "cpu") -> tuple[J
     model = JointMultimodalAE(
         ir_input_dim=int(np.prod(payload["ir_window_shape"])),
         depth_input_shape=tuple(payload["input_shape"]),
+        proprioception_input_shape=(
+            tuple(payload["proprioception_input_shape"])
+            if payload.get("proprioception_input_shape") is not None
+            else None
+        ),
         text_feature_dim=int(payload["text_feature_dim"]),
         condition_dim=int(config_dict["condition_dim"]),
         latent_dim=int(config_dict["latent_dim"]),
@@ -1959,6 +2260,7 @@ def load_joint_autoencoder(checkpoint_path: str, device: str = "cpu") -> tuple[J
         di_conv_channels=tuple(config_dict["di_conv_channels"]),
         di_pool_size=tuple(config_dict["di_pool_size"]),
         di_hidden_dim=int(config_dict["di_hidden_dim"]),
+        proprio_hidden_dim=int(config_dict.get("proprio_hidden_dim", TrainConfig.proprio_hidden_dim)),
     )
     model.load_state_dict(payload["model_state_dict"])
     model.to(device)
@@ -1976,6 +2278,7 @@ def encode_di_window_to_latent_distribution(
     depth_window: np.ndarray | list,
     condition_text: str | None = None,
     device: str = "cpu",
+    proprioception_window: np.ndarray | list | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     model, payload = load_joint_autoencoder(checkpoint_path, device=device)
     depth_array = np.asarray(depth_window, dtype=np.float32)
@@ -1986,6 +2289,32 @@ def encode_di_window_to_latent_distribution(
     depth = (depth - payload["di_feature_mean"].to(device=device, dtype=torch.float32).unsqueeze(0)) / payload[
         "di_feature_std"
     ].to(device=device, dtype=torch.float32).unsqueeze(0)
+    proprioception_input_shape = payload.get("proprioception_input_shape")
+    if proprioception_input_shape is not None:
+        if proprioception_window is None:
+            raise ValueError(
+                "This DI checkpoint expects proprioception_window input. "
+                "Pass proprioception_window with the saved checkpoint shape."
+            )
+        proprioception_array = np.asarray(proprioception_window, dtype=np.float32)
+        expected_proprioception_shape = tuple(proprioception_input_shape)
+        if tuple(proprioception_array.shape) != expected_proprioception_shape:
+            raise ValueError(
+                "Expected proprioception_window shape "
+                f"{expected_proprioception_shape}, got {proprioception_array.shape}."
+            )
+        proprioception = torch.tensor(proprioception_array, dtype=torch.float32, device=device).unsqueeze(0)
+        proprio_feature_mean = payload.get("proprio_feature_mean")
+        proprio_feature_std = payload.get("proprio_feature_std")
+        if proprio_feature_mean is None or proprio_feature_std is None:
+            raise RuntimeError(
+                "Checkpoint declares proprioception input but is missing proprio_feature_mean/std."
+            )
+        proprioception = (
+            proprioception - proprio_feature_mean.to(device=device, dtype=torch.float32).unsqueeze(0)
+        ) / proprio_feature_std.to(device=device, dtype=torch.float32).unsqueeze(0)
+    else:
+        proprioception = None
     clip_cfg = payload["clip"]
     text_extractor = CLIPTextFeatureExtractor(
         model_id=clip_cfg["model_id"],
@@ -1996,7 +2325,7 @@ def encode_di_window_to_latent_distribution(
     )
     text = condition_text or payload["condition_text"]
     text_feature = text_extractor.encode([text]).to(device=device, dtype=torch.float32)
-    mu, logvar = model.encode_di(depth, text_feature)
+    mu, logvar = model.encode_di(depth, text_feature, proprioception)
     return mu.squeeze(0).cpu(), logvar.squeeze(0).cpu()
 
 
@@ -2006,12 +2335,14 @@ def encode_di_window_to_mu_latent(
     depth_window: np.ndarray | list,
     condition_text: str | None = None,
     device: str = "cpu",
+    proprioception_window: np.ndarray | list | None = None,
 ) -> torch.Tensor:
     mu, _ = encode_di_window_to_latent_distribution(
         checkpoint_path,
         depth_window,
         condition_text=condition_text,
         device=device,
+        proprioception_window=proprioception_window,
     )
     return mu
 
@@ -2033,6 +2364,12 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--di-pool-height", type=int, default=TrainConfig.di_pool_size[0])
     parser.add_argument("--di-pool-width", type=int, default=TrainConfig.di_pool_size[1])
     parser.add_argument("--di-hidden-dim", type=int, default=TrainConfig.di_hidden_dim)
+    parser.add_argument(
+        "--use-proprioception-window",
+        type=str_to_bool,
+        default=TrainConfig.use_proprioception_window,
+    )
+    parser.add_argument("--proprio-hidden-dim", type=int, default=TrainConfig.proprio_hidden_dim)
     parser.add_argument("--batch-size", type=int, default=TrainConfig.batch_size)
     parser.add_argument("--epochs", type=int, default=TrainConfig.epochs)
     parser.add_argument("--learning-rate", type=float, default=TrainConfig.learning_rate)
@@ -2046,8 +2383,6 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--ir-value-loss-weight", type=float, default=TrainConfig.ir_value_loss_weight)
     parser.add_argument("--di-value-loss-weight", type=float, default=TrainConfig.di_value_loss_weight)
     parser.add_argument("--latent-alignment-weight", type=float, default=TrainConfig.latent_alignment_weight)
-    parser.add_argument("--contrastive-loss-weight", type=float, default=TrainConfig.contrastive_loss_weight)
-    parser.add_argument("--contrastive-temperature", type=float, default=TrainConfig.contrastive_temperature)
     parser.add_argument("--decoder-train-samples", type=int, default=TrainConfig.decoder_train_samples)
     parser.add_argument("--decoder-eval-samples", type=int, default=TrainConfig.decoder_eval_samples)
     parser.add_argument("--di-loss-updates-decoder", type=str_to_bool, default=TrainConfig.di_loss_updates_decoder)
@@ -2063,6 +2398,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--seed", type=int, default=TrainConfig.seed)
     parser.add_argument("--device", type=str, default=TrainConfig.device)
     parser.add_argument("--log-interval", type=int, default=TrainConfig.log_interval)
+    parser.add_argument("--eval-interval", type=int, default=TrainConfig.eval_interval)
     parser.add_argument("--split-mode", type=str, default=TrainConfig.split_mode, choices=SPLIT_MODE_CHOICES)
     parser.add_argument("--depth-input-noise-std", type=float, default=TrainConfig.depth_input_noise_std)
     parser.add_argument("--val-ratio", type=float, default=TrainConfig.val_ratio)
@@ -2092,6 +2428,8 @@ def parse_args() -> TrainConfig:
         di_conv_channels=(args.di_conv_channel_1, args.di_conv_channel_2, args.di_conv_channel_3),
         di_pool_size=(args.di_pool_height, args.di_pool_width),
         di_hidden_dim=args.di_hidden_dim,
+        use_proprioception_window=bool(args.use_proprioception_window),
+        proprio_hidden_dim=args.proprio_hidden_dim,
         batch_size=args.batch_size,
         epochs=args.epochs,
         learning_rate=args.learning_rate,
@@ -2101,8 +2439,6 @@ def parse_args() -> TrainConfig:
         ir_value_loss_weight=args.ir_value_loss_weight,
         di_value_loss_weight=args.di_value_loss_weight,
         latent_alignment_weight=args.latent_alignment_weight,
-        contrastive_loss_weight=args.contrastive_loss_weight,
-        contrastive_temperature=args.contrastive_temperature,
         decoder_train_samples=args.decoder_train_samples,
         decoder_eval_samples=args.decoder_eval_samples,
         di_loss_updates_decoder=bool(args.di_loss_updates_decoder),
@@ -2118,6 +2454,7 @@ def parse_args() -> TrainConfig:
         seed=args.seed,
         device=args.device,
         log_interval=args.log_interval,
+        eval_interval=args.eval_interval,
         split_mode=args.split_mode,
         depth_input_noise_std=args.depth_input_noise_std,
         val_ratio=args.val_ratio,

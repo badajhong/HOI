@@ -1,10 +1,13 @@
-# python src/holosoma/holosoma/ir_agent.py \
+# python src/holosoma/holosoma/ir_di_pro_agent.py \
 #   --checkpoint=/home/rllab/haechan/holosoma/logs/WholeBodyTracking/teacher_suitcase/model_13000.pt \
 #   --surface-feature-body-source=all \
-#   --training.num-envs=32 \
-#   --num-eval-episodes=10 \
+#   --training.num-envs=16 \
+#   --num-eval-episodes=80 \
 #   --max-eval-steps=200 \
-#   --save-camera-images=False
+#   --save-camera-images=False \
+#   --logger.base-dir "/home/rllab/haechan/holosoma/logs" \
+#   --training.project "ir_di_pro_suitcase" \
+#   --headless=True
 
 from __future__ import annotations
 
@@ -13,6 +16,7 @@ import dataclasses
 import json
 import math
 import os
+import re
 import sys
 import xml.etree.ElementTree as ET
 
@@ -35,17 +39,26 @@ from holosoma.utils.experiment_paths import get_experiment_dir, get_timestamp
 from holosoma.utils.helpers import get_class
 from holosoma.utils.module_utils import get_holosoma_root
 from holosoma.utils.object_urdf import resolve_multi_object_urdf_config
+from holosoma.utils.rotations import quat_rotate_inverse
 from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.sim_utils import close_simulation_app, setup_simulation_environment
 from holosoma.utils.surface_features import SurfaceFeatureComputer
 from holosoma.utils.tyro_utils import TYRO_CONIFG
 
 
-REALSENSE_URDF_FILE = "g1/g1_29dof_realsense.urdf"
-REALSENSE_XML_FILE = "g1/g1_29dof_realsense.xml"
+ORIGINAL_G1_URDF_FILE = "g1/g1_29dof.urdf"
+ORIGINAL_G1_XML_FILE = "g1/g1_29dof.xml"
 REALSENSE_CAMERA_BODY_LINK = "realsense_d435_link"
 DEPTH_CAMERA_FRAME_LINK = "realsense_d435_depth_optical_frame"
 DEPTH_CAMERA_PRIM_NAME = "realsense_d435_depth"
+DEPTH_CAMERA_FALLBACK_PARENT_LINK = "torso_link"
+DEPTH_CAMERA_FALLBACK_POS = (0.075, 0.0, 0.42)
+DEPTH_CAMERA_FALLBACK_ROT_ROS_WXYZ = (
+    0.2705950505259776,
+    -0.6532817309240402,
+    0.6532827248883822,
+    -0.27059745016194003,
+)
 # IsaacSim camera config uses (width, height). Saved depth_window tensors use
 # [window, height, width], so telemetry stores both conventions explicitly.
 DEPTH_RESOLUTION = (80, 60)
@@ -80,6 +93,11 @@ IR_RIGHT_HAND_BODY_NAME_CANDIDATES = (
     "right_wrist_pitch_link",
     "right_wrist_roll_link",
 )
+PROPRIOCEPTION_COMPONENT_NAMES = (
+    "base_ang_vel",
+    "dof_pos",
+    "dof_vel",
+)
 
 
 @dataclass(frozen=True)
@@ -92,6 +110,9 @@ class IRCheckpointConfig:
 
     num_eval_episodes: int | None = None
     """Number of episodes to collect per environment before ending the IR run. None means keep running until manually stopped."""
+
+    headless: bool = False
+    """Run IR telemetry collection without showing the simulator window."""
 
     surface_feature_log_env_ids: tuple[int, ...] = (0,)
     """Environment ids to print for live IR ir_t features during playback."""
@@ -126,7 +147,7 @@ def _normalize_bool_value(value: str) -> bool:
 
 def _normalize_ir_cli_bool_equals_args(args: list[str]) -> list[str]:
     """Allow `--flag=True/False` spellings for Tyro bool flags used by IR CLI."""
-    bool_flags = ("--save-camera-images", "--show-camera-marker")
+    bool_flags = ("--headless", "--save-camera-images", "--show-camera-marker")
     normalized_args: list[str] = []
     for arg in args:
         rewritten = False
@@ -146,6 +167,8 @@ def _normalize_ir_cli_bool_equals_args(args: list[str]) -> list[str]:
 @dataclasses.dataclass(frozen=True)
 class DepthCameraMountSpec:
     source_urdf_path: str
+    mount_mode: str
+    scene_parent_link: str
     parent_link: str
     camera_body_link: str
     optical_frame_link: str
@@ -159,6 +182,8 @@ class DepthCameraMountSpec:
     def to_json_dict(self) -> dict:
         return {
             "source_urdf_path": self.source_urdf_path,
+            "mount_mode": self.mount_mode,
+            "scene_parent_link": self.scene_parent_link,
             "parent_link": self.parent_link,
             "camera_body_link": self.camera_body_link,
             "optical_frame_link": self.optical_frame_link,
@@ -397,12 +422,36 @@ def _joint_origin_xyz_rpy(joint: ET.Element) -> tuple[tuple[float, float, float]
     return xyz, rpy
 
 
-def _load_realsense_depth_mount_from_urdf(tyro_config: ExperimentConfig) -> DepthCameraMountSpec:
+def _fallback_depth_mount_from_simulator_defaults(urdf_path: Path) -> DepthCameraMountSpec:
+    return DepthCameraMountSpec(
+        source_urdf_path=str(urdf_path),
+        mount_mode="simulator_fallback_parent",
+        scene_parent_link=DEPTH_CAMERA_FALLBACK_PARENT_LINK,
+        parent_link=DEPTH_CAMERA_FALLBACK_PARENT_LINK,
+        camera_body_link=DEPTH_CAMERA_FALLBACK_PARENT_LINK,
+        optical_frame_link=DEPTH_CAMERA_FRAME_LINK,
+        translation=DEPTH_CAMERA_FALLBACK_POS,
+        quaternion_ros_wxyz=DEPTH_CAMERA_FALLBACK_ROT_ROS_WXYZ,
+        camera_body_xyz=DEPTH_CAMERA_FALLBACK_POS,
+        camera_body_rpy=(0.0, 0.0, 0.0),
+        optical_frame_xyz=(0.0, 0.0, 0.0),
+        optical_frame_rpy=(0.0, 0.0, 0.0),
+    )
+
+
+def _resolve_depth_mount_spec(tyro_config: ExperimentConfig) -> DepthCameraMountSpec:
     urdf_path = _resolve_robot_urdf_path(tyro_config)
     robot_root = ET.parse(urdf_path).getroot()
 
-    camera_body_joint = _find_joint_by_child(robot_root, REALSENSE_CAMERA_BODY_LINK)
-    optical_frame_joint = _find_joint_by_child(robot_root, DEPTH_CAMERA_FRAME_LINK)
+    try:
+        camera_body_joint = _find_joint_by_child(robot_root, REALSENSE_CAMERA_BODY_LINK)
+        optical_frame_joint = _find_joint_by_child(robot_root, DEPTH_CAMERA_FRAME_LINK)
+    except ValueError:
+        logger.info(
+            "Current robot URDF has no dedicated RealSense links. "
+            "IR depth camera will use IsaacSim's fallback torso mount."
+        )
+        return _fallback_depth_mount_from_simulator_defaults(urdf_path)
 
     camera_body_parent = camera_body_joint.find("parent")
     optical_parent = optical_frame_joint.find("parent")
@@ -430,6 +479,8 @@ def _load_realsense_depth_mount_from_urdf(tyro_config: ExperimentConfig) -> Dept
 
     return DepthCameraMountSpec(
         source_urdf_path=str(urdf_path),
+        mount_mode="urdf_optical_frame",
+        scene_parent_link=DEPTH_CAMERA_FRAME_LINK,
         parent_link=camera_body_parent_link,
         camera_body_link=REALSENSE_CAMERA_BODY_LINK,
         optical_frame_link=DEPTH_CAMERA_FRAME_LINK,
@@ -458,6 +509,7 @@ class IRTelemetryRecorder:
         self.log_dir = Path(log_dir)
         self.telemetry_dir = self.log_dir / "telemetry"
         self.depth_image_dir = self.telemetry_dir / "depth_images"
+        self.hdf5_path = self.telemetry_dir / "telemetry.h5"
         self.window_size = 5
 
         self.log_env_ids = set(ir_cfg.surface_feature_log_env_ids)
@@ -491,8 +543,9 @@ class IRTelemetryRecorder:
         self._episode_steps: list[int] = []
         self._ir_windows: list[list[list[float]]] = []
         self._depth_windows: list[list[list[list[float]]]] = []
+        self._proprioception_windows: list[list[list[float]]] = []
         self._episode_entries: list[list[dict]] = []
-        self._index_entries: list[dict] = []
+        self._exported_episode_count = 0
         self._completed_episode_counts: list[int] = []
 
     @property
@@ -624,10 +677,43 @@ class IRTelemetryRecorder:
             and all(count >= self.num_eval_episodes for count in self._completed_episode_counts)
         )
 
+    def _proprioception_term_dims(self) -> dict[str, int]:
+        num_dof = len(self.env.dof_names)
+        return {
+            "base_ang_vel": 3,
+            "dof_pos": num_dof,
+            "dof_vel": num_dof,
+        }
+
+    def _proprioception_dim(self) -> int:
+        return sum(self._proprioception_term_dims().values())
+
+    def _proprioception_window_shape_t_f(self) -> tuple[int, int]:
+        return (self.window_size, self._proprioception_dim())
+
+    def _compute_proprioception_batch(self) -> dict[str, torch.Tensor]:
+        # Match the semantics used in the WBT observation preset:
+        # base_ang_vel in base frame, dof_pos relative to default_dof_pos, and raw dof_vel.
+        base_ang_vel = quat_rotate_inverse(
+            self.env.base_quat,
+            self.env.simulator.robot_root_states[:, 10:13],
+            w_last=True,
+        )
+        dof_pos = self.env.simulator.dof_pos - self.env.default_dof_pos
+        dof_vel = self.env.simulator.dof_vel
+        proprioception = torch.cat((base_ang_vel, dof_pos, dof_vel), dim=-1)
+        return {
+            "base_ang_vel": base_ang_vel,
+            "dof_pos": dof_pos,
+            "dof_vel": dof_vel,
+            "proprioception": proprioception,
+        }
+
     def _reset_env_buffers(self, env_id: int) -> None:
         self._episode_steps[env_id] = 0
         self._ir_windows[env_id] = []
         self._depth_windows[env_id] = []
+        self._proprioception_windows[env_id] = []
         self._episode_entries[env_id] = []
         self._episode_indices[env_id] += 1
 
@@ -640,13 +726,30 @@ class IRTelemetryRecorder:
                 del history[0 : len(history) - self.window_size]
         return copy.deepcopy(history)
 
-    def _episode_file_name(self, env_id: int, episode_index: int) -> str:
-        return f"episode_env{env_id:03d}_idx{episode_index:03d}.json"
+    def _build_window_1d(self, history: list, current_value: list) -> list:
+        """Optimized window builder for 1-D float lists. Avoids copy.deepcopy."""
+        value_copy = list(current_value)
+        if not history:
+            history[:] = [list(current_value) for _ in range(self.window_size)]
+        else:
+            history.append(value_copy)
+            if len(history) > self.window_size:
+                del history[0 : len(history) - self.window_size]
+        return [row[:] for row in history]
 
-    def _write_index_file(self) -> None:
-        index_path = self.telemetry_dir / "episodes_index.json"
-        with index_path.open("w", encoding="utf-8") as file:
-            json.dump(self._index_entries, file, indent=2)
+    def _build_window_2d(self, history: list, current_value: list) -> list:
+        """Optimized window builder for 2-D float lists. Avoids copy.deepcopy."""
+        frame_copy = [row[:] for row in current_value]
+        if not history:
+            history[:] = [[row[:] for row in frame_copy] for _ in range(self.window_size)]
+        else:
+            history.append(frame_copy)
+            if len(history) > self.window_size:
+                del history[0 : len(history) - self.window_size]
+        return [[row[:] for row in frame] for frame in history]
+
+    def _episode_hdf5_group_name(self, env_id: int, episode_index: int) -> str:
+        return f"episode_env{env_id:03d}_idx{episode_index:03d}"
 
     def _depth_preview_file_name(self, env_id: int, episode_index: int, episode_step: int) -> Path:
         return Path(f"env_{env_id:03d}") / f"episode_{episode_index:03d}" / f"step_{episode_step:06d}_depth.png"
@@ -678,25 +781,32 @@ class IRTelemetryRecorder:
         if depth_camera is None:
             raise RuntimeError(
                 "Simulator did not create a robot-mounted depth camera. "
-                "Expected IsaacSim to register 'robot_depth_camera' from the URDF optical frame."
+                "Expected IsaacSim to register 'robot_depth_camera' from either the URDF optical frame "
+                "or the fallback torso mount."
             )
         return depth_camera
 
+    def _camera_prim_path_template(self) -> str:
+        depth_camera = self._get_simulator_depth_camera()
+        prim_path = getattr(getattr(depth_camera, "cfg", None), "prim_path", None)
+        if not prim_path:
+            raise RuntimeError("Robot depth camera is missing cfg.prim_path.")
+        return str(prim_path)
+
     def _camera_parent_prim_path(self, env_id: int) -> str:
-        # Attach the camera directly under the imported URDF optical-frame link so the
-        # sensor inherits the robot motion through the articulation hierarchy.
-        return f"/World/envs/env_{env_id}/Robot/{self.depth_camera_mount.optical_frame_link}"
+        return self._camera_prim_path(env_id).rsplit("/", 1)[0]
 
     def _camera_prim_path(self, env_id: int) -> str:
-        return f"{self._camera_parent_prim_path(env_id)}/{DEPTH_CAMERA_PRIM_NAME}"
+        prim_template = self._camera_prim_path_template()
+        return re.sub(r"env_\.\*/", f"env_{env_id}/", prim_template)
 
     def _read_depth_frame(self, env_id: int) -> list[list[float]]:
         expected_hw = (self.depth_resolution[1], self.depth_resolution[0])
         depth_tensor = self.env.simulator.get_robot_depth_frame(env_id)
         if depth_tensor is None:
             if self._depth_windows[env_id]:
-                return copy.deepcopy(self._depth_windows[env_id][-1])
-            return [[0.0 for _ in range(expected_hw[1])] for _ in range(expected_hw[0])]
+                return [row[:] for row in self._depth_windows[env_id][-1]]
+            return [[0.0] * expected_hw[1] for _ in range(expected_hw[0])]
 
         depth_array = _to_numpy_float32(depth_tensor)
         depth_array = np.squeeze(depth_array)
@@ -710,6 +820,31 @@ class IRTelemetryRecorder:
         depth_array = np.nan_to_num(depth_array, nan=0.0, posinf=0.0, neginf=0.0)
         return depth_array.tolist()
 
+    def _read_all_depth_frames(self) -> list[list[list[float]]]:
+        """Read depth frames for all envs at once, reusing per-env fallbacks."""
+        expected_hw = (self.depth_resolution[1], self.depth_resolution[0])
+        results: list[list[list[float]]] = []
+        get_frame = self.env.simulator.get_robot_depth_frame
+        for env_id in range(self.env.num_envs):
+            depth_tensor = get_frame(env_id)
+            if depth_tensor is None:
+                if self._depth_windows[env_id]:
+                    results.append([row[:] for row in self._depth_windows[env_id][-1]])
+                else:
+                    results.append([[0.0] * expected_hw[1] for _ in range(expected_hw[0])])
+                continue
+            depth_array = _to_numpy_float32(depth_tensor)
+            depth_array = np.squeeze(depth_array)
+            if depth_array.shape == (self.depth_resolution[0], self.depth_resolution[1]):
+                depth_array = depth_array.T
+            if depth_array.shape != expected_hw:
+                raise RuntimeError(
+                    f"Unexpected depth frame shape {depth_array.shape} for env {env_id}; expected {expected_hw}."
+                )
+            depth_array = np.nan_to_num(depth_array, nan=0.0, posinf=0.0, neginf=0.0)
+            results.append(depth_array.tolist())
+        return results
+
     def _depth_frame_shape_hw(self) -> tuple[int, int]:
         return (int(self.depth_resolution[1]), int(self.depth_resolution[0]))
 
@@ -717,22 +852,46 @@ class IRTelemetryRecorder:
         height, width = self._depth_frame_shape_hw()
         return (self.window_size, height, width)
 
-    def _export_episode(self, episode_data: dict) -> None:
-        file_name = self._episode_file_name(episode_data["env_id"], episode_data["episode_index"])
-        file_path = self.telemetry_dir / file_name
-        with file_path.open("w", encoding="utf-8") as file:
-            json.dump(episode_data, file, indent=2)
+    def _export_episode_hdf5(self, episode_data: dict, group_name: str) -> str:
+        try:
+            import h5py  # noqa: PLC0415
+        except ImportError as exc:
+            raise ImportError(
+                "h5py is required for IR telemetry collection. Install h5py to write telemetry.h5."
+            ) from exc
 
-        self._index_entries.append(
-            {
-                "env_id": episode_data["env_id"],
-                "episode_index": episode_data["episode_index"],
-                "file": file_name,
-                "num_steps": episode_data["num_steps"],
-                "termination_reason": episode_data["termination_reason"],
-            }
+        entries = episode_data.get("entries", [])
+        if not isinstance(entries, list) or not entries:
+            raise ValueError("Cannot export HDF5 telemetry for an episode with no entries.")
+
+        metadata = {key: value for key, value in episode_data.items() if key != "entries"}
+        ir_windows = np.asarray([entry["ir_window"] for entry in entries], dtype=np.float32)
+        depth_windows = np.asarray([entry["depth_window"] for entry in entries], dtype=np.float32)
+        proprioception_windows = np.asarray(
+            [entry["proprioception_window"] for entry in entries],
+            dtype=np.float32,
         )
-        self._write_index_file()
+
+        group_path = f"episodes/{group_name}"
+        with h5py.File(self.hdf5_path, "a") as hdf5_file:
+            hdf5_file.attrs["format"] = "holosoma_ir_telemetry"
+            hdf5_file.attrs["format_version"] = 1
+            episodes_group = hdf5_file.require_group("episodes")
+            if group_name in episodes_group:
+                del episodes_group[group_name]
+            episode_group = episodes_group.create_group(group_name)
+            episode_group.create_dataset("ir_windows", data=ir_windows)
+            episode_group.create_dataset("depth_windows", data=depth_windows)
+            episode_group.create_dataset("proprioception_windows", data=proprioception_windows)
+            episode_group.attrs["metadata_json"] = json.dumps(metadata, separators=(",", ":"))
+        return group_path
+
+    def _export_episode(self, episode_data: dict) -> None:
+        env_id = int(episode_data["env_id"])
+        episode_index = int(episode_data["episode_index"])
+        group_name = self._episode_hdf5_group_name(env_id, episode_index)
+        self._export_episode_hdf5(episode_data, group_name)
+        self._exported_episode_count += 1
 
     def _finalize_episode(self, env_id: int, reason: str, global_step: int | None) -> None:
         episode_data = {
@@ -753,6 +912,8 @@ class IRTelemetryRecorder:
             "ir_t_components": self.ir_t_component_names,
             "ir_t_dim": len(self.ir_t_component_names),
             "save_camera_images": self.save_camera_images,
+            "telemetry_format": "hdf5",
+            "telemetry_hdf5_file": self.hdf5_path.name,
             # Legacy field: camera config order is [width, height].
             "depth_resolution": list(self.depth_resolution),
             "depth_resolution_order": "width_height",
@@ -760,6 +921,12 @@ class IRTelemetryRecorder:
             "depth_frame_shape_order": "height_width",
             "depth_window_shape": list(self._depth_window_shape_t_h_w()),
             "depth_window_shape_order": "time_height_width",
+            "proprioception_components": list(PROPRIOCEPTION_COMPONENT_NAMES),
+            "proprioception_term_dims": self._proprioception_term_dims(),
+            "proprioception_dim": self._proprioception_dim(),
+            "proprioception_window_shape": list(self._proprioception_window_shape_t_f()),
+            "proprioception_window_shape_order": "time_feature",
+            "proprioception_dof_names": list(self.env.dof_names),
             "depth_camera_prim_name": DEPTH_CAMERA_PRIM_NAME,
             "depth_camera_mount": self.depth_camera_mount.to_json_dict(),
             "completed_at_global_step": global_step,
@@ -822,22 +989,26 @@ class IRTelemetryRecorder:
         self._episode_steps = [0 for _ in range(self.env.num_envs)]
         self._ir_windows = [[] for _ in range(self.env.num_envs)]
         self._depth_windows = [[] for _ in range(self.env.num_envs)]
+        self._proprioception_windows = [[] for _ in range(self.env.num_envs)]
         self._episode_entries = [[] for _ in range(self.env.num_envs)]
-        self._index_entries = []
+        self._exported_episode_count = 0
         self._completed_episode_counts = [0 for _ in range(self.env.num_envs)]
         self._run_complete = False
-        self._write_index_file()
 
         logger.info(
             f"IR telemetry enabled for body_source='{self.surface_feature_body_source}' "
             f"body_names={list(self._surface_feature_body_names)} with window_size={self.window_size}, "
             f"ir_t_mode={self.ir_t_mode}, ir_t_dim={len(self.ir_t_component_names)}, "
+            f"proprioception_dim={self._proprioception_dim()}, "
             f"max_eval_steps={self.max_eval_steps}, "
             f"num_eval_episodes_per_env={self.num_eval_episodes}, save_camera_images={self.save_camera_images}, "
+            "telemetry_format=hdf5, "
             f"depth_resolution_wh={self.depth_resolution}, depth_window_shape_t_h_w={self._depth_window_shape_t_h_w()}."
         )
         logger.info(
-            "Loaded depth camera mount from URDF: "
+            "Resolved depth camera mount spec: "
+            f"mount_mode={self.depth_camera_mount.mount_mode}, "
+            f"scene_parent_link={self.depth_camera_mount.scene_parent_link}, "
             f"parent_link={self.depth_camera_mount.parent_link}, "
             f"optical_frame_link={self.depth_camera_mount.optical_frame_link}, "
             f"translation={list(self.depth_camera_mount.translation)}, "
@@ -845,7 +1016,7 @@ class IRTelemetryRecorder:
             f"source_urdf='{self.depth_camera_mount.source_urdf_path}'"
         )
         logger.info(
-            f"IR depth camera is managed by IsaacSim scene sensor at URDF optical-frame prim: {self._camera_parent_prim_path(0)}"
+            f"IR depth camera is managed by IsaacSim scene sensor at prim: {self._camera_parent_prim_path(0)}"
         )
         if self.show_camera_marker:
             logger.info("show_camera_marker is deprecated and ignored; marker visualization was removed from ir_agent.py.")
@@ -860,22 +1031,40 @@ class IRTelemetryRecorder:
         object_keys = self._object_keys_for_envs(motion_command, self.env.num_envs)
         body_feature_batches = self._compute_surface_feature_batches(motion_command=motion_command, object_keys=object_keys)
         features = self._combine_surface_feature_batches(body_feature_batches)
+        proprioception_batches = self._compute_proprioception_batch()
 
         # ir_t: [num_envs, 13] for pelvis, [num_envs, 26] for hands, or concatenated across requested sources.
         # ir_window: [5, ir_t_dim] after the unchanged windowing logic below.
         actor_state["ir_features"] = features
         actor_state["ir_surface_features_by_body"] = body_feature_batches
+        actor_state["proprioception_features"] = proprioception_batches
         actor_state["ir_object_keys"] = object_keys
         global_step = int(actor_state.get("step", -1))
+
+        # Batch-convert all GPU tensors to Python lists once (outside per-env loop).
+        ir_t_all: list = features["ir_t"].tolist()
+        base_ang_vel_all: list = proprioception_batches["base_ang_vel"].tolist()
+        dof_pos_all: list = proprioception_batches["dof_pos"].tolist()
+        dof_vel_all: list = proprioception_batches["dof_vel"].tolist()
+        proprioception_all: list = proprioception_batches["proprioception"].tolist()
+        all_depth_frames: list = self._read_all_depth_frames()
 
         for env_id in range(self.env.num_envs):
             if self._env_episode_target_reached(env_id):
                 continue
 
-            current_ir_t = [float(v) for v in features["ir_t"][env_id].tolist()]
-            current_ir_window = self._build_window(self._ir_windows[env_id], current_ir_t)
-            current_depth_frame = self._read_depth_frame(env_id)
-            current_depth_window = self._build_window(self._depth_windows[env_id], current_depth_frame)
+            current_ir_t = ir_t_all[env_id]
+            current_ir_window = self._build_window_1d(self._ir_windows[env_id], current_ir_t)
+            current_depth_frame = all_depth_frames[env_id]
+            current_depth_window = self._build_window_2d(self._depth_windows[env_id], current_depth_frame)
+            current_base_ang_vel = base_ang_vel_all[env_id]
+            current_dof_pos = dof_pos_all[env_id]
+            current_dof_vel = dof_vel_all[env_id]
+            current_proprioception = proprioception_all[env_id]
+            current_proprioception_window = self._build_window_1d(
+                self._proprioception_windows[env_id],
+                current_proprioception,
+            )
             depth_image_file: str | None = None
             if self.save_camera_images:
                 depth_image_file = self._save_depth_preview(
@@ -894,6 +1083,11 @@ class IRTelemetryRecorder:
                 "surface_feature_body_sources": list(self.surface_feature_body_sources),
                 "ir_t": current_ir_t,
                 "ir_window": current_ir_window,
+                "base_ang_vel": current_base_ang_vel,
+                "dof_pos": current_dof_pos,
+                "dof_vel": current_dof_vel,
+                "proprioception": current_proprioception,
+                "proprioception_window": current_proprioception_window,
                 "depth_window": current_depth_window,
                 "depth_image_file": depth_image_file,
             }
@@ -1022,25 +1216,63 @@ class IRTelemetryRecorder:
                 if self._episode_entries[env_id]:
                     self._finalize_episode(env_id, reason="run_end", global_step=None)
 
-        self._write_index_file()
         logger.info(
-            f"Exported IR telemetry for {len(self._index_entries)} episode(s) to {self.telemetry_dir}"
+            f"Exported IR telemetry for {self._exported_episode_count} episode(s) to {self.telemetry_dir} "
+            "with telemetry_format=hdf5"
         )
 
 
-def _with_realsense_robot_assets(tyro_config: ExperimentConfig) -> ExperimentConfig:
+def _with_original_robot_assets(tyro_config: ExperimentConfig) -> ExperimentConfig:
     asset_cfg = tyro_config.robot.asset
+    if asset_cfg.urdf_file not in {ORIGINAL_G1_URDF_FILE, "g1/g1_29dof_realsense.urdf"}:
+        logger.info(
+            "IR robot asset normalization skipped because the current URDF is not a known G1 variant: "
+            f"urdf={asset_cfg.urdf_file}, xml={asset_cfg.xml_file}"
+        )
+        return tyro_config
+
     new_asset_cfg = dataclasses.replace(
         asset_cfg,
-        urdf_file=REALSENSE_URDF_FILE,
-        xml_file=REALSENSE_XML_FILE,
-        collapse_fixed_joints=False,
+        urdf_file=ORIGINAL_G1_URDF_FILE,
+        xml_file=ORIGINAL_G1_XML_FILE,
+        collapse_fixed_joints=True,
     )
     new_robot_cfg = dataclasses.replace(tyro_config.robot, asset=new_asset_cfg)
     logger.info(
-        f"Switched IR robot assets to RealSense variants: urdf={REALSENSE_URDF_FILE}, xml={REALSENSE_XML_FILE}, collapse_fixed_joints=False"
+        "Normalized IR robot assets to original G1 variants: "
+        f"urdf={ORIGINAL_G1_URDF_FILE}, xml={ORIGINAL_G1_XML_FILE}, collapse_fixed_joints=True"
     )
     return dataclasses.replace(tyro_config, robot=new_robot_cfg)
+
+
+def _force_original_depth_camera_asset_mode(tyro_config: ExperimentConfig) -> ExperimentConfig:
+    observation_cfg = tyro_config.observation
+    if observation_cfg is None:
+        return tyro_config
+
+    changed = False
+    new_groups = dict(observation_cfg.groups)
+    for group_name, group_cfg in observation_cfg.groups.items():
+        new_terms = dict(group_cfg.terms)
+        group_changed = False
+        for term_name, term_cfg in group_cfg.terms.items():
+            params = dict(term_cfg.params)
+            if params.get("robot_depth_asset_mode") == "original":
+                continue
+            if "robot_depth_asset_mode" not in params:
+                continue
+            params["robot_depth_asset_mode"] = "original"
+            new_terms[term_name] = dataclasses.replace(term_cfg, params=params)
+            group_changed = True
+            changed = True
+        if group_changed:
+            new_groups[group_name] = dataclasses.replace(group_cfg, terms=new_terms)
+
+    if not changed:
+        return tyro_config
+
+    logger.info("Forced IR depth-related observation terms to robot_depth_asset_mode='original'.")
+    return dataclasses.replace(tyro_config, observation=dataclasses.replace(observation_cfg, groups=new_groups))
 
 
 def _ensure_isaacsim_cameras_enabled() -> None:
@@ -1104,9 +1336,10 @@ def run_ir_with_tyro(
     saved_wandb_path: str | None,
 ):
     _ensure_isaacsim_cameras_enabled()
-    tyro_config = _with_realsense_robot_assets(tyro_config)
+    tyro_config = _with_original_robot_assets(tyro_config)
+    tyro_config = _force_original_depth_camera_asset_mode(tyro_config)
     tyro_config = resolve_multi_object_urdf_config(tyro_config)
-    depth_camera_mount = _load_realsense_depth_mount_from_urdf(tyro_config)
+    depth_camera_mount = _resolve_depth_mount_spec(tyro_config)
 
     ir_log_dir = get_experiment_dir(tyro_config.logger, tyro_config.training, get_timestamp(), task_name="ir")
     ir_log_dir.mkdir(parents=True, exist_ok=True)
@@ -1169,6 +1402,9 @@ def run_ir_with_tyro(
 def main() -> None:
     init_eval_logging()
     normalized_args = _normalize_ir_cli_bool_equals_args(sys.argv[1:])
+    # IsaacLab's AppLauncher later parses the process-level argv with argparse,
+    # where boolean flags such as --headless do not accept "=True" spellings.
+    sys.argv = [sys.argv[0]] + normalized_args
     ir_cfg, remaining_args = tyro.cli(
         IRCheckpointConfig,
         args=normalized_args,
@@ -1184,8 +1420,15 @@ def main() -> None:
         description="Overriding config on top of what's loaded.",
         config=TYRO_CONIFG,
     )
+    if ir_cfg.headless and not overwritten_tyro_config.training.headless:
+        overwritten_tyro_config = dataclasses.replace(
+            overwritten_tyro_config,
+            training=dataclasses.replace(overwritten_tyro_config.training, headless=True),
+        )
+        logger.info("IR telemetry collection will run headless; simulator viewer is disabled.")
     logger.info(
         f"Running IR evaluation with num_envs={overwritten_tyro_config.training.num_envs}, "
+        f"headless={overwritten_tyro_config.training.headless}, "
         f"episode_max_eval_steps={ir_cfg.max_eval_steps}, num_eval_episodes_per_env={ir_cfg.num_eval_episodes}, "
         f"depth_resolution_wh={DEPTH_RESOLUTION}, "
         f"depth_frame_shape_hw={(DEPTH_RESOLUTION[1], DEPTH_RESOLUTION[0])}"

@@ -411,9 +411,9 @@ g1_29dof_wbt_observation_w_object_multi_student = ObservationManagerCfg(
                         "di_checkpoint_path": "",
                         # Optional explicit source: "", "ir", or "di"
                         "source": "",
-                        # Optional depth-robot asset mode when source resolves to DI:
-                        # --observation.groups.ae_latent.terms.ae_latent.params.robot_depth_asset_mode=original
-                        "robot_depth_asset_mode": "auto",
+                        # Keep the original robot asset and let IsaacSim attach
+                        # the depth camera using the built-in fallback torso mount.
+                        "robot_depth_asset_mode": "original",
                         # Preferred IR-only override path:
                         # --observation.groups.ae_latent.terms.ae_latent.params.body_source=all
                         "body_source": "",
@@ -452,9 +452,8 @@ g1_29dof_wbt_observation_w_object_multi_res = ObservationManagerCfg(
                         # Preferred override path:
                         # --observation.groups.di_ae_latent.terms.di_ae_latent.params.checkpoint_path=/path/to/di_ae.pt
                         "checkpoint_path": "",
-                        # Match student training: keep the original robot asset and
-                        # let the simulator mount the depth camera on the torso
-                        # fallback when the realsense optical frame is absent.
+                        # Keep the original robot asset and let IsaacSim attach
+                        # the depth camera using the built-in fallback torso mount.
                         "robot_depth_asset_mode": "original",
                         "debug_save_depth_images": False,
                         "debug_depth_save_interval": 200,

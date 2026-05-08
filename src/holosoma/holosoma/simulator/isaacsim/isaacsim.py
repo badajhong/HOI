@@ -426,7 +426,33 @@ class IsaacSim(BaseSimulator):
         self.scene.filter_collisions(global_prim_paths=global_collision_prims)
 
         # add objects if object is provided
+        def _estimate_grounded_object_init_z(urdf_path: str) -> float:
+            """Estimate an initial root height that places the object's support on the ground."""
+            try:
+                from holosoma.managers.randomization.terms.locomotion import (
+                    _extract_urdf_collision_bounds,
+                    _extract_urdf_collision_support_points,
+                )
+
+                support_points = _extract_urdf_collision_support_points(urdf_path)
+                if support_points is not None and support_points.size > 0:
+                    return max(0.0, float(-support_points[:, 2].min()))
+
+                bounds = _extract_urdf_collision_bounds(urdf_path)
+                if bounds is not None:
+                    return max(0.0, float(-bounds[0, 2]))
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(f"Failed to estimate grounded init height for object URDF '{urdf_path}': {exc}")
+
+            return 0.0
+
         def _build_object_cfg(actor_name: str, urdf_path: str) -> RigidObjectCfg:
+            grounded_init_z = _estimate_grounded_object_init_z(urdf_path)
+            if self.object_spawn_scale is not None:
+                if isinstance(self.object_spawn_scale, (tuple, list)) and len(self.object_spawn_scale) == 3:
+                    grounded_init_z *= float(self.object_spawn_scale[2])
+                else:
+                    grounded_init_z *= float(self.object_spawn_scale)
             return RigidObjectCfg(
                 prim_path=f"/World/envs/env_.*/{actor_name}",
                 spawn=sim_utils.UrdfFileCfg(
@@ -454,7 +480,7 @@ class IsaacSim(BaseSimulator):
                     ),
                 ),
                 init_state=RigidObjectCfg.InitialStateCfg(
-                    pos=(0.0, 0.0, 0.5),
+                    pos=(0.0, 0.0, grounded_init_z),
                 ),
             )
 

@@ -110,8 +110,11 @@ class BadTracking(TerminationTermBase):
 
     def bad_object_pos(self, motion_command: MotionCommand) -> torch.Tensor:
         """Terminate if the object position is too far from the simulator's object position."""
+        ref_pos = motion_command.object_pos_w
+        if hasattr(motion_command, "object_pos_reward_offset"):
+            ref_pos = ref_pos + motion_command.object_pos_reward_offset
         return (
-            torch.norm(motion_command.object_pos_w - motion_command.simulator_object_pos_w, dim=-1)
+            torch.norm(ref_pos - motion_command.simulator_object_pos_w, dim=-1)
             > self.bad_object_pos_threshold
         )
 

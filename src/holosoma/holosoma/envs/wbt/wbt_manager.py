@@ -167,6 +167,8 @@ class WholeBodyTrackingManager(BaseTask):
             )
 
             motion_object_pos_xyz = motion_command.object_pos_w.clone()
+            if hasattr(motion_command, "object_pos_reward_offset"):
+                motion_object_pos_xyz = motion_object_pos_xyz + motion_command.object_pos_reward_offset
             motion_object_quat_xyzw = motion_command.object_quat_w.clone()
             motion_object_quat_wxyz = motion_object_quat_xyzw[:, [3, 0, 1, 2]]
             motion_command.visualization_markers["motion_object"].visualize(

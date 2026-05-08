@@ -1541,6 +1541,11 @@ def randomize_object_scale_startup(
         env.object_scale_factors_z = torch.ones(env.num_envs, device=env.device, dtype=torch.float32)
     _setup_object_scale_reference_bounds(env, object_names, object_height)
 
+    from holosoma.managers.command.terms.wbt import (
+        get_scaled_object_support_delta,
+        get_scaled_object_support_delta_from_points,
+    )
+
     if getattr(simulator.scene.cfg, "replicate_physics", False):
         raise RuntimeError(
             "Object scale randomization is incompatible with replicate_physics=True. "
@@ -1601,6 +1606,46 @@ def randomize_object_scale_startup(
         env_ids_device = env_ids_cpu.to(device=env.device)
         env.object_scale_factors[env_ids_device] = rand_samples.to(device=env.device, dtype=torch.float32)
         env.object_scale_factors_z[env_ids_device] = scale_z_samples.to(device=env.device, dtype=torch.float32)
+
+        rigid_object = simulator.scene.rigid_objects.get(object_name)
+        if rigid_object is None:
+            continue
+
+        support_delta = None
+        local_support_points = getattr(env, "object_local_support_points_by_actor", {}).get(object_name)
+        local_center = getattr(env, "object_local_bbox_center_by_actor", {}).get(object_name)
+        local_half_extent = getattr(env, "object_local_bbox_half_extent_by_actor", {}).get(object_name)
+
+        try:
+            current_root_state = rigid_object.data.root_state_w[env_ids_device].clone()
+            quat_xyzw = current_root_state[:, [4, 5, 6, 3]]
+            scales_device = rand_samples.to(device=env.device, dtype=torch.float32)
+
+            if local_support_points is not None:
+                support_delta = get_scaled_object_support_delta_from_points(
+                    quat_xyzw=quat_xyzw,
+                    scales_xyz=scales_device,
+                    local_support_points=local_support_points,
+                )
+            elif local_center is not None and local_half_extent is not None:
+                support_delta = get_scaled_object_support_delta(
+                    quat_xyzw=quat_xyzw,
+                    scales_xyz=scales_device,
+                    local_bbox_center=local_center,
+                    local_bbox_half_extent=local_half_extent,
+                )
+
+            if support_delta is None:
+                continue
+
+            current_root_state[:, 2] += support_delta
+            rigid_object.data.default_root_state[env_ids_device, 2] += support_delta
+            rigid_object.write_root_pose_to_sim(current_root_state[:, :7], env_ids_device)
+            rigid_object.write_root_velocity_to_sim(current_root_state[:, 7:], env_ids_device)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                f"Failed to apply startup grounded z compensation for object '{object_name}' after scale randomization: {exc}"
+            )
 
 
 def set_object_init_pose_noise(

@@ -430,6 +430,28 @@ def get_scaled_object_support_delta(
     return base_support_z - scaled_support_z
 
 
+def get_object_support_min_z_from_bbox(
+    quat_xyzw: torch.Tensor,
+    local_bbox_center: torch.Tensor,
+    local_bbox_half_extent: torch.Tensor,
+) -> torch.Tensor:
+    """Return the world-z support minimum induced by the unscaled local bbox."""
+    if quat_xyzw.numel() == 0:
+        return torch.zeros(0, device=quat_xyzw.device, dtype=quat_xyzw.dtype)
+
+    dtype = quat_xyzw.dtype
+    device = quat_xyzw.device
+    local_bbox_center = local_bbox_center.to(device=device, dtype=dtype).unsqueeze(0)
+    local_bbox_half_extent = local_bbox_half_extent.to(device=device, dtype=dtype).unsqueeze(0)
+
+    basis = torch.eye(3, device=device, dtype=dtype).unsqueeze(0).expand(quat_xyzw.shape[0], -1, -1)
+    rotated_basis = quat_apply(quat_xyzw.unsqueeze(1).expand(-1, 3, -1), basis, w_last=True)
+    world_z_axis_weights = rotated_basis[:, :, 2].abs()
+
+    base_center_z = quat_apply(quat_xyzw, local_bbox_center.expand(quat_xyzw.shape[0], -1), w_last=True)[:, 2]
+    return base_center_z - torch.sum(world_z_axis_weights * local_bbox_half_extent, dim=1)
+
+
 def get_scaled_object_support_delta_from_points(
     quat_xyzw: torch.Tensor,
     scales_xyz: torch.Tensor,
@@ -469,6 +491,36 @@ def get_scaled_object_support_delta_from_points(
         scaled_min = torch.minimum(scaled_min, torch.min(scaled_proj, dim=1).values)
 
     return orig_min - scaled_min
+
+
+def get_object_support_min_z_from_points(
+    quat_xyzw: torch.Tensor,
+    local_support_points: torch.Tensor,
+    *,
+    chunk_size: int = 256,
+) -> torch.Tensor:
+    """Return the world-z support minimum induced by the unscaled local support points."""
+    if quat_xyzw.numel() == 0:
+        return torch.zeros(0, device=quat_xyzw.device, dtype=quat_xyzw.dtype)
+
+    dtype = quat_xyzw.dtype
+    device = quat_xyzw.device
+    support_points = local_support_points.to(device=device, dtype=dtype)
+
+    rotation_mats = quaternion_to_matrix(quat_xyzw, w_last=True)
+    world_z_in_local = rotation_mats[:, 2, :]
+
+    num_envs = quat_xyzw.shape[0]
+    orig_min = torch.full((num_envs,), torch.inf, device=device, dtype=dtype)
+    chunk_size = max(1, min(int(chunk_size), int(support_points.shape[0])))
+
+    for start in range(0, int(support_points.shape[0]), chunk_size):
+        points_chunk = support_points[start : start + chunk_size]
+        points_chunk = points_chunk.unsqueeze(0).expand(num_envs, -1, -1)
+        orig_proj = torch.sum(points_chunk * world_z_in_local.unsqueeze(1), dim=2)
+        orig_min = torch.minimum(orig_min, torch.min(orig_proj, dim=1).values)
+
+    return orig_min
 
 
 class MotionCommand(CommandTermBase):
@@ -714,6 +766,7 @@ class MotionCommand(CommandTermBase):
 
         # 4. Set the object states in simulator
         if self.motion.has_object:
+            self._ensure_object_grounding_offsets_initialized()
             obj_pos = self.object_pos_w[env_ids]
             obj_ori = self.object_quat_w[env_ids]
             obj_lin_vel = self.object_lin_vel_w[env_ids]
@@ -730,7 +783,11 @@ class MotionCommand(CommandTermBase):
                 device=self.device,
             )
             obj_pos_noise = obj_pos_noise * self.init_pose_cfg.overall_noise_scale  # (3,)
-            target_obj_pos = obj_pos + (torch.rand(obj_pos.shape, device=self.device) - 0.5) * 2 * obj_pos_noise
+            target_obj_pos = obj_pos.clone()
+            if hasattr(self, "object_grounding_offset_z_per_clip"):
+                grounding_offset_z = self.object_grounding_offset_z_per_clip[self.clip_ids[env_ids]].to(device=self.device)
+                target_obj_pos[:, 2] += grounding_offset_z
+            target_obj_pos = target_obj_pos + (torch.rand(obj_pos.shape, device=self.device) - 0.5) * 2 * obj_pos_noise
             support_points_by_actor = getattr(self._env, "object_local_support_points_by_actor", None)
             bbox_centers = getattr(self._env, "object_local_bbox_center_by_actor", None)
             bbox_half_extents = getattr(self._env, "object_local_bbox_half_extent_by_actor", None)
@@ -1080,6 +1137,10 @@ class MotionCommand(CommandTermBase):
             self.object_type_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
             self.num_object_types = max(getattr(self, "num_object_types", 1), 1)
             self.object_pos_reward_offset = torch.zeros(self.num_envs, 3, device=self.device)
+            self.object_grounding_offset_z_per_clip = torch.zeros(
+                len(self.motion.clip_ranges), dtype=torch.float32, device=self.device
+            )
+            self._object_grounding_offsets_initialized = False
         self.body_pos_relative_w = torch.zeros(
             self.num_envs, len(self.motion_cfg.body_names_to_track), 3, device=self.device
         )  # type: ignore[arg-type]
@@ -1169,6 +1230,64 @@ class MotionCommand(CommandTermBase):
                 "This indicates a mismatch in tensor dimensions during interpolation. "
                 "Please check that the motion file and robot configuration are compatible."
             ) from exc
+
+    def _ensure_object_grounding_offsets_initialized(self) -> None:
+        """Initialize per-clip grounding offsets so object support touches the ground plane."""
+        if not self.motion.has_object or getattr(self, "_object_grounding_offsets_initialized", False):
+            return
+
+        from holosoma.managers.randomization.terms.locomotion import _setup_object_scale_reference_bounds
+
+        object_names = [self.object_name]
+        if self.object_name_to_indices:
+            object_names = [f"object_{object_key}" for object_key in sorted(self.object_name_to_indices.keys())]
+        _setup_object_scale_reference_bounds(self._env, object_names, object_height=None)
+
+        support_points_by_actor = getattr(self._env, "object_local_support_points_by_actor", None)
+        bbox_centers = getattr(self._env, "object_local_bbox_center_by_actor", None)
+        bbox_half_extents = getattr(self._env, "object_local_bbox_half_extent_by_actor", None)
+        if not support_points_by_actor and not (bbox_centers and bbox_half_extents):
+            self._object_grounding_offsets_initialized = True
+            return
+
+        offsets = torch.zeros(len(self.motion.clip_ranges), dtype=torch.float32, device=self.device)
+        for clip_id, (clip_start, clip_end) in enumerate(self.motion.clip_ranges):
+            actor_name = self.object_name
+            if self.object_name_to_indices:
+                object_key = self.motion.clip_object_keys[clip_id]
+                if object_key is not None:
+                    actor_name = f"object_{object_key}"
+
+            obj_pos = self.motion._object_pos_w[clip_start:clip_end].to(device=self.device, dtype=torch.float32)
+            obj_quat = self.motion._object_quat_w[clip_start:clip_end].to(device=self.device, dtype=torch.float32)
+            if obj_pos.numel() == 0:
+                continue
+
+            support_min_z = None
+            if support_points_by_actor:
+                local_support_points = support_points_by_actor.get(actor_name)
+                if local_support_points is not None:
+                    support_min_z = get_object_support_min_z_from_points(obj_quat, local_support_points)
+
+            if support_min_z is None and bbox_centers and bbox_half_extents:
+                local_center = bbox_centers.get(actor_name)
+                local_half_extent = bbox_half_extents.get(actor_name)
+                if local_center is not None and local_half_extent is not None:
+                    support_min_z = get_object_support_min_z_from_bbox(obj_quat, local_center, local_half_extent)
+
+            if support_min_z is None:
+                continue
+
+            support_world_z = obj_pos[:, 2] + support_min_z
+            offsets[clip_id] = -torch.min(support_world_z)
+
+        self.object_grounding_offset_z_per_clip = offsets
+        self._object_grounding_offsets_initialized = True
+        if offsets.numel() > 0:
+            logger.info(
+                "Initialized per-clip object grounding offsets: "
+                f"min={float(offsets.min().item()):.4f}, max={float(offsets.max().item()):.4f}"
+            )
 
     def _build_default_pose_state(self, use_motion_end: bool = False) -> dict[str, torch.Tensor]:
         """Build the state dict representing the robot's default standing pose.
