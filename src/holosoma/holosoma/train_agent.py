@@ -7,7 +7,6 @@ import sys
 import traceback
 from contextlib import contextmanager
 from pathlib import Path
-import glob
 from typing import Any, TypedDict, cast
 
 import tyro
@@ -143,7 +142,8 @@ def _extract_object_key_from_motion_name(npz_path: str) -> str:
     parts = stem.split("_")
     if len(parts) < 3:
         raise ValueError(
-            f"Could not parse object key from motion file '{npz_path}'. Expected: sub{{number}}_{{object}}_{{something}}.npz"
+            f"Could not parse object key from motion file '{npz_path}'. "
+            "Expected: sub{number}_{object}_{something}.npz"
         )
     return parts[1]
 
@@ -166,6 +166,10 @@ def _resolve_object_urdf_for_key(object_urdf_folder: str, object_key: str) -> st
         f"No URDF found for object key '{object_key}' under object-urdf-folder '{object_urdf_folder}'. "
         "Supported layouts: <folder>/<key>/<key>.urdf or <folder>/<key>.urdf"
     )
+
+
+def _discover_motion_npz_files(motion_folder: str) -> list[str]:
+    return sorted(str(path) for path in Path(motion_folder).rglob("*.npz"))
 
 
 def _resolve_multi_object_urdf_config(tyro_config: ExperimentConfig) -> ExperimentConfig:
@@ -196,7 +200,7 @@ def _resolve_multi_object_urdf_config(tyro_config: ExperimentConfig) -> Experime
     motion_files: list[str]
     if motion_folder:
         resolved_motion_folder = resolve_data_file_path(motion_folder)
-        motion_files = sorted(glob.glob(os.path.join(resolved_motion_folder, "*.npz")))
+        motion_files = _discover_motion_npz_files(resolved_motion_folder)
         if not motion_files:
             raise ValueError(f"No .npz motion files found in motion_folder: {resolved_motion_folder}")
     else:

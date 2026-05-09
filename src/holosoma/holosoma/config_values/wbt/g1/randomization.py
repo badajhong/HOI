@@ -54,7 +54,7 @@ object_state_dr_at_setup = {
                 "Ixy": [1.0, 1.0],
                 "Iyz": [1.0, 1.0],
                 "Ixz": [1.0, 1.0],
-            }
+            },
         },
     ),
 }
@@ -177,4 +177,8 @@ g1_29dof_wbt_randomization_w_object_multi_res = RandomizationManagerCfg(
     },
 )
 
-__all__ = ["g1_29dof_wbt_randomization", "g1_29dof_wbt_randomization_w_object", "g1_29dof_wbt_randomization_w_object_multi_res"]
+__all__ = [
+    "g1_29dof_wbt_randomization",
+    "g1_29dof_wbt_randomization_w_object",
+    "g1_29dof_wbt_randomization_w_object_multi_res",
+]

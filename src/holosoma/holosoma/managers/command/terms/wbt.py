@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import glob
 import math
-import os
 import re
+from pathlib import Path
 from typing import Any, List
 
 import numpy as np
@@ -31,13 +30,37 @@ from holosoma.utils.simulator_config import SimulatorType
 
 def extract_object_key_from_motion_filename(npz_path: str) -> str:
     """Extract object key from motion filename: sub{number}_{object}_{something}.npz."""
-    stem = os.path.splitext(os.path.basename(npz_path))[0]
+    stem = Path(npz_path).stem
     parts = stem.split("_")
     if len(parts) < 3:
         raise ValueError(
-            f"Could not parse object key from motion file '{npz_path}'. Expected: sub{{number}}_{{object}}_{{something}}.npz"
+            f"Could not parse object key from motion file '{npz_path}'. "
+            "Expected: sub{number}_{object}_{something}.npz"
         )
     return parts[1]
+
+
+def discover_motion_npz_files(motion_folder: str) -> list[str]:
+    """Discover motion clips in a folder, including one or more object subfolders."""
+    return sorted(str(path) for path in Path(motion_folder).rglob("*.npz"))
+
+
+def _unique_preserve_order(names: list[str]) -> list[str]:
+    unique_names: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        if name in seen:
+            continue
+        unique_names.append(name)
+        seen.add(name)
+    return unique_names
+
+
+def _get_name_indexes(required_names: list[str], available_names: list[str], source_file: str, label: str) -> list[int]:
+    missing = [name for name in required_names if name not in available_names]
+    if missing:
+        raise ValueError(f"Motion file '{source_file}' is missing {label} names required by the robot: {missing}")
+    return [available_names.index(name) for name in required_names]
 
 
 #########################################################################################################
@@ -58,7 +81,7 @@ class MotionLoader:
             logger.info(f"Loading motion files from folder: {motion_folder}")
             # Load and concatenate all NPZ files from the folder
             body_names_in_motion_data, joint_names_in_motion_data = self._load_and_concat_motions_from_folder(
-                motion_folder, device
+                motion_folder, device, robot_body_names, robot_joint_names
             )
         elif motion_file:
             # Resolve the motion file path using importlib.resources
@@ -126,22 +149,35 @@ class MotionLoader:
             self.clip_object_keys = [None]
         return body_names, joint_names
 
-    def _load_and_concat_motions_from_folder(self, motion_folder: str, device: str) -> tuple[list[str], list[str]]:
+    def _load_and_concat_motions_from_folder(
+        self,
+        motion_folder: str,
+        device: str,
+        robot_body_names: list[str],
+        robot_joint_names: list[str],
+    ) -> tuple[list[str], list[str]]:
         """Load all .npz files from a folder and concatenate them into a single motion sequence."""
-        npz_files = sorted(glob.glob(os.path.join(motion_folder, "*.npz")))
-        
+        npz_files = discover_motion_npz_files(motion_folder)
+
         if not npz_files:
             raise ValueError(f"No .npz files found in folder: {motion_folder}")
-        
+
         logger.info(f"Found {len(npz_files)} motion files in {motion_folder}")
-        
+
         # Load the first file to get metadata
         with cached_open(npz_files[0], "rb") as f, np.load(f) as data:
-            self.fps = data["fps"]
-            body_names = data["body_names"].tolist()
-            joint_names = data["joint_names"].tolist()
+            self.fps = float(np.asarray(data["fps"]).reshape(-1)[0])
+            first_body_names = [str(name) for name in data["body_names"].tolist()]
+            first_joint_names = [str(name) for name in data["joint_names"].tolist()]
             self.has_object = "object_pos_w" in data
-        
+
+        # Store only robot bodies/joints for concatenated motion tensors. Object states are read
+        # from dedicated object_* arrays, so object-specific body links may differ across clips.
+        body_names = _unique_preserve_order(robot_body_names)
+        joint_names = list(robot_joint_names)
+        _get_name_indexes(body_names, first_body_names, npz_files[0], "body")
+        _get_name_indexes(joint_names, first_joint_names, npz_files[0], "joint")
+
         # Initialize lists to concatenate
         joint_pos_list = []
         joint_vel_list = []
@@ -156,29 +192,47 @@ class MotionLoader:
         self.clip_files = []
         self.clip_object_keys = []
         running_end = 0
-        
+
         # Load and concatenate all files
         for npz_file in npz_files:
             logger.info(f"Loading motion file: {npz_file}")
             with cached_open(npz_file, "rb") as f, np.load(f) as data:
+                current_body_names = [str(name) for name in data["body_names"].tolist()]
+                current_joint_names = [str(name) for name in data["joint_names"].tolist()]
+                body_indexes = _get_name_indexes(body_names, current_body_names, npz_file, "body")
+                joint_indexes = _get_name_indexes(joint_names, current_joint_names, npz_file, "joint")
+                has_object = "object_pos_w" in data
+                if has_object != self.has_object:
+                    raise ValueError(
+                        f"Motion file '{npz_file}' has object data={has_object}, but first file has "
+                        f"object data={self.has_object}. Do not mix object and non-object clips."
+                    )
+
                 # Validate consistency
-                if data["fps"] != self.fps:
-                    logger.warning(f"FPS mismatch in {npz_file}: {data['fps']} vs {self.fps}")
-                
+                fps = float(np.asarray(data["fps"]).reshape(-1)[0])
+                if fps != self.fps:
+                    logger.warning(f"FPS mismatch in {npz_file}: {fps} vs {self.fps}")
+
                 # Extract and concatenate data
-                joint_pos = torch.tensor(data["joint_pos"][:, 7:], dtype=torch.float32, device=device)
-                joint_vel = torch.tensor(data["joint_vel"][:, 6:], dtype=torch.float32, device=device)
-                body_pos_w = torch.tensor(data["body_pos_w"], dtype=torch.float32, device=device)
+                joint_pos = torch.tensor(data["joint_pos"][:, 7:][:, joint_indexes], dtype=torch.float32, device=device)
+                joint_vel = torch.tensor(data["joint_vel"][:, 6:][:, joint_indexes], dtype=torch.float32, device=device)
+                body_pos_w = torch.tensor(data["body_pos_w"][:, body_indexes], dtype=torch.float32, device=device)
                 joint_pos_list.append(joint_pos)
                 joint_vel_list.append(joint_vel)
                 body_pos_w_list.append(body_pos_w)
-                
+
                 # wxyz -> xyzw
-                body_quat_w_wxyz = torch.tensor(data["body_quat_w"], dtype=torch.float32, device=device)
+                body_quat_w_wxyz = torch.tensor(
+                    data["body_quat_w"][:, body_indexes], dtype=torch.float32, device=device
+                )
                 body_quat_w_list.append(body_quat_w_wxyz[:, :, [1, 2, 3, 0]])
-                
-                body_lin_vel_w_list.append(torch.tensor(data["body_lin_vel_w"], dtype=torch.float32, device=device))
-                body_ang_vel_w_list.append(torch.tensor(data["body_ang_vel_w"], dtype=torch.float32, device=device))
+
+                body_lin_vel_w_list.append(
+                    torch.tensor(data["body_lin_vel_w"][:, body_indexes], dtype=torch.float32, device=device)
+                )
+                body_ang_vel_w_list.append(
+                    torch.tensor(data["body_ang_vel_w"][:, body_indexes], dtype=torch.float32, device=device)
+                )
 
                 clip_len = int(joint_pos.shape[0])
                 self.clip_ranges.append((running_end, running_end + clip_len))
@@ -193,8 +247,10 @@ class MotionLoader:
                     object_pos_w_list.append(torch.tensor(data["object_pos_w"], dtype=torch.float32, device=device))
                     object_quat_w_wxyz = torch.tensor(data["object_quat_w"], dtype=torch.float32, device=device)
                     object_quat_w_list.append(object_quat_w_wxyz[:, [1, 2, 3, 0]])
-                    object_lin_vel_w_list.append(torch.tensor(data["object_lin_vel_w"], dtype=torch.float32, device=device))
-        
+                    object_lin_vel_w_list.append(
+                        torch.tensor(data["object_lin_vel_w"], dtype=torch.float32, device=device)
+                    )
+
         # Concatenate all data
         self._joint_pos = torch.cat(joint_pos_list, dim=0)
         self._joint_vel = torch.cat(joint_vel_list, dim=0)
@@ -202,7 +258,7 @@ class MotionLoader:
         self._body_quat_w = torch.cat(body_quat_w_list, dim=0)
         self._body_lin_vel_w = torch.cat(body_lin_vel_w_list, dim=0)
         self._body_ang_vel_w = torch.cat(body_ang_vel_w_list, dim=0)
-        
+
         if self.has_object:
             self._object_pos_w = torch.cat(object_pos_w_list, dim=0)
             self._object_quat_w = torch.cat(object_quat_w_list, dim=0)
@@ -211,9 +267,9 @@ class MotionLoader:
             self._object_pos_w = torch.zeros(0, 3, device=device)
             self._object_quat_w = torch.zeros(0, 4, device=device)
             self._object_lin_vel_w = torch.zeros(0, 3, device=device)
-        
+
         logger.info(f"Concatenated {len(npz_files)} motion files. Total timesteps: {self._joint_pos.shape[0]}")
-        
+
         return body_names, joint_names
 
     @property
@@ -395,6 +451,8 @@ FAKE_BODY_NAME_ALIASES: dict[str, str] = {
     "left_foot_contact_point": "left_ankle_roll_link",
     "right_foot_contact_point": "right_ankle_roll_link",
 }
+
+INACTIVE_OBJECT_PARK_DEPTH_M = 50.0
 
 
 def get_filtered_body_names(body_list: List[str], pattern: str) -> List[str]:
@@ -585,26 +643,41 @@ class MotionCommand(CommandTermBase):
                 for object_key in clip_object_keys:
                     actor_name = f"object_{object_key}"
                     try:
-                        self.object_name_to_indices[object_key] = self._env.simulator.get_actor_indices(actor_name, env_ids=None)
+                        self.object_name_to_indices[object_key] = self._env.simulator.get_actor_indices(
+                            actor_name, env_ids=None
+                        )
                     except KeyError:
                         missing_keys.append(object_key)
 
                 if missing_keys:
+                    object_name_to_path = getattr(self._env.robot_config.object, "object_urdf_name_to_path", {}) or {}
+                    if object_name_to_path or len(clip_object_keys) > 1:
+                        expected_actors = [f"object_{key}" for key in clip_object_keys]
+                        raise KeyError(
+                            f"Missing simulator object actors for motion object keys {missing_keys}. "
+                            f"Expected actors: {expected_actors}. "
+                            "Check that --robot.object.object-urdf-asset points to URDFs matching motion filenames."
+                        )
                     logger.warning(
-                        f"Missing simulator object actors for keys {missing_keys}. Falling back to single actor '{self.object_name}'."
+                        f"Missing simulator object actor for key {missing_keys[0]}. "
+                        f"Falling back to single actor '{self.object_name}'."
                     )
-                    self.object_name_to_indices = {}
 
             if self.object_name_to_indices:
                 first_key = sorted(self.object_name_to_indices.keys())[0]
                 self.object_indices_in_simulator = self.object_name_to_indices[first_key]
+                all_env_ids = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
+                for object_key in sorted(self.object_name_to_indices.keys()):
+                    self._park_object_actor(object_key, all_env_ids)
             else:
                 self.object_indices_in_simulator = self._env.simulator.get_actor_indices(self.object_name, env_ids=None)
 
             object_keys = sorted({key for key in self.motion.clip_object_keys if key is not None})
             self.object_key_to_id = {key: i for i, key in enumerate(object_keys)}
             self.num_object_types = len(self.object_key_to_id)
-            self.object_type_id_per_clip = torch.zeros(len(self.motion.clip_object_keys), dtype=torch.long, device=self.device)
+            self.object_type_id_per_clip = torch.zeros(
+                len(self.motion.clip_object_keys), dtype=torch.long, device=self.device
+            )
             for clip_idx, key in enumerate(self.motion.clip_object_keys):
                 if key is None:
                     self.object_type_id_per_clip[clip_idx] = 0
@@ -677,9 +750,7 @@ class MotionCommand(CommandTermBase):
         # Clamp starts to be at most clip_end - 2 for safe step() increment.
         max_safe = torch.clamp(self.clip_end_steps[env_ids] - 2, min=self.clip_start_steps[env_ids])
         already_last_timestep_mask = self.time_steps[env_ids] > max_safe
-        self.time_steps[env_ids] = torch.where(
-            already_last_timestep_mask, max_safe, self.time_steps[env_ids]
-        )
+        self.time_steps[env_ids] = torch.where(already_last_timestep_mask, max_safe, self.time_steps[env_ids])
 
         # 1. Get the root/body poses from the motion data
         root_pos = self.root_pos_w[env_ids].clone()
@@ -785,7 +856,9 @@ class MotionCommand(CommandTermBase):
             obj_pos_noise = obj_pos_noise * self.init_pose_cfg.overall_noise_scale  # (3,)
             target_obj_pos = obj_pos.clone()
             if hasattr(self, "object_grounding_offset_z_per_clip"):
-                grounding_offset_z = self.object_grounding_offset_z_per_clip[self.clip_ids[env_ids]].to(device=self.device)
+                grounding_offset_z = self.object_grounding_offset_z_per_clip[self.clip_ids[env_ids]].to(
+                    device=self.device
+                )
                 target_obj_pos[:, 2] += grounding_offset_z
             target_obj_pos = target_obj_pos + (torch.rand(obj_pos.shape, device=self.device) - 0.5) * 2 * obj_pos_noise
             support_points_by_actor = getattr(self._env, "object_local_support_points_by_actor", None)
@@ -862,9 +935,7 @@ class MotionCommand(CommandTermBase):
             if hasattr(self, "object_pos_reward_offset"):
                 self.object_pos_reward_offset[env_ids] = target_obj_pos - obj_pos
 
-            object_states = torch.cat(
-                [target_obj_pos, obj_ori, obj_lin_vel, torch.zeros_like(obj_lin_vel)], dim=-1
-            )
+            object_states = torch.cat([target_obj_pos, obj_ori, obj_lin_vel, torch.zeros_like(obj_lin_vel)], dim=-1)
             # 4.3 set object states in simulator (per-clip object selection when available)
             if self.object_name_to_indices and selected_keys is not None and all_keys is not None:
                 # Place active object per env according to selected clip key.
@@ -879,17 +950,13 @@ class MotionCommand(CommandTermBase):
 
                 # Park inactive objects far below ground to avoid unintended collisions.
                 for object_key in all_keys:
-                    mask_inactive = torch.tensor([k != object_key for k in selected_keys], device=self.device, dtype=torch.bool)
+                    mask_inactive = torch.tensor(
+                        [k != object_key for k in selected_keys], device=self.device, dtype=torch.bool
+                    )
                     env_ids_inactive = env_ids[mask_inactive]
                     if env_ids_inactive.numel() == 0:
                         continue
-                    parked_pos = self._env.simulator.scene.env_origins[env_ids_inactive].clone()
-                    parked_pos[:, 2] -= 20.0
-                    parked_quat = torch.zeros((env_ids_inactive.numel(), 4), device=self.device)
-                    parked_quat[:, 3] = 1.0
-                    parked_vel = torch.zeros((env_ids_inactive.numel(), 3), device=self.device)
-                    parked_states = torch.cat([parked_pos, parked_quat, parked_vel, parked_vel], dim=-1)
-                    self._env.simulator.set_actor_states([f"object_{object_key}"], env_ids_inactive, parked_states)
+                    self._park_object_actor(object_key, env_ids_inactive)
             else:
                 self._env.simulator.set_actor_states([self.object_name], env_ids, object_states)
                 self.active_object_indices[env_ids] = self.object_indices_in_simulator[env_ids]
@@ -1152,6 +1219,19 @@ class MotionCommand(CommandTermBase):
         if self.motion_cfg.use_adaptive_timesteps_sampler:
             self.adaptive_timesteps_sampler.init_buffers()
 
+    def _park_object_actor(self, object_key: str, env_ids: torch.Tensor) -> None:
+        """Move an inactive object actor outside depth/render/collision range for the selected envs."""
+        if env_ids.numel() == 0:
+            return
+
+        parked_pos = self._env.simulator.scene.env_origins[env_ids].clone()
+        parked_pos[:, 2] -= INACTIVE_OBJECT_PARK_DEPTH_M
+        parked_quat = torch.zeros((env_ids.numel(), 4), device=self.device)
+        parked_quat[:, 3] = 1.0
+        parked_vel = torch.zeros((env_ids.numel(), 3), device=self.device)
+        parked_states = torch.cat([parked_pos, parked_quat, parked_vel, parked_vel], dim=-1)
+        self._env.simulator.set_actor_states([f"object_{object_key}"], env_ids, parked_states)
+
     def update_metrics(self):
         """Update the metrics. After action, before step() is called."""
         self.metrics["motion/error_ref_pos"] = torch.norm(self.ref_pos_w - self.robot_ref_pos_w, dim=-1)
@@ -1236,7 +1316,7 @@ class MotionCommand(CommandTermBase):
         if not self.motion.has_object or getattr(self, "_object_grounding_offsets_initialized", False):
             return
 
-        from holosoma.managers.randomization.terms.locomotion import _setup_object_scale_reference_bounds
+        from holosoma.managers.randomization.terms.locomotion import _setup_object_scale_reference_bounds  # noqa: I001, PLC0415
 
         object_names = [self.object_name]
         if self.object_name_to_indices:
@@ -1587,8 +1667,8 @@ class MotionCommand(CommandTermBase):
         self._apply_transition_segments(segments, prepend=prepend)
 
     def _setup_visualization_markers_for_isaacsim(self):
-        from isaaclab.markers import VisualizationMarkers
-        from isaaclab.markers.config import FRAME_MARKER_CFG, RAY_CASTER_MARKER_CFG
+        from isaaclab.markers import VisualizationMarkers  # noqa: PLC0415
+        from isaaclab.markers.config import FRAME_MARKER_CFG, RAY_CASTER_MARKER_CFG  # noqa: PLC0415
 
         visualization_markers_cfg = FRAME_MARKER_CFG.replace(
             prim_path="/Visuals/Command/real_robot",
