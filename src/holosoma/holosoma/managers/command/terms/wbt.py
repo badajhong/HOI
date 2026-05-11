@@ -751,6 +751,7 @@ class MotionCommand(CommandTermBase):
         max_safe = torch.clamp(self.clip_end_steps[env_ids] - 2, min=self.clip_start_steps[env_ids])
         already_last_timestep_mask = self.time_steps[env_ids] > max_safe
         self.time_steps[env_ids] = torch.where(already_last_timestep_mask, max_safe, self.time_steps[env_ids])
+        self.started_at_timestep_zero[env_ids] = self.time_steps[env_ids] == self.clip_start_steps[env_ids]
 
         # 1. Get the root/body poses from the motion data
         root_pos = self.root_pos_w[env_ids].clone()
@@ -937,29 +938,7 @@ class MotionCommand(CommandTermBase):
 
             object_states = torch.cat([target_obj_pos, obj_ori, obj_lin_vel, torch.zeros_like(obj_lin_vel)], dim=-1)
             # 4.3 set object states in simulator (per-clip object selection when available)
-            if self.object_name_to_indices and selected_keys is not None and all_keys is not None:
-                # Place active object per env according to selected clip key.
-                for object_key in all_keys:
-                    mask = torch.tensor([k == object_key for k in selected_keys], device=self.device, dtype=torch.bool)
-                    env_ids_subset = env_ids[mask]
-                    if env_ids_subset.numel() == 0:
-                        continue
-                    object_states_subset = object_states[mask]
-                    self._env.simulator.set_actor_states([f"object_{object_key}"], env_ids_subset, object_states_subset)
-                    self.active_object_indices[env_ids_subset] = self.object_name_to_indices[object_key][env_ids_subset]
-
-                # Park inactive objects far below ground to avoid unintended collisions.
-                for object_key in all_keys:
-                    mask_inactive = torch.tensor(
-                        [k != object_key for k in selected_keys], device=self.device, dtype=torch.bool
-                    )
-                    env_ids_inactive = env_ids[mask_inactive]
-                    if env_ids_inactive.numel() == 0:
-                        continue
-                    self._park_object_actor(object_key, env_ids_inactive)
-            else:
-                self._env.simulator.set_actor_states([self.object_name], env_ids, object_states)
-                self.active_object_indices[env_ids] = self.object_indices_in_simulator[env_ids]
+            self.set_simulator_object_states(env_ids, object_states)
 
     def step(self) -> None:
         """called in _update_tasks_callback of the environment. (after compute_reward, before compute_observations)"""
@@ -1176,17 +1155,36 @@ class MotionCommand(CommandTermBase):
     #########################################################################################
     ## Object from simulator
     #########################################################################################
+    def _active_object_states_w(self) -> torch.Tensor:
+        """Return active object states in environment order.
+
+        AllRootStatesProxy groups mixed actor indices by object name internally.  For
+        multi-object motion training we need one active actor per environment, so gather
+        each object actor separately and scatter the result back to env order.
+        """
+        if self.object_name_to_indices:
+            states = torch.empty(self.num_envs, 13, device=self.device, dtype=torch.float32)
+            for object_key, object_indices in self.object_name_to_indices.items():
+                object_type_id = self.object_key_to_id[object_key]
+                env_ids = (self.object_type_ids == object_type_id).nonzero(as_tuple=False).flatten()
+                if env_ids.numel() == 0:
+                    continue
+                states[env_ids] = self._env.simulator.all_root_states[object_indices[env_ids], :13]
+            return states
+
+        return self._env.simulator.all_root_states[self.active_object_indices, :13]    
+    
     @property
     def simulator_object_pos_w(self) -> torch.Tensor:
-        return self._env.simulator.all_root_states[self.active_object_indices][:, :3]
+        return self._active_object_states_w()[:, :3]
 
     @property
     def simulator_object_quat_w(self) -> torch.Tensor:
-        return self._env.simulator.all_root_states[self.active_object_indices][:, 3:7]
+        return self._active_object_states_w()[:, 3:7]
 
     @property
     def simulator_object_lin_vel_w(self) -> torch.Tensor:
-        return self._env.simulator.all_root_states[self.active_object_indices][:, 7:10]
+        return self._active_object_states_w()[:, 7:10]
 
     #########################################################################################
     ## Methods that does not fit into setup/step/reset pattern
@@ -1199,6 +1197,7 @@ class MotionCommand(CommandTermBase):
         self.clip_end_steps = torch.full(
             (self.num_envs,), self.motion.time_step_total, dtype=torch.long, device=self.device
         )
+        self.started_at_timestep_zero = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         if self.motion.has_object:
             self.active_object_indices = self.object_indices_in_simulator.clone()
             self.object_type_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -1231,6 +1230,51 @@ class MotionCommand(CommandTermBase):
         parked_vel = torch.zeros((env_ids.numel(), 3), device=self.device)
         parked_states = torch.cat([parked_pos, parked_quat, parked_vel, parked_vel], dim=-1)
         self._env.simulator.set_actor_states([f"object_{object_key}"], env_ids, parked_states)
+
+    def set_simulator_object_states(self, env_ids: torch.Tensor | None, object_states: torch.Tensor) -> None:
+        """Place the active object for each env and park inactive multi-object actors."""
+        if not self.motion.has_object:
+            return
+
+        env_ids = self._ensure_index_tensor(env_ids)
+        if env_ids.numel() == 0:
+            return
+        if object_states.shape[0] != env_ids.numel():
+            raise ValueError(
+                f"object_states first dimension must match env_ids length, got "
+                f"{object_states.shape[0]} and {env_ids.numel()}"
+            )
+
+        if self.object_name_to_indices:
+            clip_ids_for_envs = self.clip_ids[env_ids]
+            selected_keys = [self.motion.clip_object_keys[int(i)] for i in clip_ids_for_envs.tolist()]
+            all_keys = sorted(self.object_name_to_indices.keys())
+
+            # Place active object per env according to selected clip key.
+            for object_key in all_keys:
+                mask = torch.tensor([key == object_key for key in selected_keys], device=self.device, dtype=torch.bool)
+                env_ids_subset = env_ids[mask]
+                if env_ids_subset.numel() == 0:
+                    continue
+                self._env.simulator.set_actor_states(
+                    [f"object_{object_key}"],
+                    env_ids_subset,
+                    object_states[mask],
+                )
+                self.active_object_indices[env_ids_subset] = self.object_name_to_indices[object_key][env_ids_subset]
+
+            # Park inactive objects far below ground to avoid unintended collisions.
+            for object_key in all_keys:
+                mask_inactive = torch.tensor(
+                    [key != object_key for key in selected_keys], device=self.device, dtype=torch.bool
+                )
+                env_ids_inactive = env_ids[mask_inactive]
+                if env_ids_inactive.numel() == 0:
+                    continue
+                self._park_object_actor(object_key, env_ids_inactive)
+        else:
+            self._env.simulator.set_actor_states([self.object_name], env_ids, object_states)
+            self.active_object_indices[env_ids] = self.object_indices_in_simulator[env_ids]
 
     def update_metrics(self):
         """Update the metrics. After action, before step() is called."""

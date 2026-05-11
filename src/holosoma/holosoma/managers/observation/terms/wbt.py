@@ -11,6 +11,7 @@ import torch
 
 from holosoma.agents.modules.module_utils import setup_ppo_actor_module
 from holosoma.ae_joint_train import CLIPTextFeatureExtractor, load_joint_model
+from holosoma.ae_pro_joint_train import load_joint_model as load_pro_joint_model
 from holosoma.managers.command.terms.wbt import MotionCommand
 from holosoma.managers.observation.base import ObservationTermBase
 from holosoma.utils.eval_utils import CheckpointConfig, load_saved_experiment_config
@@ -354,16 +355,19 @@ def _load_ir_latent_model(checkpoint_path: str, device: str):
     return model, payload, "joint_multimodal_ae"
 
 
-def _load_di_latent_model(checkpoint_path: str, device: str):
+def _load_di_latent_model(checkpoint_path: str, device: str, *, use_pro_checkpoint: bool = False):
     payload = torch.load(checkpoint_path, map_location="cpu")
     model_type = str(payload.get("model_type", ""))
     if model_type != "joint_multimodal_ae":
         raise ValueError(
             f"Depth latent checkpoint '{checkpoint_path}' is not a joint AE checkpoint "
-            f"(model_type={model_type!r}). Export it again with ae_joint_train.py."
+            f"(model_type={model_type!r}). Export it again with "
+            f"{'ae_pro_joint_train.py' if use_pro_checkpoint else 'ae_joint_train.py'}."
         )
-    model, payload = load_joint_model(checkpoint_path, device=device)
-    return model, payload, "joint_multimodal_ae"
+    loader = load_pro_joint_model if use_pro_checkpoint else load_joint_model
+    model, payload = loader(checkpoint_path, device=device)
+    checkpoint_kind = "joint_multimodal_ae_pro" if use_pro_checkpoint else "joint_multimodal_ae"
+    return model, payload, checkpoint_kind
 
 
 class IRAELatent(ObservationTermBase):
@@ -572,6 +576,7 @@ class AELatent(ObservationTermBase):
 
     * IR latent (`--ir_ae`, optional `--ir_ae_body_source`)
     * DI latent (`--di_ae`)
+    * DI+proprioception latent (`--di_pro_ae`)
     """
 
     def __init__(self, cfg, env: WholeBodyTrackingManager):
@@ -579,20 +584,33 @@ class AELatent(ObservationTermBase):
 
         ir_checkpoint = cfg.params.get("checkpoint_path") or getattr(env, "ir_ae", None)
         di_checkpoint = cfg.params.get("di_checkpoint_path") or getattr(env, "di_ae", None)
+        di_pro_checkpoint = cfg.params.get("di_pro_checkpoint_path") or getattr(env, "di_pro_ae", None)
         requested_source = str(cfg.params.get("source", "")).strip().lower()
 
-        if requested_source and requested_source not in {"ir", "di"}:
+        if requested_source and requested_source not in {"ir", "di", "di_pro"}:
             raise ValueError(
-                f"Unsupported student latent source '{requested_source}'. Expected one of ('', 'ir', 'di')."
+                f"Unsupported student latent source '{requested_source}'. Expected one of ('', 'ir', 'di', 'di_pro')."
             )
 
         if not requested_source:
-            if ir_checkpoint and di_checkpoint:
-                raise ValueError(
-                    "AE latent observation received both IR and DI checkpoints. "
-                    "Pass only one of `--ir_ae` / `--di_ae`, or set observation param `source` to disambiguate."
+            provided_sources = [
+                source
+                for source, checkpoint in (
+                    ("ir", ir_checkpoint),
+                    ("di", di_checkpoint),
+                    ("di_pro", di_pro_checkpoint),
                 )
-            if di_checkpoint:
+                if checkpoint
+            ]
+            if len(provided_sources) > 1:
+                raise ValueError(
+                    "AE latent observation received multiple latent checkpoints "
+                    f"({provided_sources}). Pass only one of `--ir_ae` / `--di_ae` / `--di_pro_ae`, "
+                    "or set observation param `source` to disambiguate."
+                )
+            if di_pro_checkpoint:
+                requested_source = "di_pro"
+            elif di_checkpoint:
                 requested_source = "di"
             elif ir_checkpoint:
                 requested_source = "ir"
@@ -600,7 +618,7 @@ class AELatent(ObservationTermBase):
                 raise ValueError(
                     "AE latent observation requires either an IR latent checkpoint or a DI latent checkpoint. "
                     "Pass `--ir_ae=/path/to/best.pt` (optionally with `--ir_ae_body_source`) "
-                    "or `--di_ae=/path/to/best.pt`."
+                    "or `--di_ae=/path/to/best.pt` or `--di_pro_ae=/path/to/best.pt`."
                 )
 
         if requested_source == "ir":
@@ -613,7 +631,7 @@ class AELatent(ObservationTermBase):
             inner_params["checkpoint_path"] = ir_checkpoint
             inner_cfg = dataclasses.replace(cfg, params=inner_params)
             self.impl = IRAELatent(inner_cfg, env)
-        else:
+        elif requested_source == "di":
             if not di_checkpoint:
                 raise ValueError(
                     "AE latent source is set to 'di', but no DI latent checkpoint was provided. "
@@ -621,6 +639,19 @@ class AELatent(ObservationTermBase):
                 )
             inner_params = dict(cfg.params)
             inner_params["checkpoint_path"] = di_checkpoint
+            inner_params["ignore_di_pro_ae_fallback"] = True
+            inner_cfg = dataclasses.replace(cfg, params=inner_params)
+            self.impl = DIAELatent(inner_cfg, env)
+        else:
+            if not di_pro_checkpoint:
+                raise ValueError(
+                    "AE latent source is set to 'di_pro', but no DI+proprioception checkpoint was provided. "
+                    "Pass `--di_pro_ae=/path/to/best.pt`."
+                )
+            inner_params = dict(cfg.params)
+            inner_params["checkpoint_path"] = ""
+            inner_params["di_pro_checkpoint_path"] = di_pro_checkpoint
+            inner_params["ignore_di_ae_fallback"] = True
             inner_cfg = dataclasses.replace(cfg, params=inner_params)
             self.impl = DIAELatent(inner_cfg, env)
 
@@ -679,16 +710,28 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
     def __init__(self, cfg, env: WholeBodyTrackingManager):
         super().__init__(cfg, env)
 
-        di_checkpoint = cfg.params.get("checkpoint_path") or getattr(env, "di_ae", None)
-        if not di_checkpoint:
+        di_checkpoint = cfg.params.get("checkpoint_path")
+        if not di_checkpoint and not bool(cfg.params.get("ignore_di_ae_fallback", False)):
+            di_checkpoint = getattr(env, "di_ae", None)
+        di_pro_checkpoint = cfg.params.get("di_pro_checkpoint_path")
+        if not di_pro_checkpoint and not bool(cfg.params.get("ignore_di_pro_ae_fallback", False)):
+            di_pro_checkpoint = getattr(env, "di_pro_ae", None)
+        if di_checkpoint and di_pro_checkpoint:
+            raise ValueError(
+                "Depth-latent observation received both `di_ae` and `di_pro_ae` checkpoints. "
+                "Pass only one, or configure only one observation-term checkpoint path."
+            )
+        if not di_checkpoint and not di_pro_checkpoint:
             raise ValueError(
                 "Depth-latent observation requires a depth latent checkpoint. "
                 "Set observation term param `checkpoint_path` "
-                "(preferred) or pass legacy `--di_ae=/path/to/best.pt`."
+                "(preferred), pass legacy `--di_ae=/path/to/best.pt`, "
+                "or pass `--di_pro_ae=/path/to/best.pt` for ae_pro_joint_train.py checkpoints."
             )
 
         self.device = env.device
-        self.di_checkpoint = str(di_checkpoint)
+        self.uses_di_pro_checkpoint = bool(di_pro_checkpoint)
+        self.di_checkpoint = str(di_pro_checkpoint or di_checkpoint)
         self.debug_save_depth_images = bool(cfg.params.get("debug_save_depth_images", False))
         self.debug_depth_save_interval = max(int(cfg.params.get("debug_depth_save_interval", 200)), 1)
         debug_depth_env_ids = cfg.params.get("debug_depth_env_ids", "0")
@@ -703,6 +746,7 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
         self.di_encoder, payload, self.di_checkpoint_model_type = _load_di_latent_model(
             self.di_checkpoint,
             device=self.device,
+            use_pro_checkpoint=self.uses_di_pro_checkpoint,
         )
         for parameter in self.di_encoder.parameters():
             parameter.requires_grad_(False)
@@ -714,6 +758,45 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
         self.latent_dim = int(payload["config"]["latent_dim"])
         self.di_feature_mean = payload["di_feature_mean"].to(device=self.device, dtype=torch.float32)
         self.di_feature_std = payload["di_feature_std"].to(device=self.device, dtype=torch.float32).clamp_min(1e-6)
+        self.proprioception_input_shape = (
+            tuple(int(v) for v in payload["proprioception_input_shape"])
+            if payload.get("proprioception_input_shape") is not None
+            else None
+        )
+        self.uses_proprioception_window = self.proprioception_input_shape is not None
+        self.proprio_feature_mean = None
+        self.proprio_feature_std = None
+        if self.uses_proprioception_window:
+            if len(self.proprioception_input_shape) != 2:
+                raise ValueError(
+                    "DI+proprioception checkpoint proprioception_input_shape must have length 2, "
+                    f"got {self.proprioception_input_shape}."
+                )
+            self.proprio_window_size, self.proprio_feature_dim = self.proprioception_input_shape
+            if self.proprio_window_size != self.window_size:
+                raise ValueError(
+                    "DI+proprioception checkpoint window mismatch: "
+                    f"depth window={self.window_size}, proprioception window={self.proprio_window_size}."
+                )
+            expected_proprio_dim = 3 + 2 * len(env.dof_names)
+            if self.proprio_feature_dim != expected_proprio_dim:
+                raise ValueError(
+                    "DI+proprioception checkpoint feature dim mismatch: "
+                    f"checkpoint expects {self.proprio_feature_dim}, live env produces {expected_proprio_dim} "
+                    "(base_ang_vel + dof_pos + dof_vel)."
+                )
+            proprio_feature_mean = payload.get("proprio_feature_mean")
+            proprio_feature_std = payload.get("proprio_feature_std")
+            if proprio_feature_mean is None or proprio_feature_std is None:
+                raise RuntimeError(
+                    "DI+proprioception checkpoint declares proprioception input but is missing "
+                    "proprio_feature_mean/proprio_feature_std."
+                )
+            self.proprio_feature_mean = proprio_feature_mean.to(device=self.device, dtype=torch.float32)
+            self.proprio_feature_std = proprio_feature_std.to(device=self.device, dtype=torch.float32).clamp_min(1e-6)
+        else:
+            self.proprio_window_size = 0
+            self.proprio_feature_dim = 0
         self.depth_latent_mode = "mu"
 
         condition_text = str(cfg.params.get("condition_text") or payload["condition_text"])
@@ -736,6 +819,14 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
             dtype=torch.float32,
         )
         self.depth_is_initialized = torch.zeros(env.num_envs, dtype=torch.bool, device=self.device)
+        self.proprioception_window_history = torch.zeros(
+            env.num_envs,
+            self.window_size,
+            self.proprio_feature_dim,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self.proprioception_is_initialized = torch.zeros(env.num_envs, dtype=torch.bool, device=self.device)
         self._cached_compute_token = -1
         self._cached_modify_history: bool | None = None
         self._cached_latent: torch.Tensor | None = None
@@ -743,7 +834,8 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
         logger.info(
             f"Loaded frozen di latent encoder from {self.di_checkpoint} with "
             f"model_type={self.di_checkpoint_model_type}, latent_mode={self.depth_latent_mode}, "
-            f"window_size={self.window_size}, depth_shape=({self.depth_height}, {self.depth_width}), latent_dim={self.latent_dim}"
+            f"window_size={self.window_size}, depth_shape=({self.depth_height}, {self.depth_width}), "
+            f"proprioception_dim={self.proprio_feature_dim}, latent_dim={self.latent_dim}"
         )
         if self.debug_depth_dir is not None:
             self.debug_depth_dir.mkdir(parents=True, exist_ok=True)
@@ -757,6 +849,8 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
         if env_ids is None:
             self.depth_window_history.zero_()
             self.depth_is_initialized.zero_()
+            self.proprioception_window_history.zero_()
+            self.proprioception_is_initialized.zero_()
             self._debug_episode_indices += 1
             self._debug_last_saved_episode_steps.fill_(-1)
             self._cached_compute_token = -1
@@ -769,6 +863,8 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
             return
         self.depth_window_history[env_ids_tensor] = 0.0
         self.depth_is_initialized[env_ids_tensor] = False
+        self.proprioception_window_history[env_ids_tensor] = 0.0
+        self.proprioception_is_initialized[env_ids_tensor] = False
         self._debug_episode_indices[env_ids_tensor] += 1
         self._debug_last_saved_episode_steps[env_ids_tensor] = -1
         self._cached_compute_token = -1
@@ -897,10 +993,63 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
             effective_window[new_mask] = depth_frames[new_mask].unsqueeze(1).repeat(1, self.window_size, 1, 1)
         return effective_window
 
-    def _encode_di_latent(self, depth_window: torch.Tensor) -> torch.Tensor:
+    def _compute_current_proprioception(self, env: WholeBodyTrackingManager) -> torch.Tensor:
+        base_ang_vel = quat_rotate_inverse(
+            env.base_quat,
+            env.simulator.robot_root_states[:, 10:13],
+            w_last=True,
+        )
+        dof_pos = env.simulator.dof_pos - env.default_dof_pos
+        dof_vel = env.simulator.dof_vel
+        proprioception = torch.cat((base_ang_vel, dof_pos, dof_vel), dim=-1)
+        if proprioception.shape[1] != self.proprio_feature_dim:
+            raise RuntimeError(
+                "Live proprioception feature dim changed unexpectedly: "
+                f"expected {self.proprio_feature_dim}, got {proprioception.shape[1]}."
+            )
+        return proprioception
+
+    def _build_proprioception_window(self, proprioception: torch.Tensor, *, modify_history: bool) -> torch.Tensor:
+        if modify_history:
+            new_mask = ~self.proprioception_is_initialized
+            if torch.any(new_mask):
+                repeated = proprioception[new_mask].unsqueeze(1).repeat(1, self.window_size, 1)
+                self.proprioception_window_history[new_mask] = repeated
+
+            existing_mask = self.proprioception_is_initialized
+            if torch.any(existing_mask):
+                existing_history = self.proprioception_window_history[existing_mask].clone()
+                existing_history[:, :-1] = existing_history[:, 1:].clone()
+                existing_history[:, -1] = proprioception[existing_mask]
+                self.proprioception_window_history[existing_mask] = existing_history
+
+            self.proprioception_is_initialized[:] = True
+            return self.proprioception_window_history
+
+        effective_window = torch.cat([self.proprioception_window_history[:, 1:], proprioception.unsqueeze(1)], dim=1)
+        new_mask = ~self.proprioception_is_initialized
+        if torch.any(new_mask):
+            effective_window[new_mask] = proprioception[new_mask].unsqueeze(1).repeat(1, self.window_size, 1)
+        return effective_window
+
+    def _encode_di_latent(
+        self,
+        depth_window: torch.Tensor,
+        proprioception_window: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         normalized_window = (depth_window - self.di_feature_mean.unsqueeze(0)) / self.di_feature_std.unsqueeze(0)
         text_features = self.di_text_features.expand(depth_window.shape[0], -1)
-        mu, _ = self.di_encoder.encode_di(normalized_window, text_features)
+        if self.uses_proprioception_window:
+            if proprioception_window is None:
+                raise RuntimeError("DI+proprioception checkpoint requires a live proprioception window.")
+            assert self.proprio_feature_mean is not None
+            assert self.proprio_feature_std is not None
+            normalized_proprioception = (
+                proprioception_window - self.proprio_feature_mean.unsqueeze(0)
+            ) / self.proprio_feature_std.unsqueeze(0)
+            mu, _ = self.di_encoder.encode_di(normalized_window, text_features, normalized_proprioception)
+        else:
+            mu, _ = self.di_encoder.encode_di(normalized_window, text_features)
         return mu
 
     def _compute_depth_latent(self, env: WholeBodyTrackingManager, *, modify_history: bool) -> torch.Tensor:
@@ -933,7 +1082,14 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
         if modify_history:
             self._maybe_save_debug_depth_frames(env, depth_frames)
         depth_window = self._build_depth_window(depth_frames, modify_history=modify_history)
-        depth_latent = self._encode_di_latent(depth_window)
+        proprioception_window = None
+        if self.uses_proprioception_window:
+            proprioception = self._compute_current_proprioception(env)
+            proprioception_window = self._build_proprioception_window(
+                proprioception,
+                modify_history=modify_history,
+            )
+        depth_latent = self._encode_di_latent(depth_window, proprioception_window)
         self._cached_compute_token = compute_token
         self._cached_modify_history = modify_history
         self._cached_latent = depth_latent

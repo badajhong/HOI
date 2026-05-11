@@ -409,7 +409,10 @@ g1_29dof_wbt_observation_w_object_multi_student = ObservationManagerCfg(
                         # Preferred DI override path:
                         # --observation.groups.ae_latent.terms.ae_latent.params.di_checkpoint_path=/path/to/di_ae.pt
                         "di_checkpoint_path": "",
-                        # Optional explicit source: "", "ir", or "di"
+                        # Preferred DI+proprioception override path:
+                        # --observation.groups.ae_latent.terms.ae_latent.params.di_pro_checkpoint_path=/path/to/di_pro_ae.pt
+                        "di_pro_checkpoint_path": "",
+                        # Optional explicit source: "", "ir", "di", or "di_pro"
                         "source": "",
                         # Keep the original robot asset and let IsaacSim attach
                         # the depth camera using the built-in fallback torso mount.
@@ -452,6 +455,9 @@ g1_29dof_wbt_observation_w_object_multi_res = ObservationManagerCfg(
                         # Preferred override path:
                         # --observation.groups.di_ae_latent.terms.di_ae_latent.params.checkpoint_path=/path/to/di_ae.pt
                         "checkpoint_path": "",
+                        # Preferred DI+proprioception override path:
+                        # --observation.groups.di_ae_latent.terms.di_ae_latent.params.di_pro_checkpoint_path=/path/to/di_pro_ae.pt
+                        "di_pro_checkpoint_path": "",
                         # Keep the original robot asset and let IsaacSim attach
                         # the depth camera using the built-in fallback torso mount.
                         "robot_depth_asset_mode": "original",

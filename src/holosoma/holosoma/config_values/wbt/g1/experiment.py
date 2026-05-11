@@ -224,7 +224,11 @@ g1_29dof_wbt_w_object_multi_teacher = replace(
     reward=reward.g1_29dof_wbt_reward_w_object_multi_teacher,
     simulator=replace(
         simulator.isaacsim,
-        config=replace(simulator.isaacsim.config, scene=replace(simulator.isaacsim.config.scene, env_spacing=0.0)),
+        config=replace(
+            simulator.isaacsim.config,
+            scene=replace(simulator.isaacsim.config.scene, env_spacing=0.0),
+            enable_robot_depth_camera=False,
+        ),
     ),
 )
 

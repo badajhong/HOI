@@ -730,8 +730,8 @@ class TrainConfig:
     di_hidden_dim: int = 512
     use_proprioception_window: bool = True
     proprio_hidden_dim: int = 128
-    batch_size: int = 1024
-    epochs: int = 2000
+    batch_size: int = 512
+    epochs: int = 3000
     learning_rate: float = 3e-4
     weight_decay: float = 1e-3
     value_loss_type: str = "l1"
@@ -742,7 +742,7 @@ class TrainConfig:
     decoder_train_samples: int = 1
     decoder_eval_samples: int = 1
     di_loss_updates_decoder: bool = False
-    freeze_ir_after_epochs: int = 500
+    freeze_ir_after_epochs: int = 0
     best_val_metric: str = "val_alignment_mu_rmse"
     min_feature_std: float = 1e-4
     max_grad_norm: float = 1.0

@@ -113,6 +113,8 @@ class ExperimentConfig:
     """Optional live latent ir_window body source: 'pelvis', 'hands', or 'all'. If None, infer from checkpoint."""
     di_ae: str | None = None
     """Optional frozen depth latent checkpoint used to build visual latents."""
+    di_pro_ae: str | None = None
+    """Optional frozen depth+proprioception latent checkpoint from ae_pro_joint_train.py."""
 
     training: TrainingConfig = TrainingConfig()
     algo: Annotated[

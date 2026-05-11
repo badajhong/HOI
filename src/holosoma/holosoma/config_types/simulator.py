@@ -511,6 +511,13 @@ class SimulatorInitConfig:
     contact_sensor_history_length: int = 3
     """Number of frames of contact data retained for sensors."""
 
+    enable_robot_depth_camera: bool = True
+    """Whether to register robot-mounted depth camera sensors in IsaacSim.
+
+    This flag only controls robot depth sensor creation. It does not disable
+    renderer/camera initialization used for video recording.
+    """
+
     robot_mjcf_filter: MujocoXMLFilterCfg = field(default_factory=MujocoXMLFilterCfg)
     """MuJoCo-specific XML filtering configuration for robot MJCF files."""
 

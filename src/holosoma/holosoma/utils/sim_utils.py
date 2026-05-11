@@ -36,7 +36,7 @@ def _observation_requires_depth_camera(config: ExperimentConfig | RunSimConfig) 
         return False
 
     resolved_config = resolve_observation_term_overrides(config)
-    if getattr(resolved_config, "di_ae", None):
+    if getattr(resolved_config, "di_ae", None) or getattr(resolved_config, "di_pro_ae", None):
         return True
 
     observation_cfg = resolved_config.observation
@@ -56,7 +56,9 @@ def _observation_requires_depth_camera(config: ExperimentConfig | RunSimConfig) 
                 "holosoma.managers.observation.terms.wbt:StudentLatent",
             }:
                 source = str(term_cfg.params.get("source", "")).strip().lower()
-                if source == "di" or bool(term_cfg.params.get("di_checkpoint_path")):
+                if source in {"di", "di_pro"} or bool(term_cfg.params.get("di_checkpoint_path")) or bool(
+                    term_cfg.params.get("di_pro_checkpoint_path")
+                ):
                     return True
     return False
 

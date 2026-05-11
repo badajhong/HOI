@@ -414,7 +414,10 @@ class IsaacSim(BaseSimulator):
             self._height_scanner = RayCaster(height_scanner_config)
             self.scene.sensors["height_scanner"] = self._height_scanner
 
-        self._maybe_create_robot_depth_camera()
+        if self.simulator_config.enable_robot_depth_camera:
+            self._maybe_create_robot_depth_camera()
+        else:
+            logger.info("IsaacSim: robot depth camera creation disabled by simulator config.")
 
         # clone, filter, and replicate
         self.scene.clone_environments(copy_from_source=False)

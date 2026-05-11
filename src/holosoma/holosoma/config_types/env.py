@@ -55,6 +55,7 @@ class EnvConfig:
     ir_ae: str | None = None
     ir_ae_body_source: str | None = None
     di_ae: str | None = None
+    di_pro_ae: str | None = None
 
 
 def _replace_observation_term_params(
@@ -119,6 +120,7 @@ def _ensure_di_ae_latent_group(observation_cfg: ObservationManagerCfg | None) ->
         params={
             "checkpoint_path": legacy_params.get("checkpoint_path", ""),
             "condition_text": legacy_params.get("condition_text", ""),
+            "di_pro_checkpoint_path": legacy_params.get("di_pro_checkpoint_path", ""),
             "robot_depth_asset_mode": legacy_params.get("robot_depth_asset_mode", "auto"),
             "debug_save_depth_images": legacy_params.get("debug_save_depth_images", False),
             "debug_depth_save_interval": legacy_params.get("debug_depth_save_interval", 200),
@@ -161,7 +163,11 @@ def _observation_term_requires_depth_camera(term_cfg: ObsTermCfg) -> bool:
         "holosoma.managers.observation.terms.wbt:StudentLatent",
     }:
         source = str(term_cfg.params.get("source", "")).strip().lower()
-        return source == "di" or bool(term_cfg.params.get("di_checkpoint_path"))
+        return (
+            source in {"di", "di_pro"}
+            or bool(term_cfg.params.get("di_checkpoint_path"))
+            or bool(term_cfg.params.get("di_pro_checkpoint_path"))
+        )
 
     return False
 
@@ -170,7 +176,7 @@ def _config_requires_robot_depth_camera(
     tyro_config: ExperimentConfig,
     observation_cfg: ObservationManagerCfg | None,
 ) -> bool:
-    if bool(getattr(tyro_config, "di_ae", None)):
+    if bool(getattr(tyro_config, "di_ae", None)) or bool(getattr(tyro_config, "di_pro_ae", None)):
         return True
     if observation_cfg is None:
         return False
@@ -212,17 +218,34 @@ def _resolve_depth_camera_robot_asset(
         requested_mode = next(iter(observation_requested_modes))
 
     depth_camera_required = _config_requires_robot_depth_camera(tyro_config, observation_cfg)
-    if not depth_camera_required and requested_mode == "auto":
-        return tyro_config
+    resolved_config = tyro_config
+    if depth_camera_required and not bool(getattr(tyro_config.simulator.config, "enable_robot_depth_camera", True)):
+        resolved_config = dataclasses.replace(
+            tyro_config,
+            simulator=dataclasses.replace(
+                tyro_config.simulator,
+                config=dataclasses.replace(
+                    tyro_config.simulator.config,
+                    enable_robot_depth_camera=True,
+                ),
+            ),
+        )
+        logger.info(
+            "Depth latent observation requires live depth frames. "
+            "Enabling simulator.config.enable_robot_depth_camera=True."
+        )
 
-    asset_cfg = tyro_config.robot.asset
+    if not depth_camera_required and requested_mode == "auto":
+        return resolved_config
+
+    asset_cfg = resolved_config.robot.asset
     asset_variants = _DEPTH_CAMERA_ASSET_VARIANTS.get(asset_cfg.urdf_file)
     if asset_variants is None:
         logger.warning(
             "No known robot asset variants for depth-camera override on "
             f"urdf_file='{asset_cfg.urdf_file}'. Keeping the current asset config unchanged."
         )
-        return tyro_config
+        return resolved_config
 
     target_mode = "realsense" if depth_camera_required and requested_mode == "auto" else requested_mode
     target_variant = asset_variants.get(target_mode)
@@ -231,7 +254,7 @@ def _resolve_depth_camera_robot_asset(
             f"Robot depth asset mode '{target_mode}' is not available for urdf_file='{asset_cfg.urdf_file}'. "
             "Keeping the current asset config unchanged."
         )
-        return tyro_config
+        return resolved_config
 
     target_urdf_file, target_xml_file, target_collapse_fixed_joints = target_variant
     if (
@@ -239,7 +262,7 @@ def _resolve_depth_camera_robot_asset(
         and asset_cfg.xml_file == target_xml_file
         and asset_cfg.collapse_fixed_joints is target_collapse_fixed_joints
     ):
-        return tyro_config
+        return resolved_config
 
     new_asset_cfg = dataclasses.replace(
         asset_cfg,
@@ -247,7 +270,7 @@ def _resolve_depth_camera_robot_asset(
         xml_file=target_xml_file,
         collapse_fixed_joints=target_collapse_fixed_joints,
     )
-    new_robot_cfg = dataclasses.replace(tyro_config.robot, asset=new_asset_cfg)
+    new_robot_cfg = dataclasses.replace(resolved_config.robot, asset=new_asset_cfg)
     if depth_camera_required and target_mode == "realsense":
         logger.info(
             "Depth latent observation requires robot-mounted camera support. "
@@ -266,7 +289,7 @@ def _resolve_depth_camera_robot_asset(
             f"urdf='{target_urdf_file}', xml='{target_xml_file}', "
             f"collapse_fixed_joints={target_collapse_fixed_joints}."
         )
-    return dataclasses.replace(tyro_config, robot=new_robot_cfg)
+    return dataclasses.replace(resolved_config, robot=new_robot_cfg)
 
 
 def resolve_observation_term_overrides(tyro_config: ExperimentConfig) -> ExperimentConfig:
@@ -274,7 +297,7 @@ def resolve_observation_term_overrides(tyro_config: ExperimentConfig) -> Experim
 
     Observation terms are the canonical place to configure latent encoders used
     by student and residual policies. We still accept legacy top-level
-    ``ir_ae`` / ``ir_ae_body_source`` / ``di_ae`` / ``student`` overrides and
+    ``ir_ae`` / ``ir_ae_body_source`` / ``di_ae`` / ``di_pro_ae`` / ``student`` overrides and
     mirror them into the relevant observation terms for backward compatibility.
     """
     observation_cfg = tyro_config.observation
@@ -286,6 +309,7 @@ def resolve_observation_term_overrides(tyro_config: ExperimentConfig) -> Experim
         updates={
             "checkpoint_path": tyro_config.ir_ae,
             "di_checkpoint_path": tyro_config.di_ae,
+            "di_pro_checkpoint_path": tyro_config.di_pro_ae,
             "body_source": tyro_config.ir_ae_body_source,
         },
     )
@@ -296,6 +320,7 @@ def resolve_observation_term_overrides(tyro_config: ExperimentConfig) -> Experim
         updates={
             "checkpoint_path": tyro_config.ir_ae,
             "di_checkpoint_path": tyro_config.di_ae,
+            "di_pro_checkpoint_path": tyro_config.di_pro_ae,
             "body_source": tyro_config.ir_ae_body_source,
         },
     )
@@ -306,6 +331,7 @@ def resolve_observation_term_overrides(tyro_config: ExperimentConfig) -> Experim
         updates={
             "checkpoint_path": tyro_config.ir_ae,
             "di_checkpoint_path": tyro_config.di_ae,
+            "di_pro_checkpoint_path": tyro_config.di_pro_ae,
             "body_source": tyro_config.ir_ae_body_source,
         },
     )
@@ -324,6 +350,7 @@ def resolve_observation_term_overrides(tyro_config: ExperimentConfig) -> Experim
         term_name="di_ae_latent",
         updates={
             "checkpoint_path": tyro_config.di_ae,
+            "di_pro_checkpoint_path": tyro_config.di_pro_ae,
         },
     )
 
@@ -354,6 +381,7 @@ def get_tyro_env_config(tyro_config: ExperimentConfig) -> EnvConfig:
         ir_ae=tyro_config.ir_ae,
         ir_ae_body_source=tyro_config.ir_ae_body_source,
         di_ae=tyro_config.di_ae,
+        di_pro_ae=tyro_config.di_pro_ae,
         training=tyro_config.training,
         simulator=tyro_config.simulator,
         terrain=tyro_config.terrain,

@@ -109,6 +109,7 @@ class BaseTask:
         self.ir_ae = tyro_config.ir_ae
         self.ir_ae_body_source = tyro_config.ir_ae_body_source
         self.di_ae = tyro_config.di_ae
+        self.di_pro_ae = tyro_config.di_pro_ae
 
         # Validate configs: manager workflow requires all manager configs to be provided
         if observation_config is None:

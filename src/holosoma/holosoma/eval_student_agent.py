@@ -34,6 +34,9 @@ class StudentEvalConfig(CheckpointConfig):
     di_ae: str | None = None
     """Optional depth latent AE checkpoint override for student evaluation."""
 
+    di_pro_ae: str | None = None
+    """Optional depth+proprioception latent AE checkpoint override for student evaluation."""
+
     teacher: str | None = None
     """Optional teacher checkpoint override. Defaults to disabled during eval."""
 
@@ -108,6 +111,7 @@ def main() -> None:
         teacher=student_eval_cfg.teacher,
         ir_ae=student_eval_cfg.ir_ae or eval_cfg.ir_ae,
         di_ae=student_eval_cfg.di_ae or eval_cfg.di_ae,
+        di_pro_ae=student_eval_cfg.di_pro_ae or eval_cfg.di_pro_ae,
     )
     overwritten_tyro_config = tyro.cli(
         ExperimentConfig,

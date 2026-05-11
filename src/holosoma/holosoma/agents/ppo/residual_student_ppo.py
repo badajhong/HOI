@@ -28,6 +28,9 @@ class _FusedStudentResidualActorWrapper(nn.Module):
         di_feature_mean: torch.Tensor,
         di_feature_std: torch.Tensor,
         di_text_features: torch.Tensor,
+        proprioception_shape: tuple[int, int] | None = None,
+        proprio_feature_mean: torch.Tensor | None = None,
+        proprio_feature_std: torch.Tensor | None = None,
     ):
         super().__init__()
         self.actor = residual_actor
@@ -37,10 +40,23 @@ class _FusedStudentResidualActorWrapper(nn.Module):
         self.shared_obs_dim = int(shared_obs_dim)
         self.depth_shape = tuple(int(value) for value in depth_shape)
         self.depth_flat_dim = int(self.depth_shape[0] * self.depth_shape[1] * self.depth_shape[2])
-        self.onnx_input_dim = self.shared_obs_dim + self.depth_flat_dim
+        self.proprioception_shape = (
+            tuple(int(value) for value in proprioception_shape) if proprioception_shape is not None else None
+        )
+        self.proprioception_flat_dim = (
+            int(self.proprioception_shape[0] * self.proprioception_shape[1])
+            if self.proprioception_shape is not None
+            else 0
+        )
+        self.onnx_input_dim = self.shared_obs_dim + self.depth_flat_dim + self.proprioception_flat_dim
         self.register_buffer("di_feature_mean", di_feature_mean)
         self.register_buffer("di_feature_std", di_feature_std)
         self.register_buffer("di_text_features", di_text_features)
+        if self.proprioception_shape is not None:
+            if proprio_feature_mean is None or proprio_feature_std is None:
+                raise ValueError("DI+proprioception fused export requires proprioception normalization statistics.")
+            self.register_buffer("proprio_feature_mean", proprio_feature_mean)
+            self.register_buffer("proprio_feature_std", proprio_feature_std)
 
     def _build_student_input(self, shared_obs: torch.Tensor, latent: torch.Tensor) -> torch.Tensor:
         inputs = []
@@ -55,16 +71,37 @@ class _FusedStudentResidualActorWrapper(nn.Module):
         depth_flat = actor_obs[:, self.shared_obs_dim : self.shared_obs_dim + self.depth_flat_dim]
         return depth_flat.reshape(actor_obs.shape[0], *self.depth_shape)
 
-    def _encode_depth_latent(self, depth_window: torch.Tensor) -> torch.Tensor:
+    def _extract_proprioception_window(self, actor_obs: torch.Tensor) -> torch.Tensor | None:
+        if self.proprioception_shape is None:
+            return None
+        start = self.shared_obs_dim + self.depth_flat_dim
+        end = start + self.proprioception_flat_dim
+        proprioception_flat = actor_obs[:, start:end]
+        return proprioception_flat.reshape(actor_obs.shape[0], *self.proprioception_shape)
+
+    def _encode_di_latent(
+        self,
+        depth_window: torch.Tensor,
+        proprioception_window: torch.Tensor | None,
+    ) -> torch.Tensor:
         normalized = (depth_window - self.di_feature_mean.unsqueeze(0)) / self.di_feature_std.unsqueeze(0)
         text_features = self.di_text_features.expand(depth_window.shape[0], -1)
-        mu, _ = self.di_encoder.encode_di(normalized, text_features)
+        if self.proprioception_shape is not None:
+            if proprioception_window is None:
+                raise RuntimeError("DI+proprioception fused export requires a proprioception window.")
+            normalized_proprioception = (
+                proprioception_window - self.proprio_feature_mean.unsqueeze(0)
+            ) / self.proprio_feature_std.unsqueeze(0)
+            mu, _ = self.di_encoder.encode_di(normalized, text_features, normalized_proprioception)
+        else:
+            mu, _ = self.di_encoder.encode_di(normalized, text_features)
         return mu
 
     def forward(self, actor_obs: torch.Tensor) -> torch.Tensor:
         shared_obs = actor_obs[:, : self.shared_obs_dim]
         depth_window = self._extract_depth_window(actor_obs)
-        latent = self._encode_depth_latent(depth_window)
+        proprioception_window = self._extract_proprioception_window(actor_obs)
+        latent = self._encode_di_latent(depth_window, proprioception_window)
         student_input = self._build_student_input(shared_obs, latent)
         base_action = self.student_actor.act_inference({"actor_obs": student_input})
         residual_input = torch.cat([shared_obs, base_action, latent], dim=1)
@@ -233,8 +270,7 @@ class ResidualStudentPPO(PPO):
         supported_latent_keys = {"ae_latent", "student_latent", "ir_ae_latent"}
         if "actor_obs" not in student_input_keys or len(latent_input_keys) != 1:
             raise ValueError(
-                "Frozen student export expects input keys ['actor_obs', '<latent_key>'], "
-                f"got {student_input_keys}."
+                f"Frozen student export expects input keys ['actor_obs', '<latent_key>'], got {student_input_keys}."
             )
         latent_key = latent_input_keys[0]
         if latent_key not in supported_latent_keys:
@@ -272,12 +308,25 @@ class ResidualStudentPPO(PPO):
             return self._di_export_bundle
 
         di_checkpoint = getattr(self.env, "di_ae", None)
-        if not di_checkpoint:
-            raise ValueError("Residual fused ONNX export requires a DI latent checkpoint on the environment.")
+        di_pro_checkpoint = getattr(self.env, "di_pro_ae", None)
+        if di_checkpoint and di_pro_checkpoint:
+            raise ValueError(
+                "Residual fused ONNX export received both DI and DI+proprioception latent checkpoints. "
+                "Pass only one of `--di_ae` or `--di_pro_ae`."
+            )
+        if not di_checkpoint and not di_pro_checkpoint:
+            raise ValueError(
+                "Residual fused ONNX export requires a DI latent checkpoint on the environment. "
+                "Pass `--di_ae=/path/to/best.pt` or `--di_pro_ae=/path/to/best.pt`."
+            )
 
-        from holosoma.ae_joint_train import CLIPTextFeatureExtractor, load_joint_model
+        from holosoma.ae_joint_train import CLIPTextFeatureExtractor, load_joint_model  # noqa: PLC0415
+        from holosoma.ae_pro_joint_train import load_joint_model as load_pro_joint_model  # noqa: PLC0415
 
-        di_encoder, payload = load_joint_model(str(di_checkpoint), device=self.device)
+        uses_di_pro = bool(di_pro_checkpoint)
+        checkpoint_path = str(di_pro_checkpoint or di_checkpoint)
+        loader = load_pro_joint_model if uses_di_pro else load_joint_model
+        di_encoder, payload = loader(checkpoint_path, device=self.device)
         di_encoder.eval()
         for parameter in di_encoder.parameters():
             parameter.requires_grad_(False)
@@ -286,6 +335,40 @@ class ResidualStudentPPO(PPO):
         feature_std = payload["di_feature_std"].to(device=self.device, dtype=torch.float32).clamp_min(1e-6)
         depth_shape = tuple(int(value) for value in payload["input_shape"])
         latent_dim = int(payload["config"]["latent_dim"])
+        proprioception_shape = (
+            tuple(int(value) for value in payload["proprioception_input_shape"])
+            if payload.get("proprioception_input_shape") is not None
+            else None
+        )
+        proprio_feature_mean = None
+        proprio_feature_std = None
+        if proprioception_shape is not None:
+            if len(proprioception_shape) != 2:
+                raise ValueError(
+                    "DI+proprioception checkpoint proprioception_input_shape must have length 2, "
+                    f"got {proprioception_shape}."
+                )
+            if int(proprioception_shape[0]) != int(depth_shape[0]):
+                raise ValueError(
+                    "DI+proprioception checkpoint window mismatch: "
+                    f"depth window={depth_shape[0]}, proprioception window={proprioception_shape[0]}."
+                )
+            expected_proprio_dim = 3 + 2 * len(self.env.dof_names)
+            if int(proprioception_shape[1]) != expected_proprio_dim:
+                raise ValueError(
+                    "DI+proprioception checkpoint feature dim mismatch: "
+                    f"checkpoint expects {proprioception_shape[1]}, live env produces {expected_proprio_dim} "
+                    "(base_ang_vel + dof_pos + dof_vel)."
+                )
+            payload_proprio_mean = payload.get("proprio_feature_mean")
+            payload_proprio_std = payload.get("proprio_feature_std")
+            if payload_proprio_mean is None or payload_proprio_std is None:
+                raise RuntimeError(
+                    "DI+proprioception checkpoint declares proprioception input but is missing "
+                    "proprio_feature_mean/proprio_feature_std."
+                )
+            proprio_feature_mean = payload_proprio_mean.to(device=self.device, dtype=torch.float32)
+            proprio_feature_std = payload_proprio_std.to(device=self.device, dtype=torch.float32).clamp_min(1e-6)
 
         clip_cfg = payload["clip"]
         text_extractor = CLIPTextFeatureExtractor(
@@ -300,11 +383,16 @@ class ResidualStudentPPO(PPO):
         self._di_export_bundle = {
             "encoder": di_encoder,
             "payload": payload,
+            "checkpoint_path": checkpoint_path,
+            "checkpoint_kind": "di_pro" if uses_di_pro else "di",
             "feature_mean": feature_mean,
             "feature_std": feature_std,
             "depth_shape": depth_shape,
             "latent_dim": latent_dim,
             "text_features": text_features,
+            "proprioception_shape": proprioception_shape,
+            "proprio_feature_mean": proprio_feature_mean,
+            "proprio_feature_std": proprio_feature_std,
         }
         return self._di_export_bundle
 
@@ -327,6 +415,10 @@ class ResidualStudentPPO(PPO):
 
         bundle = self._load_frozen_student_export_bundle()
         di_bundle = self._load_di_export_bundle()
+        proprioception_shape = di_bundle["proprioception_shape"]
+        proprioception_flat_dim = (
+            int(proprioception_shape[0] * proprioception_shape[1]) if proprioception_shape is not None else 0
+        )
         return {
             "kind": "wbt_student_residual_fused",
             "shared_obs_terms": term_names,
@@ -336,10 +428,14 @@ class ResidualStudentPPO(PPO):
             "latent_dim": int(bundle["latent_dim"]),
             "num_actions": int(self.num_act),
             "di_encoder_mode": "fused",
+            "di_checkpoint_kind": di_bundle["checkpoint_kind"],
             "depth_window_shape": list(di_bundle["depth_shape"]),
             "depth_window_flat_dim": int(
                 di_bundle["depth_shape"][0] * di_bundle["depth_shape"][1] * di_bundle["depth_shape"][2]
             ),
+            "uses_proprioception_window": proprioception_shape is not None,
+            "proprioception_window_shape": list(proprioception_shape) if proprioception_shape is not None else None,
+            "proprioception_window_flat_dim": proprioception_flat_dim,
         }
 
     def _checkpoint_metadata(self, iteration: int | None = None) -> dict[str, Any]:
@@ -366,6 +462,9 @@ class ResidualStudentPPO(PPO):
             di_feature_mean=di_bundle["feature_mean"],
             di_feature_std=di_bundle["feature_std"],
             di_text_features=di_bundle["text_features"],
+            proprioception_shape=di_bundle["proprioception_shape"],
+            proprio_feature_mean=di_bundle["proprio_feature_mean"],
+            proprio_feature_std=di_bundle["proprio_feature_std"],
         )
 
     def get_inference_policy(self, device=None) -> Callable[[dict[str, torch.Tensor]], torch.Tensor]:

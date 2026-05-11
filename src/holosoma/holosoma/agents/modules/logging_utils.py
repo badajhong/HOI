@@ -186,7 +186,7 @@ class LoggingHelper:
         ep_string, ep_scalars_to_log = self._log_episode_info()
 
         env_log_dict = self.episode_env_tensors.mean_and_clear()
-        env_log_dict = {f"Env/{k}": v for k, v in env_log_dict.items()}
+        env_log_dict = {k if k.startswith("Object/") else f"Env/{k}": v for k, v in env_log_dict.items()}
 
         fps = int(
             self.num_steps_per_env * self.num_envs * self.num_gpus / (self.collection_time + self.learn_time + 1e-8)

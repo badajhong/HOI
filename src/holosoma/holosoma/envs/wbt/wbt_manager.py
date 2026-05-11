@@ -23,6 +23,9 @@ class WholeBodyTrackingManager(BaseTask):
         self.need_to_refresh_envs = torch.ones(self.num_envs, dtype=torch.bool, device=self.device, requires_grad=False)
         self._configure_default_dof_pos()
         self._init_domain_rand_buffers()
+        self._object_log_episode_reward_sum = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
+        )
 
     def _configure_default_dof_pos(self):
         self.default_dof_pos_base = torch.zeros(
@@ -45,6 +48,8 @@ class WholeBodyTrackingManager(BaseTask):
         self.need_to_refresh_envs[env_ids] = True
         self.episode_length_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
+        if hasattr(self, "_object_log_episode_reward_sum"):
+            self._object_log_episode_reward_sum[env_ids] = 0.0
         # pending_episode_update_mask is only used in curriculum_term::AverageEpisodeLengthTracker.
         self._pending_episode_update_mask[env_ids] = True
 
@@ -69,6 +74,11 @@ class WholeBodyTrackingManager(BaseTask):
 
     def _update_log_dict(self):
         # _update_log_dict happens before reset_envs_idx
+        self._object_log_episode_reward_sum += self.rew_buf.detach()
+        for key in list(self.log_dict.keys()):
+            if key.startswith("Object/"):
+                del self.log_dict[key]
+
         # -------------------------------- terms same with locomotion_manager.py [start]--------------------------------
         avg = self._get_average_episode_tracker().get_average()
         self.log_dict["average_episode_length"] = avg.detach().cpu()
@@ -77,6 +87,38 @@ class WholeBodyTrackingManager(BaseTask):
         motion_command = self.command_manager.get_state("motion_command")
         motion_command.update_metrics()
         self.log_dict.update(motion_command.metrics)
+        self._update_object_start0_log_dict(motion_command)
+
+    def _update_object_start0_log_dict(self, motion_command):
+        if motion_command is None or not getattr(motion_command.motion, "has_object", False):
+            return
+        if not hasattr(motion_command, "started_at_timestep_zero"):
+            return
+
+        done_env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
+        if done_env_ids.numel() == 0:
+            return
+
+        start0_mask = motion_command.started_at_timestep_zero[done_env_ids]
+        env_ids = done_env_ids[start0_mask]
+        if env_ids.numel() == 0:
+            return
+
+        object_key_to_id = getattr(motion_command, "object_key_to_id", {}) or {}
+        if not object_key_to_id:
+            object_key_to_id = {getattr(motion_command, "object_name", "object"): 0}
+
+        object_type_ids = motion_command.object_type_ids[env_ids]
+        episode_returns = self._object_log_episode_reward_sum[env_ids].detach()
+        episode_lengths = self.episode_length_buf[env_ids].to(dtype=torch.float32).detach()
+
+        for object_key, object_type_id in sorted(object_key_to_id.items()):
+            object_mask = object_type_ids == int(object_type_id)
+            if not object_mask.any():
+                continue
+            metric_prefix = f"Object/{object_key}"
+            self.log_dict[f"{metric_prefix}/mean_reward_start0"] = episode_returns[object_mask]
+            self.log_dict[f"{metric_prefix}/mean_episode_length_start0"] = episode_lengths[object_mask]
 
     def reset_all(self):
         # If reset_all is called several times, clear buffer in motion_command
@@ -244,7 +286,7 @@ class WholeBodyTrackingManager(BaseTask):
             object_states[:, 3:7] = object_ori[:]
             object_states[:, 7:10] = object_lin_vel[:]
             object_states[:, 10:13] = torch.zeros_like(object_lin_vel[:])
-            self.simulator.set_actor_states(["object"], env_ids, object_states)
+            motion_command.set_simulator_object_states(env_ids, object_states)
 
         self.simulator.scene.write_data_to_sim()
         self.simulator.sim.forward()
@@ -253,4 +295,7 @@ class WholeBodyTrackingManager(BaseTask):
 
         time.sleep(dt)
 
+        clip_end_steps = getattr(motion_command, "clip_end_steps", None)
+        if clip_end_steps is not None:
+            return motion_command.time_steps[0].item() >= clip_end_steps[0].item() - 2
         return motion_command.time_steps[0].item() >= motion_command.motion.time_step_total - 2
