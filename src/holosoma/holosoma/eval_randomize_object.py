@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import sys
-from typing import Any
+from typing import Any, Literal
 
 import tyro
 from loguru import logger
@@ -22,19 +22,26 @@ from holosoma.utils.sim_utils import close_simulation_app, setup_simulation_envi
 from holosoma.utils.tyro_utils import TYRO_CONIFG
 
 DEFAULT_EXPERIMENT = "exp:g1-29dof-wbt-w-object-multi-res"
+DEFAULT_MOTION_FILE = (
+    "/home/rllab/haechan/holosoma/train/rl/tripod/sub1_tripod_117.npz"
+)
+DEFAULT_OBJECT_URDF_PATH = (
+    "/home/rllab/haechan/holosoma/src/holosoma_retargeting/holosoma_retargeting/"
+    "models/objects/tripod/tripod.urdf"
+)
 
 
 @dataclass(frozen=True)
 class RandomizeObjectSpawnConfig:
     """Visualize initial object spawning with deterministic object scales."""
 
-    motion_file: str | None = None
+    motion_file: str | None = DEFAULT_MOTION_FILE
     """Motion .npz used only to place the robot/object at the initial frame."""
 
     motion_folder: str | None = None
     """Motion folder for multi-object runs. Clears motion_file when provided."""
 
-    object_urdf_path: str | None = None
+    object_urdf_path: str | None = DEFAULT_OBJECT_URDF_PATH
     """URDF path for a single object."""
 
     object_urdf_asset: str | None = None
@@ -61,7 +68,7 @@ class RandomizeObjectSpawnConfig:
     max_steps: int | None = None
     """Number of simulation control steps to run. None runs until interrupted."""
 
-    env_spacing: float = 5.0
+    env_spacing: float = 2.0
     """Distance between environments in the IsaacSim grid."""
 
     start_at_timestep_zero_prob: float = 1.0
@@ -85,11 +92,8 @@ class RandomizeObjectSpawnConfig:
     default_experiment: str = DEFAULT_EXPERIMENT
     """Experiment subcommand to use when no exp:* subcommand is supplied."""
 
-    cpu: bool = False
-    """Shortcut for --device cpu, useful when another run owns the GPU."""
-
-    device: str | None = None
-    """Optional simulation device override, e.g. 'cpu' or 'cuda:0'."""
+    device: Literal["cpu", "gpu"] = "cpu"
+    """Simulation device choice. Use 'gpu' for cuda:0."""
 
 
 def _scale_values(scale_min: float, scale_max: float, num_scales: int) -> list[float]:
@@ -442,11 +446,7 @@ def apply_spawn_viewer_overrides(
 
 
 def _resolve_device(cli_cfg: RandomizeObjectSpawnConfig) -> str | None:
-    if cli_cfg.cpu:
-        if cli_cfg.device is not None and cli_cfg.device.lower() != "cpu":
-            raise ValueError("Use either --cpu or --device, not both with different values.")
-        return "cpu"
-    return cli_cfg.device
+    return "cuda:0" if cli_cfg.device == "gpu" else "cpu"
 
 
 def _ensure_eval_runtime_randomization_defaults(env: Any) -> None:

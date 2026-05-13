@@ -319,6 +319,32 @@ class ObservationManager:
             for instance in group_instances.values():
                 instance.reset(env_ids_tensor)
 
+    def get_checkpoint_state(self) -> dict[str, Any]:
+        """Return checkpointable state from stateful observation terms."""
+        state: dict[str, Any] = {}
+        for group_name, group_instances in self._term_instances.items():
+            for term_name, instance in group_instances.items():
+                get_state = getattr(instance, "get_checkpoint_state", None)
+                if not callable(get_state):
+                    continue
+                term_state = get_state()
+                if term_state:
+                    state[f"{group_name}.{term_name}"] = term_state
+        return state
+
+    def load_checkpoint_state(self, state: dict[str, Any] | None) -> None:
+        """Restore checkpointable state for stateful observation terms."""
+        if not state:
+            return
+        for group_name, group_instances in self._term_instances.items():
+            for term_name, instance in group_instances.items():
+                load_state = getattr(instance, "load_checkpoint_state", None)
+                if not callable(load_state):
+                    continue
+                term_state = state.get(f"{group_name}.{term_name}")
+                if term_state:
+                    load_state(term_state)
+
     def get_obs_dims(self) -> dict[str, int | dict[str, int]]:
         """Get observation dimensions for each group.
 

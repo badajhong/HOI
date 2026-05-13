@@ -64,9 +64,9 @@ g1_29dof_wbt_w_object_multi_res_termination = TerminationManagerCfg(
             params={
                 # robot tracking
                 # NOTE: these thresholds are intentionally removed to focus for object tracking only.
-                "bad_ref_pos_threshold": 1.0,
+                "bad_ref_pos_threshold": 0.5,
                 "bad_ref_ori_threshold": 0.8,
-                "bad_motion_body_pos_threshold": 0.5,
+                "bad_motion_body_pos_threshold": 0.25,
                 # NOTE: body_names_to_track is shared with command_manager
                 "body_names_to_track": [
                     "pelvis",
@@ -92,7 +92,7 @@ g1_29dof_wbt_w_object_multi_res_termination = TerminationManagerCfg(
                 ],
                 # object tracking
                 # only triggered when has_object=True
-                "bad_object_pos_threshold": 0.5,
+                "bad_object_pos_threshold": 0.25,
                 "bad_object_ori_threshold": 0.8,
             },
         ),

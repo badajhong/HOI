@@ -1,5 +1,7 @@
 """Whole Body Tracking observation presets for the G1 robot."""
 
+from dataclasses import replace
+
 from holosoma.config_types.observation import ObservationManagerCfg, ObsGroupCfg, ObsTermCfg
 
 actor_obs_shared = ObsGroupCfg(
@@ -214,7 +216,7 @@ g1_29dof_wbt_observation_w_object_multi = ObservationManagerCfg(
     },
 )
 
-"""The teacher observation configuration includes all the terms from the multi-object observation, but with reduced noise for the actor observation terms to provide a clearer learning signal during training."""
+"""Teacher observations use multi-object terms with reduced actor-observation noise."""
 
 obs_teacher = {
     "motion_command": ObsTermCfg(
@@ -410,7 +412,7 @@ g1_29dof_wbt_observation_w_object_multi_student = ObservationManagerCfg(
                         # --observation.groups.ae_latent.terms.ae_latent.params.di_checkpoint_path=/path/to/di_ae.pt
                         "di_checkpoint_path": "",
                         # Preferred DI+proprioception override path:
-                        # --observation.groups.ae_latent.terms.ae_latent.params.di_pro_checkpoint_path=/path/to/di_pro_ae.pt
+                        # --observation.groups.ae_latent.terms.ae_latent.params.di_pro_checkpoint_path=...
                         "di_pro_checkpoint_path": "",
                         # Optional explicit source: "", "ir", "di", or "di_pro"
                         "source": "",
@@ -456,7 +458,7 @@ g1_29dof_wbt_observation_w_object_multi_res = ObservationManagerCfg(
                         # --observation.groups.di_ae_latent.terms.di_ae_latent.params.checkpoint_path=/path/to/di_ae.pt
                         "checkpoint_path": "",
                         # Preferred DI+proprioception override path:
-                        # --observation.groups.di_ae_latent.terms.di_ae_latent.params.di_pro_checkpoint_path=/path/to/di_pro_ae.pt
+                        # --observation.groups.di_ae_latent.terms.di_ae_latent.params.di_pro_checkpoint_path=...
                         "di_pro_checkpoint_path": "",
                         # Keep the original robot asset and let IsaacSim attach
                         # the depth camera using the built-in fallback torso mount.
@@ -480,7 +482,7 @@ g1_29dof_wbt_observation_w_object_multi_res = ObservationManagerCfg(
                     func="holosoma.managers.observation.terms.wbt:FrozenStudentBaseAction",
                     params={
                         # Preferred override path:
-                        # --observation.groups.student_base_action.terms.student_base_action.params.student_checkpoint=/path/to/student.pt
+                        # --observation.groups.student_base_action.terms.student_base_action.params.student_checkpoint
                         "student_checkpoint": "",
                         "student_obs_group": "student_actor_obs",
                         "latent_obs_group": "di_ae_latent",
@@ -493,11 +495,89 @@ g1_29dof_wbt_observation_w_object_multi_res = ObservationManagerCfg(
     },
 )
 
+object_scale_bin_common_params = {
+    "target": "uniform",
+    # Synced from randomize_object_scale_startup.scale_values at runtime.
+    "scale_values": "auto",
+    "log_metrics": True,
+    "log_target_summary": False,
+    "log_pred_summary": False,
+    "log_distribution": False,
+}
+
+object_scale_input_group = ObsGroupCfg(
+    concatenate=True,
+    enable_noise=False,
+    history_length=1,
+    terms={
+        "object_scale_input": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:ObjectScaleBinInput",
+            params={
+                **object_scale_bin_common_params,
+                # Actor-side input: predicted hard one-hot object-scale bin.
+                "source": "predicted",
+                "output_mode": "one_hot",
+                "latent_obs_group": "di_ae_latent",
+                # Reuse the frozen DI-pro depth CNN + frame projection feature computed for di_ae_latent.
+                "feature_source": "di_projection",
+                "train_online": True,
+                "hidden_dims": "256,128",
+                "learning_rate": 1e-3,
+                "weight_decay": 1e-4,
+                "train_batch_size": 4096,
+                "train_every": 1,
+                "max_grad_norm": 1.0,
+                "log_prefix": "ScaleBinProbe",
+            },
+            scale=1.0,
+            noise=0.0,
+        )
+    },
+)
+
+object_scale_gt_input_group = ObsGroupCfg(
+    concatenate=True,
+    enable_noise=False,
+    history_length=1,
+    terms={
+        "object_scale_gt_input": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:ObjectScaleBinInput",
+            params={
+                **object_scale_bin_common_params,
+                # Critic-side privileged input: debug GT hard one-hot scale bin.
+                "source": "real",
+                "log_metrics": False,
+                "log_prefix": "ScaleBinGT",
+            },
+            scale=1.0,
+            noise=0.0,
+        )
+    },
+)
+
+g1_29dof_wbt_observation_w_object_multi_res = replace(
+    g1_29dof_wbt_observation_w_object_multi_res,
+    groups={
+        **g1_29dof_wbt_observation_w_object_multi_res.groups,
+        "object_scale_gt_input": object_scale_gt_input_group,
+    },
+)
+
+g1_29dof_wbt_observation_w_object_multi_res_scale_probe = replace(
+    g1_29dof_wbt_observation_w_object_multi_res,
+    groups={
+        **g1_29dof_wbt_observation_w_object_multi_res.groups,
+        "object_scale_input": object_scale_input_group,
+        "object_scale_gt_input": object_scale_gt_input_group,
+    },
+)
+
 __all__ = [
     "g1_29dof_wbt_observation",
     "g1_29dof_wbt_observation_w_object",
     "g1_29dof_wbt_observation_w_object_multi",
-    "g1_29dof_wbt_observation_w_object_multi_teacher",
-    "g1_29dof_wbt_observation_w_object_multi_student",
     "g1_29dof_wbt_observation_w_object_multi_res",
+    "g1_29dof_wbt_observation_w_object_multi_res_scale_probe",
+    "g1_29dof_wbt_observation_w_object_multi_student",
+    "g1_29dof_wbt_observation_w_object_multi_teacher",
 ]

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from typing import Any, Callable
 
 import torch
@@ -109,7 +108,14 @@ class StackDaggerBuffer:
 class DaggerStudent(BaseAlgo):
     config: DaggerStudentConfig
 
-    def __init__(self, env: BaseTask, config: DaggerStudentConfig, log_dir, device="cpu", multi_gpu_cfg: dict | None = None):
+    def __init__(
+        self,
+        env: BaseTask,
+        config: DaggerStudentConfig,
+        log_dir,
+        device="cpu",
+        multi_gpu_cfg: dict | None = None,
+    ):
         super().__init__(env, config, device, multi_gpu_cfg)
         self.log_dir = str(log_dir)
         self.writer = TensorboardSummaryWriter(log_dir=self.log_dir, flush_secs=10)
@@ -473,9 +479,20 @@ class DaggerStudent(BaseAlgo):
         def policy(obs_dict: dict[str, torch.Tensor]) -> torch.Tensor:
             target_device = device or self.device
             actor_obs = torch.cat([obs_dict[key] for key in self.actor_obs_keys], dim=1).to(target_device)
-            return actor.act_inference({"actor_obs": actor_obs})
+            actions = actor.act_inference({"actor_obs": actor_obs})
+            self._sync_student_action_history(actions)
+            return actions
 
         return policy
+
+    def _sync_student_action_history(self, actions: torch.Tensor) -> None:
+        """Keep student autoregressive action observations aligned with executed actions."""
+        if hasattr(self.env, "student_prev_actions"):
+            if tuple(actions.shape) == tuple(self.env.student_prev_actions.shape):
+                self.env.student_prev_actions[:] = actions.detach().to(self.env.student_prev_actions.device)
+        if hasattr(self.env, "student_base_actions"):
+            if tuple(actions.shape) == tuple(self.env.student_base_actions.shape):
+                self.env.student_base_actions[:] = actions.detach().to(self.env.student_base_actions.device)
 
     @torch.no_grad()
     def evaluate_policy(self, max_eval_steps: int | None = None):
@@ -490,6 +507,7 @@ class DaggerStudent(BaseAlgo):
         for _ in range(max_eval_steps):
             actor_obs = torch.cat([obs_dict[key] for key in self.actor_obs_keys], dim=1)
             actions = self.actor.act_inference({"actor_obs": actor_obs})
+            self._sync_student_action_history(actions)
             obs_dict, _, _, _ = self.env.step({"actions": actions})
             for obs_key, value in obs_dict.items():
                 obs_dict[obs_key] = value.to(self.device)

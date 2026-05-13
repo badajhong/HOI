@@ -231,6 +231,10 @@ g1_29dof_wbt_reward_w_object_multi_res = RewardManagerCfg(
             params={"sigma": 3.14},
             weight=0.25,
         ),
+        "residual_action_l2": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:penalty_residual_action_l2",
+            weight=-0.05,
+        ),
         "object_global_ref_position_error_exp": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:object_global_ref_position_error_exp",
             params={"sigma": 0.3},
@@ -244,4 +248,11 @@ g1_29dof_wbt_reward_w_object_multi_res = RewardManagerCfg(
     }
 )
 
-__all__ = ["g1_29dof_wbt_fast_sac_reward", "g1_29dof_wbt_reward", "g1_29dof_wbt_reward_w_object", "g1_29dof_wbt_reward_w_object_multi", "g1_29dof_wbt_reward_w_object_multi_teacher", "g1_29dof_wbt_reward_w_object_multi_res"]
+__all__ = [
+    "g1_29dof_wbt_fast_sac_reward",
+    "g1_29dof_wbt_reward",
+    "g1_29dof_wbt_reward_w_object",
+    "g1_29dof_wbt_reward_w_object_multi",
+    "g1_29dof_wbt_reward_w_object_multi_res",
+    "g1_29dof_wbt_reward_w_object_multi_teacher",
+]

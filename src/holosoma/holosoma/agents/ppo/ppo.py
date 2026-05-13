@@ -463,9 +463,9 @@ class PPO(BaseAlgo):
         sigma_batch = self.actor.action_std[:original_batch_size]
         entropy_batch = self.actor.entropy[:original_batch_size]
 
+        # Compute the KL divergence between the old and new action distributions for logging.
+        kl_mean = self._compute_kl_div(old_mu_batch, old_sigma_batch, mu_batch, sigma_batch)
         if self.config.desired_kl is not None and self.config.schedule == "adaptive":
-            # Compute the KL divergence between the old and new action distributions
-            kl_mean = self._compute_kl_div(old_mu_batch, old_sigma_batch, mu_batch, sigma_batch)
             self._update_learning_rate(kl_mean)
 
         # Surrogate loss

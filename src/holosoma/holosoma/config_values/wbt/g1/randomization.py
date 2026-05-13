@@ -63,7 +63,7 @@ additional_object_dr_at_setup = {
     "randomize_object_scale_startup": RandomizationTermCfg(
         func="holosoma.managers.randomization.terms.locomotion:randomize_object_scale_startup",
         params={
-            "scale_range": (0.6, 1.4),
+            "scale_values": (0.6, 0.8, 1.0, 1.2, 1.4),
             # Optional fixed scale for debugging. Example: 2.0 or [1.0, 1.0, 2.0].
             # "scale_value": 2.0,
             # Optional manual height fallback. Non-positive values trigger URDF-based auto bounds.

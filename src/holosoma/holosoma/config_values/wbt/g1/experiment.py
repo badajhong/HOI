@@ -277,6 +277,8 @@ g1_29dof_wbt_w_object_multi_res = replace(
             save_interval=1000,
             use_symmetry=False,
             init_at_random_ep_len=False,
+            init_noise_std=0.05,
+            entropy_coef=0.0,
             module_dict=replace(
                 algo.ppo.config.module_dict,
                 actor=replace(
@@ -289,7 +291,7 @@ g1_29dof_wbt_w_object_multi_res = replace(
                 ),
                 critic=replace(
                     algo.ppo.config.module_dict.critic,
-                    input_dim=["critic_obs", "student_base_action", "di_ae_latent"],
+                    input_dim=["critic_obs", "student_base_action", "di_ae_latent", "object_scale_gt_input"],
                     layer_config=replace(
                         algo.ppo.config.module_dict.critic.layer_config,
                         hidden_dims=[512, 256, 128],
@@ -316,15 +318,48 @@ g1_29dof_wbt_w_object_multi_res = replace(
     ),
 )
 
+g1_29dof_wbt_w_object_multi_res_scale_probe = replace(
+    g1_29dof_wbt_w_object_multi_res,
+    observation=observation.g1_29dof_wbt_observation_w_object_multi_res_scale_probe,
+    algo=replace(
+        g1_29dof_wbt_w_object_multi_res.algo,
+        config=replace(
+            g1_29dof_wbt_w_object_multi_res.algo.config,
+            module_dict=replace(
+                g1_29dof_wbt_w_object_multi_res.algo.config.module_dict,
+                actor=replace(
+                    g1_29dof_wbt_w_object_multi_res.algo.config.module_dict.actor,
+                    input_dim=[
+                        "residual_actor_obs",
+                        "student_base_action",
+                        "di_ae_latent",
+                        "object_scale_input",
+                    ],
+                ),
+                critic=replace(
+                    g1_29dof_wbt_w_object_multi_res.algo.config.module_dict.critic,
+                    input_dim=[
+                        "critic_obs",
+                        "student_base_action",
+                        "di_ae_latent",
+                        "object_scale_gt_input",
+                    ],
+                ),
+            ),
+        ),
+    ),
+)
+
 __all__ = [
     "g1_29dof_wbt",
     "g1_29dof_wbt_fast_sac",
     "g1_29dof_wbt_fast_sac_w_object",
     "g1_29dof_wbt_w_object",
     "g1_29dof_wbt_w_object_multi",
-    "g1_29dof_wbt_w_object_multi_teacher",
-    "g1_29dof_wbt_w_object_multi_student",
     "g1_29dof_wbt_w_object_multi_res",
+    "g1_29dof_wbt_w_object_multi_res_scale_probe",
+    "g1_29dof_wbt_w_object_multi_student",
+    "g1_29dof_wbt_w_object_multi_teacher",
 ]
 
 """

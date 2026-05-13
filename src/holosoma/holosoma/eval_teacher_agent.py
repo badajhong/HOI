@@ -5,7 +5,7 @@ import dataclasses
 import itertools
 import os
 import sys
-from typing import Any
+from typing import Any, Literal
 
 import tyro
 from loguru import logger
@@ -29,27 +29,39 @@ from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.sim_utils import close_simulation_app, setup_simulation_environment
 from holosoma.utils.tyro_utils import TYRO_CONIFG
 
+DEFAULT_CHECKPOINT = "/home/rllab/haechan/holosoma/logs/WholeBodyTracking/teacher_suitcase/model_17000.pt"
+DEFAULT_MOTION_FILE = "/home/rllab/haechan/holosoma/train/rl/tripod/sub1_tripod_117.npz"
+DEFAULT_OBJECT_URDF_PATH = "/home/rllab/haechan/holosoma/train/objects/tripod/tripod.urdf"
+DEFAULT_NUM_ENVS = 1
+DEFAULT_HEADLESS = False
+DEFAULT_CAMERA_OFFSET = [3.0, -3.0, 1.5]
+DEFAULT_START_AT_TIMESTEP_ZERO_PROB = 1.0
+DEFAULT_DEVICE = "cpu"
+
 
 @dataclass(frozen=True)
 class TeacherEvalConfig(CheckpointConfig):
     """Evaluate a teacher checkpoint while choosing the motion/object files."""
 
-    motion_file: str | None = None
+    checkpoint: str | None = DEFAULT_CHECKPOINT
+    """Teacher checkpoint to evaluate."""
+
+    motion_file: str | None = DEFAULT_MOTION_FILE
     """Evaluate one motion .npz file. Clears motion_folder when provided."""
 
     motion_folder: str | None = None
     """Evaluate all .npz files in a folder. Clears motion_file when provided."""
 
-    object_urdf_path: str | None = None
+    object_urdf_path: str | None = DEFAULT_OBJECT_URDF_PATH
     """URDF path for a single-object evaluation."""
 
     object_urdf_asset: str | None = None
     """Folder containing object URDFs for multi-object motion folders."""
 
-    num_envs: int | None = None
+    num_envs: int | None = DEFAULT_NUM_ENVS
     """Override evaluation environment count."""
 
-    headless: bool | None = None
+    headless: bool | None = DEFAULT_HEADLESS
     """Override rendering mode. Use false for an interactive viewer."""
 
     max_eval_steps: int | None = None
@@ -61,10 +73,10 @@ class TeacherEvalConfig(CheckpointConfig):
     env_spacing: float | None = None
     """Override simulator environment spacing."""
 
-    camera_offset: list[float] | None = None
+    camera_offset: list[float] | None = dataclasses.field(default_factory=lambda: list(DEFAULT_CAMERA_OFFSET))
     """Cartesian video camera offset [x, y, z]."""
 
-    start_at_timestep_zero_prob: float | None = None
+    start_at_timestep_zero_prob: float | None = DEFAULT_START_AT_TIMESTEP_ZERO_PROB
     """Override the motion command reset probability for starting at frame zero."""
 
     disable_object_randomization: bool = True
@@ -73,8 +85,8 @@ class TeacherEvalConfig(CheckpointConfig):
     disable_robot_randomization: bool = True
     """Disable robot material/base-COM/DOF/actuator/push randomization and robot reset pose noise during eval."""
 
-    device: str | None = None
-    """Optional eval device override. Use 'cpu' to avoid GPU PhysX/Torch while another run owns the GPU."""
+    device: Literal["cpu", "gpu"] = DEFAULT_DEVICE
+    """Simulation device choice. Use 'gpu' for cuda:0."""
 
 
 def _replace_motion_config(motion_config: Any, updates: dict[str, Any]) -> Any:
@@ -369,6 +381,10 @@ def apply_teacher_eval_overrides(config: ExperimentConfig, cli_cfg: TeacherEvalC
     return _apply_robot_randomization_overrides(config, cli_cfg)
 
 
+def _resolve_device(cli_cfg: TeacherEvalConfig) -> str:
+    return "cuda:0" if cli_cfg.device == "gpu" else "cpu"
+
+
 def _strip_wrapping_quotes(value: str) -> str:
     stripped = value.strip()
     if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in {"'", '"'}:
@@ -459,7 +475,7 @@ def _preserve_checkpoint_object_type_space(env: Any, saved_config: ExperimentCon
 
     logger.info(
         "Preserved checkpoint object type space for eval: "
-        f"{checkpoint_object_keys} (current clips: {sorted(set(str(k) for k in clip_object_keys if k is not None))})"
+        f"{checkpoint_object_keys} (current clips: {sorted({str(k) for k in clip_object_keys if k is not None})})"
     )
 
 
@@ -684,7 +700,7 @@ def main() -> None:
         checkpoint_cfg,
         saved_cfg,
         saved_wandb_path,
-        device=teacher_eval_cfg.device,
+        device=_resolve_device(teacher_eval_cfg),
     )
 
 

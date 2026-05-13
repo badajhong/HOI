@@ -1494,7 +1494,8 @@ def randomize_object_scale_startup(
     env,
     env_ids: Sequence[int] | torch.Tensor | None = None,
     *,
-    scale_range: tuple[float, float] | dict[str, tuple[float, float]],
+    scale_range: tuple[float, float] | dict[str, tuple[float, float]] | None = None,
+    scale_values: Sequence[float] | Sequence[Sequence[float]] | None = None,
     scale_value: float | Sequence[float] | None = None,
     relative_child_path: str | None = None,
     object_height: float | None = None,
@@ -1518,7 +1519,6 @@ def randomize_object_scale_startup(
     try:
         from isaacsim.core.utils.stage import get_current_stage
         from pxr import Gf, Sdf, UsdGeom, Vt
-        import isaaclab.sim as sim_utils
         import isaaclab.utils.math as math_utils
     except ImportError as exc:  # pragma: no cover - defensive
         raise RuntimeError("IsaacSim scale randomization requires isaaclab.") from exc
@@ -1572,15 +1572,37 @@ def randomize_object_scale_startup(
                     )
                 rand_samples = fixed_scale.unsqueeze(0).repeat(len(env_ids_cpu), 1)
             scale_z_samples = rand_samples[:, 2]
+        elif scale_values is not None:
+            choices = torch.as_tensor(scale_values, device="cpu", dtype=torch.float32)
+            if choices.ndim == 1:
+                if choices.numel() == 0:
+                    raise ValueError("scale_values must contain at least one scale choice.")
+                choice_ids = torch.randint(0, choices.numel(), (len(env_ids_cpu),), device="cpu")
+                selected = choices[choice_ids]
+                rand_samples = selected.unsqueeze(1).repeat(1, 3)
+                scale_z_samples = selected
+            elif choices.ndim == 2 and choices.shape[1] == 3:
+                if choices.shape[0] == 0:
+                    raise ValueError("scale_values must contain at least one xyz scale choice.")
+                choice_ids = torch.randint(0, choices.shape[0], (len(env_ids_cpu),), device="cpu")
+                rand_samples = choices[choice_ids]
+                scale_z_samples = rand_samples[:, 2]
+            else:
+                raise ValueError(
+                    "scale_values must be a 1-D sequence of uniform scale choices or an Nx3 sequence of xyz choices, "
+                    f"got shape {tuple(choices.shape)}."
+                )
         elif isinstance(scale_range, dict):
             range_list = [scale_range.get(key, (1.0, 1.0)) for key in ["x", "y", "z"]]
             ranges = torch.tensor(range_list, device="cpu")
             rand_samples = math_utils.sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids_cpu), 3), device="cpu")
             scale_z_samples = rand_samples[:, 2]
-        else:
+        elif scale_range is not None:
             rand_samples = math_utils.sample_uniform(*scale_range, (len(env_ids_cpu), 1), device="cpu")
             scale_z_samples = rand_samples[:, 0]
             rand_samples = rand_samples.repeat(1, 3)
+        else:
+            raise ValueError("randomize_object_scale_startup requires scale_value, scale_values, or scale_range.")
         rand_samples_list = rand_samples.tolist()
 
         with Sdf.ChangeBlock():
@@ -1644,7 +1666,8 @@ def randomize_object_scale_startup(
             rigid_object.write_root_velocity_to_sim(current_root_state[:, 7:], env_ids_device)
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(
-                f"Failed to apply startup grounded z compensation for object '{object_name}' after scale randomization: {exc}"
+                "Failed to apply startup grounded z compensation for object "
+                f"'{object_name}' after scale randomization: {exc}"
             )
 
 

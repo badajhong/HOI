@@ -42,6 +42,12 @@ def penalty_action_rate(env: WholeBodyTrackingManager) -> torch.Tensor:
     return torch.sum(torch.square(prev_actions - actions), dim=1)
 
 
+def penalty_residual_action_l2(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Penalize residual corrections away from the frozen student's base action."""
+    residual_actions = env.action_manager.action - env.student_base_actions
+    return torch.sum(torch.square(residual_actions), dim=1)
+
+
 def limits_dof_pos(env: WholeBodyTrackingManager, soft_dof_pos_limit: float = 0.95) -> torch.Tensor:
     """Penalize joint positions too close to limits.
 

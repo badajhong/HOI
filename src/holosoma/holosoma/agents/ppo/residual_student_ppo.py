@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 import torch
+from loguru import logger
 from torch import nn
 
 from holosoma.agents.modules.module_utils import setup_ppo_actor_module
@@ -31,15 +32,29 @@ class _FusedStudentResidualActorWrapper(nn.Module):
         proprioception_shape: tuple[int, int] | None = None,
         proprio_feature_mean: torch.Tensor | None = None,
         proprio_feature_std: torch.Tensor | None = None,
+        residual_input_keys: list[str] | None = None,
+        object_scale_bin_classifier: nn.Module | None = None,
+        object_scale_input_source: str = "predicted",
+        object_scale_feature_source: str = "latent",
+        object_scale_output_mode: str = "soft",
+        real_object_scale_dim: int = 0,
     ):
         super().__init__()
         self.actor = residual_actor
         self.student_actor = student_actor
         self.di_encoder = di_encoder
         self.student_input_keys = list(student_input_keys)
+        self.residual_input_keys = list(
+            residual_input_keys or ["residual_actor_obs", "student_base_action", "di_ae_latent"]
+        )
         self.shared_obs_dim = int(shared_obs_dim)
         self.depth_shape = tuple(int(value) for value in depth_shape)
         self.depth_flat_dim = int(self.depth_shape[0] * self.depth_shape[1] * self.depth_shape[2])
+        self.object_scale_bin_classifier = object_scale_bin_classifier
+        self.object_scale_input_source = str(object_scale_input_source)
+        self.object_scale_feature_source = str(object_scale_feature_source)
+        self.object_scale_output_mode = str(object_scale_output_mode)
+        self.real_object_scale_dim = int(real_object_scale_dim)
         self.proprioception_shape = (
             tuple(int(value) for value in proprioception_shape) if proprioception_shape is not None else None
         )
@@ -48,7 +63,9 @@ class _FusedStudentResidualActorWrapper(nn.Module):
             if self.proprioception_shape is not None
             else 0
         )
-        self.onnx_input_dim = self.shared_obs_dim + self.depth_flat_dim + self.proprioception_flat_dim
+        self.onnx_input_dim = (
+            self.shared_obs_dim + self.depth_flat_dim + self.proprioception_flat_dim + self.real_object_scale_dim
+        )
         self.register_buffer("di_feature_mean", di_feature_mean)
         self.register_buffer("di_feature_std", di_feature_std)
         self.register_buffer("di_text_features", di_text_features)
@@ -79,38 +96,116 @@ class _FusedStudentResidualActorWrapper(nn.Module):
         proprioception_flat = actor_obs[:, start:end]
         return proprioception_flat.reshape(actor_obs.shape[0], *self.proprioception_shape)
 
-    def _encode_di_latent(
+    def _extract_real_object_scale(self, actor_obs: torch.Tensor) -> torch.Tensor | None:
+        if self.real_object_scale_dim <= 0:
+            return None
+        start = self.shared_obs_dim + self.depth_flat_dim + self.proprioception_flat_dim
+        end = start + self.real_object_scale_dim
+        return actor_obs[:, start:end]
+
+    def _encode_di_outputs(
         self,
         depth_window: torch.Tensor,
         proprioception_window: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         normalized = (depth_window - self.di_feature_mean.unsqueeze(0)) / self.di_feature_std.unsqueeze(0)
         text_features = self.di_text_features.expand(depth_window.shape[0], -1)
+        condition = self.di_encoder.condition(text_features)
+        depth_encoder = self.di_encoder.di_encoder
+
+        batch_size, window_size, height, width = normalized.shape
+        frames = normalized.reshape(batch_size * window_size, 1, height, width)
+        frame_features = depth_encoder.frame_projection(depth_encoder.frame_features(frames))
+        frame_features = frame_features.reshape(batch_size, window_size, int(depth_encoder.hidden_dim))
+        projection_feature = frame_features.mean(dim=1)
+        temporal_features = frame_features
+
         if self.proprioception_shape is not None:
             if proprioception_window is None:
                 raise RuntimeError("DI+proprioception fused export requires a proprioception window.")
             normalized_proprioception = (
                 proprioception_window - self.proprio_feature_mean.unsqueeze(0)
             ) / self.proprio_feature_std.unsqueeze(0)
-            mu, _ = self.di_encoder.encode_di(normalized, text_features, normalized_proprioception)
-        else:
-            mu, _ = self.di_encoder.encode_di(normalized, text_features)
-        return mu
+            proprioception_steps = normalized_proprioception.reshape(
+                batch_size * int(depth_encoder.proprio_window_size),
+                int(depth_encoder.proprio_feature_dim),
+            )
+            proprioception_steps = depth_encoder.proprio_frame_projection(proprioception_steps)
+            proprioception_steps = proprioception_steps.reshape(
+                batch_size,
+                int(depth_encoder.proprio_window_size),
+                int(depth_encoder.proprio_hidden_dim),
+            )
+            temporal_features = depth_encoder.temporal_fusion(torch.cat([frame_features, proprioception_steps], dim=-1))
+
+        _, hidden = depth_encoder.temporal_encoder(temporal_features)
+        latent_hidden = depth_encoder.latent_head(torch.cat([hidden[-1], condition], dim=-1))
+        latent = depth_encoder.mu(latent_hidden)
+        return latent, projection_feature
+
+    def _predict_object_scale_input(self, latent: torch.Tensor, projection_feature: torch.Tensor) -> torch.Tensor:
+        if self.object_scale_bin_classifier is None:
+            raise RuntimeError("Residual fused export requires object-scale bin classifier for actor input.")
+        probe_input = projection_feature if self.object_scale_feature_source == "di_projection" else latent
+        logits = self.object_scale_bin_classifier(probe_input)
+        probs = torch.softmax(logits, dim=1)
+        if self.object_scale_output_mode == "one_hot":
+            pred_bin = probs.argmax(dim=1)
+            return torch.nn.functional.one_hot(pred_bin, num_classes=probs.shape[1]).to(dtype=torch.float32)
+        return probs
+
+    def _build_residual_input(
+        self,
+        shared_obs: torch.Tensor,
+        base_action: torch.Tensor,
+        latent: torch.Tensor,
+        projection_feature: torch.Tensor,
+        real_object_scale: torch.Tensor | None,
+    ) -> torch.Tensor:
+        inputs = []
+        scale_bin_probs = None
+        for key in self.residual_input_keys:
+            if key == "residual_actor_obs":
+                inputs.append(shared_obs)
+            elif key == "student_base_action":
+                inputs.append(base_action)
+            elif key == "di_ae_latent":
+                inputs.append(latent)
+            elif key == "object_scale_input" and self.object_scale_input_source == "predicted":
+                if scale_bin_probs is None:
+                    scale_bin_probs = self._predict_object_scale_input(latent, projection_feature)
+                inputs.append(scale_bin_probs)
+            elif key in {"object_scale_input", "object_scale_gt_input"} and self.object_scale_input_source == "real":
+                if real_object_scale is None:
+                    raise RuntimeError("Residual fused export requires real object scale input.")
+                inputs.append(real_object_scale)
+            else:
+                raise RuntimeError(f"Unsupported residual fused export actor input key '{key}'.")
+        return torch.cat(inputs, dim=1)
 
     def forward(self, actor_obs: torch.Tensor) -> torch.Tensor:
         shared_obs = actor_obs[:, : self.shared_obs_dim]
         depth_window = self._extract_depth_window(actor_obs)
         proprioception_window = self._extract_proprioception_window(actor_obs)
-        latent = self._encode_di_latent(depth_window, proprioception_window)
+        real_object_scale = self._extract_real_object_scale(actor_obs)
+        latent, projection_feature = self._encode_di_outputs(depth_window, proprioception_window)
         student_input = self._build_student_input(shared_obs, latent)
         base_action = self.student_actor.act_inference({"actor_obs": student_input})
-        residual_input = torch.cat([shared_obs, base_action, latent], dim=1)
+        residual_input = self._build_residual_input(
+            shared_obs,
+            base_action,
+            latent,
+            projection_feature,
+            real_object_scale,
+        )
         residual_action = self.actor.act_inference({"actor_obs": residual_input})
         return residual_action + base_action
 
 
 class ResidualStudentPPO(PPO):
     """PPO variant that predicts residual actions on top of a frozen student base action."""
+
+    residual_output_init_gain: float = 0.1
 
     def _init_config(self) -> None:
         self.algo_obs_dim_dict = self.env.observation_manager.get_obs_dims()
@@ -162,6 +257,35 @@ class ResidualStudentPPO(PPO):
 
     def _compose_final_action(self, residual_action: torch.Tensor, base_action: torch.Tensor) -> torch.Tensor:
         return residual_action + base_action
+
+    def _setup_models_and_optimizer(self):
+        super()._setup_models_and_optimizer()
+        self._initialize_residual_actor_output()
+        if self.is_multi_gpu:
+            self._synchronize_model_weights()
+
+    def _initialize_residual_actor_output(self) -> None:
+        """Keep the initial residual policy close to the frozen student policy."""
+        actor_module = getattr(getattr(self.actor, "actor_module", None), "module", None)
+        if actor_module is None:
+            logger.warning("Could not find residual actor MLP for output-layer initialization.")
+            return
+
+        final_linear = next(
+            (module for module in reversed(list(actor_module.modules())) if isinstance(module, nn.Linear)),
+            None,
+        )
+        if final_linear is None:
+            logger.warning("Could not find residual actor output Linear layer for initialization.")
+            return
+
+        nn.init.xavier_uniform_(final_linear.weight, gain=self.residual_output_init_gain)
+        if final_linear.bias is not None:
+            nn.init.zeros_(final_linear.bias)
+        logger.info(
+            "Initialized residual actor output layer with Xavier uniform "
+            f"gain={self.residual_output_init_gain} and zero bias."
+        )
 
     def _sync_student_prev_action(self, final_action: torch.Tensor) -> None:
         """Expose the executed final action as the frozen student's previous-action input.
@@ -396,6 +520,66 @@ class ResidualStudentPPO(PPO):
         }
         return self._di_export_bundle
 
+    def _load_object_scale_bin_export_bundle(self) -> dict[str, Any] | None:
+        scale_group_name = next(
+            (key for key in ("object_scale_input", "object_scale_gt_input") if key in self.actor_obs_keys),
+            None,
+        )
+        if scale_group_name is None:
+            return None
+        if hasattr(self, "_object_scale_bin_export_bundle"):
+            return self._object_scale_bin_export_bundle
+
+        observation_manager = self.env.observation_manager
+        assert observation_manager is not None
+        group_instances = observation_manager._term_instances.get(scale_group_name, {})
+        scale_probe_term = group_instances.get(scale_group_name)
+        if scale_probe_term is None and group_instances:
+            scale_probe_term = next(iter(group_instances.values()))
+        if scale_probe_term is None:
+            raise ValueError(
+                f"Residual fused ONNX export actor expects '{scale_group_name}', but the observation term "
+                "instance was not found."
+            )
+
+        source = str(getattr(scale_probe_term, "source", "predicted"))
+        if source == "real":
+            self._object_scale_bin_export_bundle = {
+                "probe": None,
+                "source": "real",
+                "feature_source": str(getattr(scale_probe_term, "feature_source", "latent")),
+                "output_mode": str(getattr(scale_probe_term, "output_mode", "one_hot")),
+                "target": str(getattr(scale_probe_term, "target_mode", "uniform")),
+                "num_bins": int(getattr(scale_probe_term, "num_bins", 0)),
+                "bin_min": float(getattr(scale_probe_term, "bin_min", 0.0)),
+                "bin_max": float(getattr(scale_probe_term, "bin_max", 0.0)),
+                "bin_size": float(getattr(scale_probe_term, "bin_size", 0.0)),
+                "scale_values": getattr(scale_probe_term, "_scale_values_for_log", lambda: None)(),
+            }
+            return self._object_scale_bin_export_bundle
+
+        probe = getattr(scale_probe_term, "probe", None)
+        if probe is None:
+            raise ValueError(
+                f"Residual fused ONNX export actor expects '{scale_group_name}', but the scale probe has "
+                "not been initialized yet."
+            )
+        probe.eval()
+
+        self._object_scale_bin_export_bundle = {
+            "probe": probe,
+            "source": "predicted",
+            "feature_source": str(getattr(scale_probe_term, "feature_source", "latent")),
+            "output_mode": str(getattr(scale_probe_term, "output_mode", "soft")),
+            "target": str(getattr(scale_probe_term, "target_mode", "uniform")),
+            "num_bins": int(getattr(scale_probe_term, "num_bins", 0)),
+            "bin_min": float(getattr(scale_probe_term, "bin_min", 0.0)),
+            "bin_max": float(getattr(scale_probe_term, "bin_max", 0.0)),
+            "bin_size": float(getattr(scale_probe_term, "bin_size", 0.0)),
+            "scale_values": getattr(scale_probe_term, "_scale_values_for_log", lambda: None)(),
+        }
+        return self._object_scale_bin_export_bundle
+
     def _build_fused_export_spec(self) -> dict[str, Any]:
         observation_manager = self.env.observation_manager
         assert observation_manager is not None
@@ -415,6 +599,22 @@ class ResidualStudentPPO(PPO):
 
         bundle = self._load_frozen_student_export_bundle()
         di_bundle = self._load_di_export_bundle()
+        scale_probe_bundle = self._load_object_scale_bin_export_bundle()
+        object_scale_input_source = scale_probe_bundle["source"] if scale_probe_bundle is not None else None
+        uses_real_object_scale = "real_object_scale" in self.actor_obs_keys or object_scale_input_source == "real"
+        actor_scale_key = next(
+            (
+                key
+                for key in ("object_scale_input", "object_scale_gt_input", "real_object_scale")
+                if key in self.actor_obs_keys
+            ),
+            "object_scale_input",
+        )
+        real_object_scale_dim = (
+            int(self.algo_obs_dim_dict.get(actor_scale_key, 0))
+            if uses_real_object_scale
+            else 0
+        )
         proprioception_shape = di_bundle["proprioception_shape"]
         proprioception_flat_dim = (
             int(proprioception_shape[0] * proprioception_shape[1]) if proprioception_shape is not None else 0
@@ -436,6 +636,28 @@ class ResidualStudentPPO(PPO):
             "uses_proprioception_window": proprioception_shape is not None,
             "proprioception_window_shape": list(proprioception_shape) if proprioception_shape is not None else None,
             "proprioception_window_flat_dim": proprioception_flat_dim,
+            "residual_actor_input_keys": list(self.actor_obs_keys),
+            "object_scale_input_source": object_scale_input_source,
+            "object_scale_feature_source": (
+                scale_probe_bundle["feature_source"] if scale_probe_bundle is not None else None
+            ),
+            "object_scale_output_mode": scale_probe_bundle["output_mode"] if scale_probe_bundle is not None else None,
+            "object_scale_input_kind": (
+                "one_hot_bins"
+                if scale_probe_bundle is not None and scale_probe_bundle["output_mode"] == "one_hot"
+                else "bin_probabilities"
+                if scale_probe_bundle is not None
+                else None
+            ),
+            "uses_actor_scale_bin_classifier": object_scale_input_source == "predicted",
+            "object_scale_target": scale_probe_bundle["target"] if scale_probe_bundle is not None else None,
+            "object_scale_num_bins": scale_probe_bundle["num_bins"] if scale_probe_bundle is not None else None,
+            "object_scale_bin_min": scale_probe_bundle["bin_min"] if scale_probe_bundle is not None else None,
+            "object_scale_bin_max": scale_probe_bundle["bin_max"] if scale_probe_bundle is not None else None,
+            "object_scale_bin_size": scale_probe_bundle["bin_size"] if scale_probe_bundle is not None else None,
+            "object_scale_values": scale_probe_bundle["scale_values"] if scale_probe_bundle is not None else None,
+            "uses_real_object_scale": uses_real_object_scale,
+            "real_object_scale_dim": real_object_scale_dim,
         }
 
     def _checkpoint_metadata(self, iteration: int | None = None) -> dict[str, Any]:
@@ -447,6 +669,22 @@ class ResidualStudentPPO(PPO):
     def actor_onnx_wrapper(self):
         bundle = self._load_frozen_student_export_bundle()
         di_bundle = self._load_di_export_bundle()
+        scale_probe_bundle = self._load_object_scale_bin_export_bundle()
+        object_scale_input_source = scale_probe_bundle["source"] if scale_probe_bundle is not None else None
+        uses_real_object_scale = "real_object_scale" in self.actor_obs_keys or object_scale_input_source == "real"
+        actor_scale_key = next(
+            (
+                key
+                for key in ("object_scale_input", "object_scale_gt_input", "real_object_scale")
+                if key in self.actor_obs_keys
+            ),
+            "object_scale_input",
+        )
+        real_object_scale_dim = (
+            int(self.algo_obs_dim_dict.get(actor_scale_key, 0))
+            if uses_real_object_scale
+            else 0
+        )
         if int(bundle["latent_dim"]) != int(di_bundle["latent_dim"]):
             raise ValueError(
                 "Residual fused ONNX export requires student latent dim to match DI encoder latent dim, "
@@ -465,6 +703,14 @@ class ResidualStudentPPO(PPO):
             proprioception_shape=di_bundle["proprioception_shape"],
             proprio_feature_mean=di_bundle["proprio_feature_mean"],
             proprio_feature_std=di_bundle["proprio_feature_std"],
+            residual_input_keys=list(self.actor_obs_keys),
+            object_scale_bin_classifier=scale_probe_bundle["probe"] if scale_probe_bundle is not None else None,
+            object_scale_input_source=object_scale_input_source or "predicted",
+            object_scale_feature_source=(
+                scale_probe_bundle["feature_source"] if scale_probe_bundle is not None else "latent"
+            ),
+            object_scale_output_mode=scale_probe_bundle["output_mode"] if scale_probe_bundle is not None else "soft",
+            real_object_scale_dim=real_object_scale_dim,
         )
 
     def get_inference_policy(self, device=None) -> Callable[[dict[str, torch.Tensor]], torch.Tensor]:
