@@ -129,6 +129,7 @@ nohup python src/holosoma/holosoma/train_agent.py \
     --algo.config.schedule fixed \
     --algo.config.actor-learning-rate 1e-5 \
     --algo.config.critic-learning-rate 1e-4 \
+    --observation.groups.object-scale-input.terms.object-scale-input.params.hidden-dims "256,128" \
     --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob 0.6  \
     --student="/home/rllab/haechan/holosoma/logs/student/20260510_student/model_07000.pt" \
     --di_pro_ae="/home/rllab/haechan/holosoma/logs/AE/20260509_ae_suitcase/best.pt" \
