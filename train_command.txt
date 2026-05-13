@@ -135,3 +135,15 @@ nohup python src/holosoma/holosoma/train_agent.py \
     --simulator.config.scene.env-spacing 5.0 \
     --logger.video.camera.offset '[3.0, -3.0, 1.5]' \
     > train_output.log 2>&1 &
+
+
+# Hugging Face CLIP cache setup for server runs.
+# Run the cache warmup once on a machine with internet, then keep HF_HOME set
+# when launching training so checkpoints with local_files_only=True can find it.
+export HF_HOME=/workspace/HOI/.hf_cache
+unset TRANSFORMERS_OFFLINE
+unset HF_HUB_OFFLINE
+/venv/hssim/bin/python -c "from transformers import AutoTokenizer, CLIPTextModelWithProjection; m='openai/clip-vit-base-patch32'; AutoTokenizer.from_pretrained(m, local_files_only=False); CLIPTextModelWithProjection.from_pretrained(m, local_files_only=False); print('cached', m)"
+
+# Residual model training.
+HF_HOME=/workspace/HOI/.hf_cache nohup ...
