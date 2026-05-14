@@ -277,8 +277,8 @@ g1_29dof_wbt_w_object_multi_res = replace(
             save_interval=1000,
             use_symmetry=False,
             init_at_random_ep_len=False,
-            init_noise_std=0.05,
-            entropy_coef=0.0,
+            init_noise_std=0.01,
+            entropy_coef=0.001,
             module_dict=replace(
                 algo.ppo.config.module_dict,
                 actor=replace(

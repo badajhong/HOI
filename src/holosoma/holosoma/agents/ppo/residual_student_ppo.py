@@ -107,7 +107,7 @@ class _FusedStudentResidualActorWrapper(nn.Module):
         self,
         depth_window: torch.Tensor,
         proprioception_window: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         normalized = (depth_window - self.di_feature_mean.unsqueeze(0)) / self.di_feature_std.unsqueeze(0)
         text_features = self.di_text_features.expand(depth_window.shape[0], -1)
         condition = self.di_encoder.condition(text_features)
@@ -141,12 +141,22 @@ class _FusedStudentResidualActorWrapper(nn.Module):
         _, hidden = depth_encoder.temporal_encoder(temporal_features)
         latent_hidden = depth_encoder.latent_head(torch.cat([hidden[-1], condition], dim=-1))
         latent = depth_encoder.mu(latent_hidden)
-        return latent, projection_feature
+        return latent, projection_feature, temporal_features
 
-    def _predict_object_scale_input(self, latent: torch.Tensor, projection_feature: torch.Tensor) -> torch.Tensor:
+    def _predict_object_scale_input(
+        self,
+        latent: torch.Tensor,
+        projection_feature: torch.Tensor,
+        fused_sequence: torch.Tensor,
+    ) -> torch.Tensor:
         if self.object_scale_bin_classifier is None:
             raise RuntimeError("Residual fused export requires object-scale bin classifier for actor input.")
-        probe_input = projection_feature if self.object_scale_feature_source == "di_projection" else latent
+        if self.object_scale_feature_source == "di_projection":
+            probe_input = projection_feature
+        elif self.object_scale_feature_source in {"di_fused_sequence", "di_temporal", "di_pro_sequence"}:
+            probe_input = fused_sequence
+        else:
+            probe_input = latent
         logits = self.object_scale_bin_classifier(probe_input)
         probs = torch.softmax(logits, dim=1)
         if self.object_scale_output_mode == "one_hot":
@@ -160,6 +170,7 @@ class _FusedStudentResidualActorWrapper(nn.Module):
         base_action: torch.Tensor,
         latent: torch.Tensor,
         projection_feature: torch.Tensor,
+        fused_sequence: torch.Tensor,
         real_object_scale: torch.Tensor | None,
     ) -> torch.Tensor:
         inputs = []
@@ -173,7 +184,7 @@ class _FusedStudentResidualActorWrapper(nn.Module):
                 inputs.append(latent)
             elif key == "object_scale_input" and self.object_scale_input_source == "predicted":
                 if scale_bin_probs is None:
-                    scale_bin_probs = self._predict_object_scale_input(latent, projection_feature)
+                    scale_bin_probs = self._predict_object_scale_input(latent, projection_feature, fused_sequence)
                 inputs.append(scale_bin_probs)
             elif key in {"object_scale_input", "object_scale_gt_input"} and self.object_scale_input_source == "real":
                 if real_object_scale is None:
@@ -188,7 +199,7 @@ class _FusedStudentResidualActorWrapper(nn.Module):
         depth_window = self._extract_depth_window(actor_obs)
         proprioception_window = self._extract_proprioception_window(actor_obs)
         real_object_scale = self._extract_real_object_scale(actor_obs)
-        latent, projection_feature = self._encode_di_outputs(depth_window, proprioception_window)
+        latent, projection_feature, fused_sequence = self._encode_di_outputs(depth_window, proprioception_window)
         student_input = self._build_student_input(shared_obs, latent)
         base_action = self.student_actor.act_inference({"actor_obs": student_input})
         residual_input = self._build_residual_input(
@@ -196,6 +207,7 @@ class _FusedStudentResidualActorWrapper(nn.Module):
             base_action,
             latent,
             projection_feature,
+            fused_sequence,
             real_object_scale,
         )
         residual_action = self.actor.act_inference({"actor_obs": residual_input})

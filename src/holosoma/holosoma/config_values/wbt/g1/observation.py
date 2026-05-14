@@ -518,10 +518,12 @@ object_scale_input_group = ObsGroupCfg(
                 "source": "predicted",
                 "output_mode": "one_hot",
                 "latent_obs_group": "di_ae_latent",
-                # Reuse the frozen DI-pro depth CNN + frame projection feature computed for di_ae_latent.
-                "feature_source": "di_projection",
+                # Reuse the frozen DI-pro depth/proprioception fused sequence computed for di_ae_latent.
+                "feature_source": "di_fused_sequence",
                 "train_online": True,
                 "hidden_dims": "256,128",
+                "gru_hidden_dim": 256,
+                "gru_num_layers": 1,
                 "learning_rate": 1e-3,
                 "weight_decay": 1e-4,
                 "train_batch_size": 4096,

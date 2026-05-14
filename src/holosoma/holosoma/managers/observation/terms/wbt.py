@@ -40,6 +40,40 @@ IR_RIGHT_HAND_BODY_NAME_CANDIDATES = (
 )
 
 
+class ObjectScaleSequenceProbe(torch.nn.Module):
+    """Trainable temporal head for object-scale classification from frozen DI-pro features."""
+
+    def __init__(
+        self,
+        *,
+        input_dim: int,
+        gru_hidden_dim: int,
+        gru_num_layers: int,
+        hidden_dims: tuple[int, ...],
+        output_dim: int,
+    ):
+        super().__init__()
+        self.gru = torch.nn.GRU(
+            input_size=int(input_dim),
+            hidden_size=int(gru_hidden_dim),
+            num_layers=int(gru_num_layers),
+            batch_first=True,
+        )
+        layers: list[torch.nn.Module] = []
+        previous_dim = int(gru_hidden_dim)
+        for hidden_dim in hidden_dims:
+            layers.extend([torch.nn.Linear(previous_dim, int(hidden_dim)), torch.nn.ELU()])
+            previous_dim = int(hidden_dim)
+        layers.append(torch.nn.Linear(previous_dim, int(output_dim)))
+        self.head = torch.nn.Sequential(*layers)
+
+    def forward(self, sequence: torch.Tensor) -> torch.Tensor:
+        if sequence.ndim != 3:
+            raise ValueError(f"ObjectScaleSequenceProbe expects [B, T, F], got {tuple(sequence.shape)}.")
+        _, hidden = self.gru(sequence)
+        return self.head(hidden[-1])
+
+
 #########################################################################################################
 ## terms same to managers/observation/terms/locomotion.py
 #########################################################################################################
@@ -834,6 +868,7 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
         self._cached_modify_history: bool | None = None
         self._cached_latent: torch.Tensor | None = None
         self._cached_scale_probe_feature: torch.Tensor | None = None
+        self._cached_scale_probe_sequence: torch.Tensor | None = None
 
         logger.info(
             f"Loaded frozen di latent encoder from {self.di_checkpoint} with "
@@ -861,6 +896,7 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
             self._cached_modify_history = None
             self._cached_latent = None
             self._cached_scale_probe_feature = None
+            self._cached_scale_probe_sequence = None
             return
 
         env_ids_tensor = env_ids.to(device=self.device, dtype=torch.long)
@@ -876,6 +912,7 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
         self._cached_modify_history = None
         self._cached_latent = None
         self._cached_scale_probe_feature = None
+        self._cached_scale_probe_sequence = None
 
     def _resolve_debug_depth_dir(self, env: WholeBodyTrackingManager) -> Path | None:
         save_dir = getattr(getattr(env.simulator, "video_config", None), "save_dir", None)
@@ -1043,7 +1080,7 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
         self,
         depth_window: torch.Tensor,
         proprioception_window: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         normalized_window = (depth_window - self.di_feature_mean.unsqueeze(0)) / self.di_feature_std.unsqueeze(0)
         text_features = self.di_text_features.expand(depth_window.shape[0], -1)
         condition = self.di_encoder.condition(text_features)
@@ -1087,7 +1124,7 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
         _, hidden = depth_encoder.temporal_encoder(temporal_features)
         latent_hidden = depth_encoder.latent_head(torch.cat([hidden[-1], condition], dim=-1))
         mu = depth_encoder.mu(latent_hidden)
-        return mu, projection_feature
+        return mu, projection_feature, temporal_features
 
     def _cache_depth_outputs(
         self,
@@ -1096,11 +1133,13 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
         modify_history: bool,
         latent: torch.Tensor,
         scale_probe_feature: torch.Tensor,
+        scale_probe_sequence: torch.Tensor,
     ) -> None:
         self._cached_compute_token = compute_token
         self._cached_modify_history = modify_history
         self._cached_latent = latent
         self._cached_scale_probe_feature = scale_probe_feature
+        self._cached_scale_probe_sequence = scale_probe_sequence
 
     def _compute_depth_latent(self, env: WholeBodyTrackingManager, *, modify_history: bool) -> torch.Tensor:
         compute_token = _get_observation_compute_token(env)
@@ -1115,11 +1154,18 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
         if not getattr(motion_command.motion, "has_object", False):
             zero_latent = torch.zeros(env.num_envs, self.latent_dim, device=self.device)
             zero_feature = torch.zeros(env.num_envs, self.depth_projection_dim, device=self.device)
+            zero_sequence = torch.zeros(
+                env.num_envs,
+                self.window_size,
+                self.depth_projection_dim,
+                device=self.device,
+            )
             self._cache_depth_outputs(
                 compute_token=compute_token,
                 modify_history=modify_history,
                 latent=zero_latent,
                 scale_probe_feature=zero_feature,
+                scale_probe_sequence=zero_sequence,
             )
             return zero_latent
 
@@ -1129,11 +1175,18 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
             if not modify_history:
                 zero_latent = torch.zeros(env.num_envs, self.latent_dim, device=self.device)
                 zero_feature = torch.zeros(env.num_envs, self.depth_projection_dim, device=self.device)
+                zero_sequence = torch.zeros(
+                    env.num_envs,
+                    self.window_size,
+                    self.depth_projection_dim,
+                    device=self.device,
+                )
                 self._cache_depth_outputs(
                     compute_token=compute_token,
                     modify_history=modify_history,
                     latent=zero_latent,
                     scale_probe_feature=zero_feature,
+                    scale_probe_sequence=zero_sequence,
                 )
                 return zero_latent
             raise
@@ -1147,7 +1200,7 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
                 proprioception,
                 modify_history=modify_history,
             )
-        depth_latent, scale_probe_feature = self._encode_di_latent_and_projection_feature(
+        depth_latent, scale_probe_feature, scale_probe_sequence = self._encode_di_latent_and_projection_feature(
             depth_window,
             proprioception_window,
         )
@@ -1156,6 +1209,7 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
             modify_history=modify_history,
             latent=depth_latent,
             scale_probe_feature=scale_probe_feature,
+            scale_probe_sequence=scale_probe_sequence,
         )
         return depth_latent
 
@@ -1169,6 +1223,17 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
         if self._cached_scale_probe_feature is None:
             raise RuntimeError("Depth projection feature cache was not populated by the DI encoder.")
         return self._cached_scale_probe_feature
+
+    def get_cached_di_fused_sequence_feature(
+        self,
+        env: WholeBodyTrackingManager,
+        *,
+        modify_history: bool,
+    ) -> torch.Tensor:
+        self._compute_depth_latent(env, modify_history=modify_history)
+        if self._cached_scale_probe_sequence is None:
+            raise RuntimeError("DI fused sequence feature cache was not populated by the DI encoder.")
+        return self._cached_scale_probe_sequence
 
 
 class DIAELatent(_DepthLatentObservationTermBase):
@@ -1202,6 +1267,8 @@ class ObjectScaleBinInput(ObservationTermBase):
         num_bins_param = cfg.params.get("num_bins", "auto")
         desired_bin_size = float(cfg.params.get("bin_size", 0.1))
         self.hidden_dims = self._parse_hidden_dims(cfg.params.get("hidden_dims", ""))
+        self.gru_hidden_dim = int(cfg.params.get("gru_hidden_dim", 256))
+        self.gru_num_layers = max(int(cfg.params.get("gru_num_layers", 1)), 1)
         self.train_online = bool(cfg.params.get("train_online", self.source == "predicted"))
         self.learning_rate = float(cfg.params.get("learning_rate", 1e-3))
         self.weight_decay = float(cfg.params.get("weight_decay", 1e-4))
@@ -1217,13 +1284,25 @@ class ObjectScaleBinInput(ObservationTermBase):
 
         if self.source not in {"predicted", "real"}:
             raise ValueError(f"ObjectScaleBinInput source must be 'predicted' or 'real', got {self.source!r}.")
-        if self.feature_source not in {"latent", "di_projection", "depth_projection"}:
+        if self.feature_source not in {
+            "latent",
+            "di_projection",
+            "depth_projection",
+            "di_fused_sequence",
+            "di_temporal",
+            "di_pro_sequence",
+        }:
             raise ValueError(
-                "ObjectScaleBinInput feature_source must be one of 'latent' or 'di_projection', "
+                "ObjectScaleBinInput feature_source must be one of 'latent', 'di_projection', "
+                "or 'di_fused_sequence', "
                 f"got {self.feature_source!r}."
             )
         if self.feature_source == "depth_projection":
             self.feature_source = "di_projection"
+        if self.feature_source in {"di_temporal", "di_pro_sequence"}:
+            self.feature_source = "di_fused_sequence"
+        if self.gru_hidden_dim <= 0:
+            raise ValueError(f"ObjectScaleBinInput gru_hidden_dim must be positive, got {self.gru_hidden_dim}.")
         if self.target_mode not in {"uniform", "z"}:
             raise ValueError(f"ObjectScaleBinInput target must be 'uniform' or 'z', got {self.target_mode!r}.")
         if desired_bin_size <= 0.0:
@@ -1277,7 +1356,8 @@ class ObjectScaleBinInput(ObservationTermBase):
                 f"target={self.target_mode!r}, "
                 f"values={self._scale_values_for_log()}, "
                 f"range=[{self.bin_min}, {self.bin_max}], bin_size={self.bin_size}, "
-                f"num_bins={self.num_bins}, hidden_dims={self.hidden_dims}."
+                f"num_bins={self.num_bins}, hidden_dims={self.hidden_dims}, "
+                f"gru_hidden_dim={self.gru_hidden_dim if self.feature_source == 'di_fused_sequence' else None}."
             )
 
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
@@ -1427,6 +1507,8 @@ class ObjectScaleBinInput(ObservationTermBase):
             "scale_values": self._scale_values_for_log(),
             "num_bins": self.num_bins,
             "hidden_dims": self.hidden_dims,
+            "gru_hidden_dim": self.gru_hidden_dim,
+            "gru_num_layers": self.gru_num_layers,
             "train_online": self.train_online,
             "learning_rate": self.learning_rate,
             "weight_decay": self.weight_decay,
@@ -1473,6 +1555,10 @@ class ObjectScaleBinInput(ObservationTermBase):
         checkpoint_hidden_dims = tuple(int(dim) for dim in state.get("hidden_dims", self.hidden_dims))
         if checkpoint_hidden_dims != self.hidden_dims:
             return False
+        if int(state.get("gru_hidden_dim", payload.get("gru_hidden_dim", self.gru_hidden_dim))) != self.gru_hidden_dim:
+            return False
+        if int(state.get("gru_num_layers", payload.get("gru_num_layers", self.gru_num_layers))) != self.gru_num_layers:
+            return False
 
         checkpoint_num_bins = int(state.get("num_bins", payload.get("num_bins", self.num_bins)))
         if checkpoint_num_bins != self.num_bins:
@@ -1505,7 +1591,15 @@ class ObjectScaleBinInput(ObservationTermBase):
             return ()
         return tuple(int(value) for value in raw_value)
 
-    def _build_probe(self, input_dim: int) -> torch.nn.Sequential:
+    def _build_probe(self, input_dim: int) -> torch.nn.Module:
+        if self.feature_source == "di_fused_sequence":
+            return ObjectScaleSequenceProbe(
+                input_dim=int(input_dim),
+                gru_hidden_dim=self.gru_hidden_dim,
+                gru_num_layers=self.gru_num_layers,
+                hidden_dims=self.hidden_dims,
+                output_dim=self.num_bins,
+            )
         layers: list[torch.nn.Module] = []
         previous_dim = int(input_dim)
         for hidden_dim in self.hidden_dims:
@@ -1541,6 +1635,8 @@ class ObjectScaleBinInput(ObservationTermBase):
                 "feature_source": self.feature_source,
                 "output_mode": self.output_mode,
                 "hidden_dims": self.hidden_dims,
+                "gru_hidden_dim": self.gru_hidden_dim,
+                "gru_num_layers": self.gru_num_layers,
                 "target": self.target_mode,
                 "bin_min": self.bin_min,
                 "bin_max": self.bin_max,
@@ -1556,7 +1652,8 @@ class ObjectScaleBinInput(ObservationTermBase):
             self.probe.train()
         logger.info(
             f"Initialized online object-scale bin classifier with input_dim={input_dim}, "
-            f"feature_source={self.feature_source!r}, num_bins={self.num_bins}, hidden_dims={self.hidden_dims}."
+            f"feature_source={self.feature_source!r}, num_bins={self.num_bins}, hidden_dims={self.hidden_dims}, "
+            f"gru_hidden_dim={self.gru_hidden_dim if self.feature_source == 'di_fused_sequence' else None}."
         )
 
     def _get_scale_scalar(self, env: WholeBodyTrackingManager) -> torch.Tensor:
@@ -1661,7 +1758,7 @@ class ObjectScaleBinInput(ObservationTermBase):
     def _get_probe_input(self, env: WholeBodyTrackingManager, *, modify_history: bool) -> torch.Tensor:
         if self.feature_source == "latent":
             probe_input = env.observation_manager.compute_group(self.latent_obs_group, modify_history=modify_history)
-        else:
+        elif self.feature_source == "di_projection":
             depth_latent_term = self._get_depth_latent_term(env)
             get_projection_feature = getattr(depth_latent_term, "get_cached_depth_projection_feature", None)
             if not callable(get_projection_feature):
@@ -1669,6 +1766,14 @@ class ObjectScaleBinInput(ObservationTermBase):
                     f"Observation group '{self.latent_obs_group}' does not expose cached depth projection features."
                 )
             probe_input = get_projection_feature(env, modify_history=modify_history)
+        else:
+            depth_latent_term = self._get_depth_latent_term(env)
+            get_fused_sequence = getattr(depth_latent_term, "get_cached_di_fused_sequence_feature", None)
+            if not callable(get_fused_sequence):
+                raise ValueError(
+                    f"Observation group '{self.latent_obs_group}' does not expose cached DI fused sequence features."
+                )
+            probe_input = get_fused_sequence(env, modify_history=modify_history)
         if not isinstance(probe_input, torch.Tensor):
             raise ValueError(
                 f"ObjectScaleBinInput feature_source={self.feature_source!r} produced a non-tensor input."
@@ -1684,7 +1789,7 @@ class ObjectScaleBinInput(ObservationTermBase):
             return torch.nn.functional.one_hot(target_bin, num_classes=self.num_bins).to(dtype=torch.float32)
 
         probe_input = self._get_probe_input(env, modify_history=modify_history)
-        self._setup_online_probe(probe_input.shape[1])
+        self._setup_online_probe(probe_input.shape[-1])
         assert self.probe is not None
         with torch.no_grad():
             probs = torch.softmax(self.probe(probe_input), dim=1).detach()
