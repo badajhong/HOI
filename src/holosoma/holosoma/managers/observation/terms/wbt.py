@@ -1371,13 +1371,13 @@ class ObjectScaleBinInput(ObservationTermBase):
             scale_values = scale_values.reshape(1)
         elif scale_values.ndim == 1:
             scale_values = scale_values.flatten()
-        elif scale_values.ndim == 2 and scale_values.shape[1] == 3:
-            scale_values = scale_values[:, 2] if self.target_mode == "z" else scale_values.mean(dim=1)
         else:
             raise ValueError(
-                "ObjectScaleBinInput scale_values must be a scalar, a 1-D sequence of uniform scale choices, "
-                f"or an Nx3 sequence of xyz choices, got shape {tuple(scale_values.shape)}."
+                "ObjectScaleBinInput scale_values must be a scalar or a 1-D sequence of object volume ratios, "
+                f"got shape {tuple(scale_values.shape)}."
             )
+        if torch.any(scale_values <= 0.0):
+            raise ValueError(f"ObjectScaleBinInput object volume ratios must be positive, got {scale_values.tolist()}.")
         return scale_values.to(device=self.device, dtype=torch.float32)
 
     def _resolve_scale_values(self, env: WholeBodyTrackingManager, raw_value) -> torch.Tensor | None:
@@ -1465,13 +1465,7 @@ class ObjectScaleBinInput(ObservationTermBase):
 
         scale_range = params.get("scale_range")
         if isinstance(scale_range, dict):
-            if self.target_mode == "z":
-                target_range = scale_range.get("z", (1.0, 1.0))
-                return float(target_range[0]), float(target_range[1])
-            axis_ranges = [scale_range.get(axis, (1.0, 1.0)) for axis in ("x", "y", "z")]
-            range_min = sum(float(axis_range[0]) for axis_range in axis_ranges) / 3.0
-            range_max = sum(float(axis_range[1]) for axis_range in axis_ranges) / 3.0
-            return range_min, range_max
+            raise ValueError("ObjectScaleBinInput scale_range must be a 2-value object volume ratio range.")
         if scale_range is not None:
             if len(scale_range) != 2:
                 raise ValueError(f"scale_range must have two values, got {scale_range!r}.")
@@ -1486,10 +1480,7 @@ class ObjectScaleBinInput(ObservationTermBase):
         if isinstance(scale_value, (int, float)):
             value = float(scale_value)
         else:
-            scale_tensor = torch.as_tensor(scale_value, dtype=torch.float32).flatten()
-            if scale_tensor.numel() != 3:
-                raise ValueError(f"scale_value must be a scalar or 3 values, got {scale_value!r}.")
-            value = float(scale_tensor[2].item() if self.target_mode == "z" else scale_tensor.mean().item())
+            raise ValueError(f"scale_value must be a scalar object volume ratio, got {scale_value!r}.")
         half_width = 0.5 * float(self.cfg.params.get("bin_size", 0.1))
         return value - half_width, value + half_width
 
@@ -1663,9 +1654,9 @@ class ObjectScaleBinInput(ObservationTermBase):
             object_scale = torch.ones(env.num_envs, 3, device=self.device, dtype=torch.float32)
 
         if self.target_mode == "uniform":
-            return object_scale.mean(dim=1)
+            return object_scale.prod(dim=1)
         if self.target_mode == "z":
-            return object_scale[:, 2]
+            return torch.pow(object_scale[:, 2], 3.0)
         raise ValueError(f"Unsupported object scale target mode {self.target_mode!r}.")
 
     def _target_bin_indices(self, env: WholeBodyTrackingManager) -> torch.Tensor:

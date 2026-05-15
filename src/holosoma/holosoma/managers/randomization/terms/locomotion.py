@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Sequence
-import xml.etree.ElementTree as ET
 
 import numpy as np
 import torch
@@ -90,6 +90,12 @@ def _get_scene_entity_prim_paths(simulator: Any, entity_name: str) -> list[str]:
         return list(prim_paths)
 
     return []
+
+
+def _volume_ratio_to_xyz_scale_tensor(volume_ratio: torch.Tensor) -> torch.Tensor:
+    if torch.any(volume_ratio <= 0.0):
+        raise ValueError(f"Object volume ratios must be positive, got {volume_ratio.tolist()}.")
+    return torch.pow(volume_ratio, 1.0 / 3.0)
 
 
 def _parse_xyz_attr(value: str | None, default: tuple[float, float, float] = (0.0, 0.0, 0.0)) -> np.ndarray:
@@ -1494,15 +1500,15 @@ def randomize_object_scale_startup(
     env,
     env_ids: Sequence[int] | torch.Tensor | None = None,
     *,
-    scale_range: tuple[float, float] | dict[str, tuple[float, float]] | None = None,
-    scale_values: Sequence[float] | Sequence[Sequence[float]] | None = None,
-    scale_value: float | Sequence[float] | None = None,
+    scale_range: tuple[float, float] | None = None,
+    scale_values: Sequence[float] | None = None,
+    scale_value: float | None = None,
     relative_child_path: str | None = None,
     object_height: float | None = None,
     enabled: bool = True,
     **_,
 ) -> None:
-    """Randomize object USD scale before simulation starts (IsaacSim only)."""
+    """Randomize object volume before simulation starts (IsaacSim only)."""
     if not enabled:
         return
 
@@ -1562,15 +1568,13 @@ def randomize_object_scale_startup(
         if scale_value is not None:
             fixed_scale = torch.as_tensor(scale_value, device="cpu", dtype=torch.float32)
             if fixed_scale.ndim == 0:
+                fixed_scale = _volume_ratio_to_xyz_scale_tensor(fixed_scale)
                 rand_samples = fixed_scale.repeat(len(env_ids_cpu), 3).view(len(env_ids_cpu), 3)
             else:
-                fixed_scale = fixed_scale.flatten()
-                if fixed_scale.numel() != 3:
-                    raise ValueError(
-                        "scale_value must be a scalar or a 3-element sequence, "
-                        f"got shape {tuple(fixed_scale.shape)}"
-                    )
-                rand_samples = fixed_scale.unsqueeze(0).repeat(len(env_ids_cpu), 1)
+                raise ValueError(
+                    "scale_value must be a scalar object volume ratio, "
+                    f"got shape {tuple(fixed_scale.shape)}."
+                )
             scale_z_samples = rand_samples[:, 2]
         elif scale_values is not None:
             choices = torch.as_tensor(scale_values, device="cpu", dtype=torch.float32)
@@ -1579,30 +1583,24 @@ def randomize_object_scale_startup(
                     raise ValueError("scale_values must contain at least one scale choice.")
                 choice_ids = torch.randint(0, choices.numel(), (len(env_ids_cpu),), device="cpu")
                 selected = choices[choice_ids]
+                selected = _volume_ratio_to_xyz_scale_tensor(selected)
                 rand_samples = selected.unsqueeze(1).repeat(1, 3)
                 scale_z_samples = selected
-            elif choices.ndim == 2 and choices.shape[1] == 3:
-                if choices.shape[0] == 0:
-                    raise ValueError("scale_values must contain at least one xyz scale choice.")
-                choice_ids = torch.randint(0, choices.shape[0], (len(env_ids_cpu),), device="cpu")
-                rand_samples = choices[choice_ids]
-                scale_z_samples = rand_samples[:, 2]
             else:
                 raise ValueError(
-                    "scale_values must be a 1-D sequence of uniform scale choices or an Nx3 sequence of xyz choices, "
+                    "scale_values must be a 1-D sequence of object volume ratios, "
                     f"got shape {tuple(choices.shape)}."
                 )
         elif isinstance(scale_range, dict):
-            range_list = [scale_range.get(key, (1.0, 1.0)) for key in ["x", "y", "z"]]
-            ranges = torch.tensor(range_list, device="cpu")
-            rand_samples = math_utils.sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids_cpu), 3), device="cpu")
-            scale_z_samples = rand_samples[:, 2]
+            raise ValueError("scale_range must be a 2-value object volume ratio range, not an axis-wise dictionary.")
         elif scale_range is not None:
             rand_samples = math_utils.sample_uniform(*scale_range, (len(env_ids_cpu), 1), device="cpu")
+            rand_samples = _volume_ratio_to_xyz_scale_tensor(rand_samples)
             scale_z_samples = rand_samples[:, 0]
             rand_samples = rand_samples.repeat(1, 3)
         else:
             raise ValueError("randomize_object_scale_startup requires scale_value, scale_values, or scale_range.")
+        logger.info("Converted object volume ratios to uniform USD XYZ scale for startup randomization.")
         rand_samples_list = rand_samples.tolist()
 
         with Sdf.ChangeBlock():

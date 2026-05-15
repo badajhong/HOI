@@ -150,3 +150,7 @@ unset HF_HUB_OFFLINE
 
 # Residual model training.
 HF_HOME=/workspace/HOI/.hf_cache nohup ...
+
+
+
+ddd

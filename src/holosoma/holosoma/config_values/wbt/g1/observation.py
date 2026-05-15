@@ -497,7 +497,7 @@ g1_29dof_wbt_observation_w_object_multi_res = ObservationManagerCfg(
 
 object_scale_bin_common_params = {
     "target": "uniform",
-    # Synced from randomize_object_scale_startup.scale_values at runtime.
+    # Synced from randomize_object_scale_startup volume ratios at runtime.
     "scale_values": "auto",
     "log_metrics": True,
     "log_target_summary": False,

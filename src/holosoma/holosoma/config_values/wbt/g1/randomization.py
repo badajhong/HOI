@@ -31,8 +31,8 @@ object_state_dr_at_setup = {
     "randomize_object_rigid_body_material_startup": RandomizationTermCfg(
         func="holosoma.managers.randomization.terms.locomotion:randomize_object_rigid_body_material_startup",
         params={
-            "static_friction_range": [0.1, 0.6],
-            "dynamic_friction_range": [0.1, 0.6],
+            "static_friction_range": [0.1, 0.2],
+            "dynamic_friction_range": [0.05, 0.2],
             "restitution_range": [0.0, 1.0],
         },
     ),
@@ -63,9 +63,11 @@ additional_object_dr_at_setup = {
     "randomize_object_scale_startup": RandomizationTermCfg(
         func="holosoma.managers.randomization.terms.locomotion:randomize_object_scale_startup",
         params={
-            "scale_values": (0.6, 0.8, 1.0, 1.2, 1.4),
-            # Optional fixed scale for debugging. Example: 2.0 or [1.0, 1.0, 2.0].
-            # "scale_value": 2.0,
+            # Object scale values are volume ratios. The randomizer cube-roots them internally
+            # before editing the uniform USD XYZ scale.
+            "scale_values": (0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6),
+            # Optional fixed volume ratio for debugging. Example: 1.2 means 20% larger volume.
+            # "scale_value": 1.2,
             # Optional manual height fallback. Non-positive values trigger URDF-based auto bounds.
             "object_height": 0.0,
             "enabled": True,

@@ -23,17 +23,18 @@ from holosoma.utils.tyro_utils import TYRO_CONIFG
 
 DEFAULT_EXPERIMENT = "exp:g1-29dof-wbt-w-object-multi-res"
 DEFAULT_MOTION_FILE = (
-    "/home/rllab/haechan/holosoma/train/rl/tripod/sub1_tripod_117.npz"
+    "/home/rllab/haechan/holosoma/train/rl/suitcase/sub1_suitcase_001.npz"
 )
 DEFAULT_OBJECT_URDF_PATH = (
     "/home/rllab/haechan/holosoma/src/holosoma_retargeting/holosoma_retargeting/"
-    "models/objects/tripod/tripod.urdf"
+    "models/objects/suitcase/suitcase.urdf"
 )
+DEFAULT_VOLUME_RATIOS = (0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6)
 
 
 @dataclass(frozen=True)
 class RandomizeObjectSpawnConfig:
-    """Visualize initial object spawning with deterministic object scales."""
+    """Visualize initial object spawning with deterministic object volume ratios."""
 
     motion_file: str | None = DEFAULT_MOTION_FILE
     """Motion .npz used only to place the robot/object at the initial frame."""
@@ -47,20 +48,20 @@ class RandomizeObjectSpawnConfig:
     object_urdf_asset: str | None = None
     """Folder containing object URDFs for multi-object motion folders."""
 
-    scale_min: float = 0.6
-    """Smallest uniform object scale to visualize."""
+    scale_min: float = DEFAULT_VOLUME_RATIOS[0]
+    """Smallest object volume ratio to visualize."""
 
-    scale_max: float = 1.4
-    """Largest uniform object scale to visualize."""
+    scale_max: float = DEFAULT_VOLUME_RATIOS[-1]
+    """Largest object volume ratio to visualize."""
 
-    num_scales: int = 5
-    """Number of evenly spaced scales between scale_min and scale_max."""
+    num_scales: int = len(DEFAULT_VOLUME_RATIOS)
+    """Number of evenly spaced volume ratios between scale_min and scale_max."""
 
     envs_per_scale: int = 1
     """Number of consecutive environments assigned to each scale before repeating."""
 
-    num_envs: int = 5
-    """Number of environments. Default shows one env for each of the 5 scales."""
+    num_envs: int = len(DEFAULT_VOLUME_RATIOS)
+    """Number of environments. Default shows one env for each volume ratio."""
 
     headless: bool = False
     """Run with an interactive IsaacSim viewer by default."""
@@ -84,7 +85,7 @@ class RandomizeObjectSpawnConfig:
     """Draw the WBT reference/current debug markers when the viewer is available."""
 
     disable_object_randomization: bool = True
-    """Disable object material/mass/inertia noise; the deterministic scale grid remains enabled."""
+    """Disable object material/mass/inertia noise; the deterministic volume-ratio grid remains enabled."""
 
     disable_robot_randomization: bool = True
     """Disable robot/push randomization for a cleaner spawn visualization."""
@@ -96,7 +97,7 @@ class RandomizeObjectSpawnConfig:
     """Simulation device choice. Use 'gpu' for cuda:0."""
 
 
-def _scale_values(scale_min: float, scale_max: float, num_scales: int) -> list[float]:
+def _volume_ratios(scale_min: float, scale_max: float, num_scales: int) -> list[float]:
     if num_scales <= 0:
         raise ValueError(f"num_scales must be positive, got {num_scales}.")
     if num_scales == 1:
@@ -105,6 +106,12 @@ def _scale_values(scale_min: float, scale_max: float, num_scales: int) -> list[f
         float(scale_min + (scale_max - scale_min) * i / (num_scales - 1))
         for i in range(num_scales)
     ]
+
+
+def _volume_ratio_to_xyz_scale(volume_ratio: float) -> float:
+    if volume_ratio <= 0.0:
+        raise ValueError(f"Object volume ratio must be positive, got {volume_ratio}.")
+    return volume_ratio ** (1.0 / 3.0)
 
 
 def _replace_motion_config(motion_config: Any, updates: dict[str, Any]) -> Any:
@@ -310,7 +317,7 @@ def _reset_isaacsim_physics_after_usd_scale_edit(env: Any) -> None:
     if sim is None or not hasattr(sim, "reset"):
         return
 
-    logger.info("Resetting IsaacSim physics after startup object scale edits.")
+    logger.info("Resetting IsaacSim physics after startup object volume-ratio edits.")
     sim.reset()
     simulator.refresh_sim_tensors()
 
@@ -328,7 +335,7 @@ def set_object_scale_grid_startup(
     reset_physics_after_usd_edit: bool = True,
     **_: Any,
 ) -> None:
-    """Assign deterministic per-env scales using randomize_object_scale_startup."""
+    """Assign deterministic per-env object volume ratios using randomize_object_scale_startup."""
     if not enabled:
         return
     if envs_per_scale <= 0:
@@ -342,8 +349,8 @@ def set_object_scale_grid_startup(
     if selected_env_ids.numel() == 0:
         return
 
-    scales = _scale_values(scale_min, scale_max, num_scales)
-    for scale_index, scale in enumerate(scales):
+    volume_ratios = _volume_ratios(scale_min, scale_max, num_scales)
+    for scale_index, volume_ratio in enumerate(volume_ratios):
         scale_env_ids = selected_env_ids[((selected_env_ids // envs_per_scale) % num_scales) == scale_index]
         if scale_env_ids.numel() == 0:
             continue
@@ -351,12 +358,15 @@ def set_object_scale_grid_startup(
         randomize_object_scale_startup(
             env,
             env_ids=scale_env_ids,
-            scale_range=(scale, scale),
-            scale_value=scale,
+            scale_value=volume_ratio,
             object_height=object_height,
             enabled=True,
         )
-        logger.info(f"Object scale {scale:.3f} assigned to env ids: {scale_env_ids.tolist()}")
+        xyz_scale = _volume_ratio_to_xyz_scale(volume_ratio)
+        logger.info(
+            f"Object volume ratio {volume_ratio:.3f} "
+            f"(internal xyz scale {xyz_scale:.6f}) assigned to env ids: {scale_env_ids.tolist()}"
+        )
 
     if reset_physics_after_usd_edit:
         _reset_isaacsim_physics_after_usd_scale_edit(env)
@@ -371,6 +381,7 @@ def _apply_scale_grid_randomization(
     setup_terms["set_object_scale_grid_startup"] = RandomizationTermCfg(
         func="holosoma.eval_randomize_object:set_object_scale_grid_startup",
         params={
+            # scale_min/scale_max are kept as CLI names, but their values are object volume ratios.
             "scale_min": cli_cfg.scale_min,
             "scale_max": cli_cfg.scale_max,
             "num_scales": cli_cfg.num_scales,
@@ -576,7 +587,7 @@ def main() -> None:
     )
     config = apply_spawn_viewer_overrides(config, spawn_cfg)
     config = resolve_multi_object_urdf_config(config)
-    logger.info("Starting deterministic object-scale spawn visualization.")
+    logger.info("Starting deterministic object-volume spawn visualization.")
     run_spawn_viewer(config, spawn_cfg)
 
 

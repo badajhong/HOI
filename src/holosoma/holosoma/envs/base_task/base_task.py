@@ -40,8 +40,14 @@ def _is_object_scale_randomization_enabled(randomization_config) -> bool:
     return False
 
 
+def _volume_ratio_to_xyz_scale(volume_ratio: float) -> float:
+    if volume_ratio <= 0.0:
+        raise ValueError(f"Object volume ratio must be positive, got {volume_ratio}.")
+    return float(volume_ratio) ** (1.0 / 3.0)
+
+
 def _get_fixed_object_scale_value(randomization_config) -> tuple[float, float, float] | None:
-    """Return fixed object scale override when configured for startup scale randomization."""
+    """Return fixed spawn XYZ scale when a scalar object volume ratio is configured."""
     if randomization_config is None:
         return None
 
@@ -59,14 +65,12 @@ def _get_fixed_object_scale_value(randomization_config) -> tuple[float, float, f
         if scale_value is None:
             return None
         if isinstance(scale_value, (int, float)):
-            scale = float(scale_value)
+            scale = _volume_ratio_to_xyz_scale(float(scale_value))
             return (scale, scale, scale)
-        if len(scale_value) != 3:
-            raise ValueError(
-                "randomize_object_scale_startup.params.scale_value must be a scalar or 3-element sequence, "
-                f"got {scale_value!r}"
-            )
-        return (float(scale_value[0]), float(scale_value[1]), float(scale_value[2]))
+        raise ValueError(
+            "randomize_object_scale_startup.params.scale_value must be a scalar object volume ratio, "
+            f"got {scale_value!r}."
+        )
 
     return None
 
