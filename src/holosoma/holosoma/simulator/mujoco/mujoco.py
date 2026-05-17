@@ -142,6 +142,24 @@ class MuJoCo(BaseSimulator):
         # Viewer
         self.viewer: mujoco.viewer.Handle | None = None
 
+        # Robot-mounted depth rendering used by sim2sim residual policies.
+        self.robot_depth_camera_resolution = (80, 60)
+        self.robot_depth_camera_fixed_name = "realsense_d435_depth"
+        self.robot_depth_camera_fallback_parent_link_name = "torso_link"
+        self.robot_depth_camera_fallback_pos = np.asarray((0.075, 0.0, 0.42), dtype=np.float64)
+        self.robot_depth_camera_fallback_forward = np.asarray((np.sqrt(0.5), 0.0, -np.sqrt(0.5)), dtype=np.float64)
+        self.robot_depth_camera_fallback_up = np.asarray((np.sqrt(0.5), 0.0, np.sqrt(0.5)), dtype=np.float64)
+        self.robot_depth_camera_fallback_distance = 1.0
+        self.robot_depth_camera_vertical_fov = 36.3
+        self.robot_depth_camera_near_clip = 0.05
+        self.robot_depth_camera_far_clip = 20.0
+        self._robot_depth_renderer: mujoco.Renderer | None = None
+        self._robot_depth_camera: mujoco.MjvCamera | None = None
+        self._robot_depth_fixed_camera_name: str | None = None
+        self._robot_depth_fixed_camera_lookup_done = False
+        self._robot_depth_body_id: int | None = None
+        self._robot_depth_last_scene_camera_pose: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+
         # World ID for multi-environment visualization (which environment to view)
         self.current_world_id: int = 0
 
@@ -400,6 +418,15 @@ class MuJoCo(BaseSimulator):
         self.scene_manager.add_robot(
             terrain_state, self.robot_config, xml_filter=self.simulator_config.robot_mjcf_filter
         )
+
+        object_cfg = getattr(self.robot_config, "object", None)
+        object_path = getattr(object_cfg, "object_urdf_path", None) if object_cfg is not None else None
+        if object_path:
+            logger.warning(
+                "MuJoCo direct simulation does not instantiate robot.object.object_urdf_path yet. "
+                f"The configured object URDF will be ignored: {object_path}. "
+                "For HOI residual policies this means the depth image will not contain the trained object."
+            )
 
     def _set_robot_properties(self) -> None:
         """Set robot properties including DOF names, body names, and index mappings.
@@ -1347,6 +1374,161 @@ class MuJoCo(BaseSimulator):
         # Use the passive viewer's set_texts method for screen-space HUD overlay
         # Format: (font, gridpos, text1, text2)
         self.viewer.set_texts((font, gridpos, text, text2))
+
+    def _get_robot_depth_renderer(self) -> mujoco.Renderer:
+        if not self.simulator_config.enable_robot_depth_camera:
+            raise RuntimeError("MuJoCo robot depth camera is disabled.")
+        if self.root_model is None:
+            raise RuntimeError("MuJoCo model is not loaded.")
+
+        if self._robot_depth_renderer is None:
+            width, height = self.robot_depth_camera_resolution
+            self._robot_depth_renderer = mujoco.Renderer(self.root_model, height=height, width=width)
+            self._robot_depth_renderer.enable_depth_rendering()
+            logger.info(f"MuJoCo robot depth renderer initialized at {width}x{height}.")
+        return self._robot_depth_renderer
+
+    def _get_robot_depth_camera(self) -> mujoco.MjvCamera:
+        if self._robot_depth_camera is None:
+            self._robot_depth_camera = mujoco.MjvCamera()
+            mujoco.mjv_defaultCamera(self._robot_depth_camera)
+        return self._robot_depth_camera
+
+    def _resolve_robot_depth_fixed_camera_name(self) -> str | None:
+        if self._robot_depth_fixed_camera_name is not None:
+            return self._robot_depth_fixed_camera_name
+        if self._robot_depth_fixed_camera_lookup_done:
+            return None
+        if self.root_model is None:
+            return None
+
+        prefix = getattr(self.scene_manager, "robot_prefix", "")
+        candidates = (
+            self.robot_depth_camera_fixed_name,
+            f"{prefix}{self.robot_depth_camera_fixed_name}",
+        )
+        for camera_name in candidates:
+            camera_id = mujoco.mj_name2id(self.root_model, mujoco.mjtObj.mjOBJ_CAMERA, camera_name)
+            if camera_id != -1:
+                self._robot_depth_fixed_camera_name = camera_name
+                self._robot_depth_fixed_camera_lookup_done = True
+                logger.info(f"MuJoCo robot depth renderer using fixed camera '{camera_name}'.")
+                return camera_name
+        self._robot_depth_fixed_camera_lookup_done = True
+        logger.warning(
+            "MuJoCo robot depth renderer did not find a fixed RealSense camera in the MJCF. "
+            "Using a torso-mounted fallback camera; depth may differ from the training camera."
+        )
+        return None
+
+    def _resolve_robot_depth_body_id(self) -> int:
+        if self._robot_depth_body_id is not None:
+            return self._robot_depth_body_id
+        if self.root_model is None:
+            raise RuntimeError("MuJoCo model is not loaded.")
+
+        prefix = getattr(self.scene_manager, "robot_prefix", "")
+        body_candidates = (
+            "realsense_d435_link",
+            self.robot_depth_camera_fallback_parent_link_name,
+            "Trunk",
+            "torso",
+            "base_link",
+            "pelvis",
+        )
+        for clean_body_name in body_candidates:
+            for body_name in (clean_body_name, f"{prefix}{clean_body_name}"):
+                body_id = mujoco.mj_name2id(self.root_model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+                if body_id != -1:
+                    self._robot_depth_body_id = body_id
+                    logger.info(f"MuJoCo robot depth renderer using fallback body '{body_name}'.")
+                    return body_id
+
+        raise RuntimeError(f"Could not find a body for MuJoCo robot depth camera. Tried {body_candidates}.")
+
+    def _update_robot_depth_camera_from_body(self, camera: mujoco.MjvCamera, render_data: mujoco.MjData) -> None:
+        body_id = self._resolve_robot_depth_body_id()
+        body_name = self.root_model.body(body_id).name if self.root_model is not None else ""
+        body_pos = np.asarray(render_data.xpos[body_id], dtype=np.float64)
+        body_rot = np.asarray(render_data.xmat[body_id], dtype=np.float64).reshape(3, 3)
+
+        if body_name.endswith("realsense_d435_link"):
+            camera_offset = np.zeros(3, dtype=np.float64)
+            camera_forward_body = np.asarray((1.0, 0.0, 0.0), dtype=np.float64)
+            camera_up_body = np.asarray((0.0, 0.0, 1.0), dtype=np.float64)
+        else:
+            camera_offset = self.robot_depth_camera_fallback_pos
+            camera_forward_body = self.robot_depth_camera_fallback_forward
+            camera_up_body = self.robot_depth_camera_fallback_up
+
+        camera_pos = body_pos + body_rot @ camera_offset
+        camera_forward = body_rot @ camera_forward_body
+        camera_forward_norm = np.linalg.norm(camera_forward)
+        if camera_forward_norm <= 1e-6:
+            raise RuntimeError("MuJoCo robot depth camera forward vector is invalid.")
+        camera_forward = camera_forward / camera_forward_norm
+        camera_up = body_rot @ camera_up_body
+        camera_up = camera_up - camera_forward * float(np.dot(camera_up, camera_forward))
+        camera_up_norm = np.linalg.norm(camera_up)
+        if camera_up_norm <= 1e-6:
+            raise RuntimeError("MuJoCo robot depth camera up vector is invalid.")
+        camera_up = camera_up / camera_up_norm
+        self._robot_depth_last_scene_camera_pose = (camera_pos.copy(), camera_forward.copy(), camera_up.copy())
+
+        distance = float(self.robot_depth_camera_fallback_distance)
+        camera.lookat[:] = camera_pos + camera_forward * distance
+        camera.distance = distance
+        camera.azimuth = float(np.degrees(np.arctan2(camera_forward[1], camera_forward[0])))
+        camera.elevation = float(np.degrees(np.arcsin(np.clip(camera_forward[2], -1.0, 1.0))))
+
+    def _apply_robot_depth_scene_camera_pose(self, renderer: mujoco.Renderer) -> None:
+        if self._robot_depth_last_scene_camera_pose is None:
+            return
+        camera_pos, camera_forward, camera_up = self._robot_depth_last_scene_camera_pose
+        for scene_camera in renderer.scene.camera:
+            scene_camera.pos[:] = camera_pos
+            scene_camera.forward[:] = camera_forward
+            scene_camera.up[:] = camera_up
+
+    def get_robot_depth_frame(self, env_id: int) -> torch.Tensor:
+        """Render a robot-mounted MuJoCo depth frame for external residual inference."""
+        if self.root_model is None:
+            raise RuntimeError("MuJoCo model is not loaded.")
+        if getattr(self, "backend", None) is None:
+            raise RuntimeError("MuJoCo backend is not initialized.")
+
+        renderer = self._get_robot_depth_renderer()
+        render_data = self.backend.get_render_data(world_id=int(env_id))
+        fixed_camera_name = self._resolve_robot_depth_fixed_camera_name()
+
+        original_fovy = float(self.root_model.vis.global_.fovy)
+        original_znear = float(self.root_model.vis.map.znear)
+        original_zfar = float(self.root_model.vis.map.zfar)
+        extent = max(float(self.root_model.stat.extent), 1e-6)
+        self.root_model.vis.map.znear = self.robot_depth_camera_near_clip / extent
+        self.root_model.vis.map.zfar = self.robot_depth_camera_far_clip / extent
+        try:
+            if fixed_camera_name is None:
+                self.root_model.vis.global_.fovy = self.robot_depth_camera_vertical_fov
+                camera = self._get_robot_depth_camera()
+                self._update_robot_depth_camera_from_body(camera, render_data)
+                renderer.update_scene(render_data, camera=camera)
+                self._apply_robot_depth_scene_camera_pose(renderer)
+            else:
+                renderer.update_scene(render_data, camera=fixed_camera_name)
+            depth_frame = renderer.render()
+        finally:
+            self.root_model.vis.global_.fovy = original_fovy
+            self.root_model.vis.map.znear = original_znear
+            self.root_model.vis.map.zfar = original_zfar
+
+        if depth_frame is None:
+            raise RuntimeError("MuJoCo depth renderer returned None.")
+
+        depth_np = np.asarray(depth_frame, dtype=np.float32)
+        depth_np = np.nan_to_num(depth_np, nan=0.0, posinf=0.0, neginf=0.0)
+        depth_np[depth_np >= self.robot_depth_camera_far_clip * 0.999] = 0.0
+        return torch.from_numpy(np.ascontiguousarray(depth_np)).to(device=self.sim_device, dtype=torch.float32)
 
     def render(self, sync_frame_time: bool = True) -> None:
         """Render simulation to the viewer

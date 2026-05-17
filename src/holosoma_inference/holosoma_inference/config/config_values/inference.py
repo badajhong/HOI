@@ -57,9 +57,9 @@ _g1_29dof_wbt_robot = replace(
     ),
 )
 
+# fmt: on
 g1_29dof_wbt = InferenceConfig(
     robot=_g1_29dof_wbt_robot,
-# fmt: on
     observation=observation.wbt,
     task=task.wbt,
     secondary=_g1_safety_secondary,
@@ -67,6 +67,7 @@ g1_29dof_wbt = InferenceConfig(
 
 # Core defaults - no extension imports at module load time
 DEFAULTS = {
+    "hoi": g1_29dof_wbt,
     "g1-29dof-loco": g1_29dof_loco,
     "t1-29dof-loco": t1_29dof_loco,
     "g1-29dof-wbt": g1_29dof_wbt,

@@ -15,6 +15,7 @@ from loguru import logger
 from holosoma.bridge import BasicSdk2Bridge, create_sdk2py_bridge
 from holosoma.config_types.simulator import BridgeConfig
 from holosoma.utils.clock import ClockPub
+from holosoma.utils.depth_stream import DepthFramePub
 from holosoma.utils.safe_torch_import import torch
 
 if TYPE_CHECKING:
@@ -53,6 +54,9 @@ class SimulatorBridge:
 
         # Initialize clock publisher for WBT motion synchronization
         self.clock_pub: ClockPub = ClockPub()
+        self.depth_pub: DepthFramePub | None = None
+        self._depth_stream_missing_warned = False
+        self._last_depth_publish_time: float | None = None
 
         if self.bridge_config.interface is None:
             interface = self._auto_detect_interface()
@@ -65,6 +69,9 @@ class SimulatorBridge:
             # Start clock publisher for motion synchronization
             self.clock_pub.start()
             logger.info("Clock publisher initialized for motion synchronization")
+            if self.bridge_config.publish_depth:
+                self.depth_pub = DepthFramePub(port=self.bridge_config.depth_port)
+                self.depth_pub.start()
         else:
             # We don't support runtime toggling on/off
             logger.info("Robot bridge disabled")
@@ -144,6 +151,41 @@ class SimulatorBridge:
         # Publish simulation clock for e.g, WBT policies
         sim_time = self.simulator.time()
         self.clock_pub.publish(sim_time)
+        self._publish_depth_frame(sim_time)
+
+    def _publish_depth_frame(self, sim_time: float) -> None:
+        if self.depth_pub is None:
+            return
+
+        depth_publish_rate_hz = float(getattr(self.bridge_config, "depth_publish_rate_hz", 0.0))
+        if depth_publish_rate_hz > 0.0 and self._last_depth_publish_time is not None:
+            min_publish_period = 1.0 / depth_publish_rate_hz
+            if (
+                sim_time >= self._last_depth_publish_time
+                and sim_time - self._last_depth_publish_time < min_publish_period
+            ):
+                return
+
+        get_depth_frame = getattr(self.simulator, "get_robot_depth_frame", None)
+        if not callable(get_depth_frame):
+            if not self._depth_stream_missing_warned:
+                logger.warning(
+                    "Depth streaming is enabled, but this simulator does not expose get_robot_depth_frame()."
+                )
+                self._depth_stream_missing_warned = True
+            return
+
+        try:
+            depth_frame = get_depth_frame(int(self.bridge_config.depth_env_id))
+        except Exception as exc:
+            if not self._depth_stream_missing_warned:
+                logger.warning(f"Depth streaming is enabled, but no depth frame is available yet: {exc}")
+                self._depth_stream_missing_warned = True
+            return
+
+        sim_time_ms = int(sim_time * 1000)
+        self.depth_pub.publish(depth_frame, sim_time_ms=sim_time_ms)
+        self._last_depth_publish_time = sim_time
 
     def is_enabled(self) -> bool:
         """Check if the bridge is enabled and functional.

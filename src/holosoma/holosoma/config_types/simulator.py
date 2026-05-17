@@ -469,6 +469,18 @@ class BridgeConfig:
     use_ros: bool = False
     """Whether to use ROS for communication."""
 
+    publish_depth: bool = False
+    """Whether to publish robot-mounted simulator depth frames for external inference."""
+
+    depth_port: int = 5556
+    """ZMQ port used to publish simulator depth frames."""
+
+    depth_env_id: int = 0
+    """Environment index used for depth-frame publishing."""
+
+    depth_publish_rate_hz: float = 50.0
+    """Maximum depth-frame publish rate. Set <= 0 to publish every bridge step."""
+
 
 @dataclass(frozen=True)
 class SimulatorInitConfig:

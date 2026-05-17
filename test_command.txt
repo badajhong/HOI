@@ -1,0 +1,23 @@
+nohup bash scripts/setup_mujoco.sh \
+    > setup.log 2>&1 &
+
+source scripts/source_mujoco_setup.sh
+python src/holosoma/holosoma/run_sim.py simulator:mujoco robot:g1_29dof_w_object_multi_teacher \
+    --robot.object.object-urdf-path ./src/holosoma_retargeting/holosoma_retargeting/models/objects/suitcase/suitcase.urdf \
+    --simulator.config.enable-robot-depth-camera True \
+    --simulator.config.bridge.publish-depth True \
+    --simulator.config.bridge.depth-port 5556 \
+    --simulator.config.bridge.depth-publish-rate-hz 50 \
+    --simulator.config.bridge.interface lo
+
+source scripts/source_inference_setup.sh
+python src/holosoma_inference/holosoma_inference/run_policy.py inference:hoi \
+    --task.model-path /home/rllab/haechan/holosoma/logs/20260515_results/model_03000.onnx \
+    --task.no-use-joystick \
+    --task.use-sim-time \
+    --task.rl-rate 50 \
+    --task.interface lo \
+    --task.depth-window-zmq-port 5556 \
+    --task.show-depth-window \
+    --task.depth-window-display-scale 4 \
+    --secondary none

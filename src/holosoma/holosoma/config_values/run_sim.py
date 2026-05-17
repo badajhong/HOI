@@ -36,7 +36,7 @@ isaacsim = dataclasses.replace(
     holosoma.config_values.simulator.isaacsim,
     config=dataclasses.replace(
         holosoma.config_values.simulator.isaacsim.config,
-        bridge=BridgeConfig(enabled=True),
+        bridge=BridgeConfig(enabled=True, publish_depth=True),
         virtual_gantry=VirtualGantryCfg(enabled=True),
         sim=dataclasses.replace(
             holosoma.config_values.simulator.isaacsim.config.sim,

@@ -87,6 +87,30 @@ class TaskConfig:
     depth_window_npy_path: str = ""
     """Optional path to a `.npy` depth window for fused WBT ONNX offline testing."""
 
+    depth_window_zmq_port: int = 5556
+    """ZMQ port used to receive simulator depth frames for fused WBT ONNX inference."""
+
+    depth_window_zmq_host: str = "localhost"
+    """Host used to receive simulator depth frames."""
+
+    depth_window_zmq_timeout_ms: int = 1000
+    """Initial receive timeout for the first simulator depth frame."""
+
+    show_depth_window: bool = False
+    """Show the latest simulator depth frame in an OpenCV debug window."""
+
+    depth_window_display_scale: int = 4
+    """Integer scale factor for the live depth debug window."""
+
+    log_depth_window_input_stats: bool = True
+    """Log the exact depth/proprioception slices that are fed into fused ONNX once per motion start."""
+
+    depth_window_debug_npy_path: str = ""
+    """Optional path to save the first live depth window that is fed into the fused ONNX model."""
+
+    allow_missing_depth_window: bool = False
+    """Allow fused WBT ONNX to run with zero depth when no live/static depth window is available."""
+
     object_type_id: int = 0
     """Object type index used to build `obj_type_one_hot` for residual WBT exports."""
 

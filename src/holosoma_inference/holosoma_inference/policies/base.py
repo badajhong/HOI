@@ -206,6 +206,7 @@ class BasePolicy:
             "policy_callable": self.policy,
             "onnx_kp": self.onnx_kp,
             "onnx_kd": self.onnx_kd,
+            "policy_action_scale": self.policy_action_scale,
         }
 
     def _restore_policy_state(self, state: dict):
@@ -216,6 +217,7 @@ class BasePolicy:
         self.policy = state["policy_callable"]
         self.onnx_kp = state["onnx_kp"]
         self.onnx_kd = state["onnx_kd"]
+        self.policy_action_scale = state.get("policy_action_scale", self.config.task.policy_action_scale)
 
     def _activate_policy(self, index: int, announce: bool = True):
         """Activate a preloaded policy."""
@@ -375,6 +377,7 @@ class BasePolicy:
         # Extract KP/KD from metadata (will be None if not present)
         self.onnx_kp = np.array(metadata["kp"]) if "kp" in metadata else None
         self.onnx_kd = np.array(metadata["kd"]) if "kd" in metadata else None
+        self.policy_action_scale = self._resolve_policy_action_scale_from_metadata(metadata, model_path)
 
         if self.onnx_kp is not None:
             logger.info(f"Loaded KP/KD from ONNX metadata: {Path(model_path).name}")
@@ -391,6 +394,66 @@ class BasePolicy:
             return outputs[0]  # just return outputs[0] as only "action" is needed
 
         self.policy = policy_act
+
+    def _resolve_policy_action_scale_from_metadata(self, metadata: dict, model_path: str):
+        """Recover the training-time action scale from ONNX metadata when possible."""
+        configured_scale = self.config.task.policy_action_scale
+        experiment_config = metadata.get("experiment_config")
+        if not isinstance(experiment_config, dict):
+            return configured_scale
+
+        robot_config = experiment_config.get("robot")
+        if not isinstance(robot_config, dict):
+            return configured_scale
+
+        control_config = robot_config.get("control")
+        if not isinstance(control_config, dict):
+            return configured_scale
+
+        action_scale = float(control_config.get("action_scale", configured_scale))
+        by_effort_over_kp = bool(control_config.get("action_scales_by_effort_limit_over_p_gain", False))
+        if not by_effort_over_kp:
+            if action_scale != float(configured_scale):
+                logger.info(
+                    f"Using scalar policy action scale {action_scale:g} from ONNX metadata: {Path(model_path).name}"
+                )
+            return action_scale
+
+        effort_limits = robot_config.get("dof_effort_limit_list")
+        kp_values = metadata.get("kp")
+        if effort_limits is None or kp_values is None:
+            logger.warning(
+                "ONNX metadata says action scales depend on effort_limit/kp, but effort limits or kp are missing. "
+                f"Using configured policy_action_scale={configured_scale}."
+            )
+            return configured_scale
+
+        effort_limits = np.asarray(effort_limits, dtype=np.float32)
+        kp_values = np.asarray(kp_values, dtype=np.float32)
+        if effort_limits.shape != (self.num_dofs,) or kp_values.shape != (self.num_dofs,):
+            logger.warning(
+                "ONNX metadata action-scale arrays do not match robot DOFs: "
+                f"effort={effort_limits.shape}, kp={kp_values.shape}, num_dofs={self.num_dofs}. "
+                f"Using configured policy_action_scale={configured_scale}."
+            )
+            return configured_scale
+
+        metadata_dof_names = metadata.get("dof_names")
+        if metadata_dof_names is not None and list(metadata_dof_names) != list(self.dof_names):
+            logger.warning(
+                "ONNX metadata DOF order differs from the inference robot config. "
+                f"Using configured policy_action_scale={configured_scale} instead of metadata action scales."
+            )
+            return configured_scale
+
+        safe_kp = np.where(np.abs(kp_values) > 1e-6, kp_values, np.inf)
+        resolved_scale = (action_scale * effort_limits / safe_kp).astype(np.float32).reshape(1, self.num_dofs)
+        logger.info(
+            "Using per-joint policy action scales from ONNX metadata "
+            f"({Path(model_path).name}): min={float(resolved_scale.min()):.4f}, "
+            f"max={float(resolved_scale.max()):.4f}, mean={float(resolved_scale.mean()):.4f}"
+        )
+        return resolved_scale
 
     def _resolve_control_gains(self):
         """Resolve KP/KD values with priority: config override > ONNX metadata > error.

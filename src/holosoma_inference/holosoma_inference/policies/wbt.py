@@ -15,6 +15,7 @@ from holosoma_inference.config.config_types.observation import ObservationConfig
 from holosoma_inference.policies import BasePolicy
 from holosoma_inference.policies.wbt_utils import MotionClockUtil, PinocchioRobot, TimestepUtil
 from holosoma_inference.utils.clock import ClockSub
+from holosoma_inference.utils.depth_stream import DepthWindowSub
 from holosoma_inference.utils.math.quat import (
     matrix_from_quat,
     quat_mul,
@@ -38,6 +39,14 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._di_model_path: str | None = None
         self._static_di_latent: np.ndarray | None = None
         self._static_depth_window: np.ndarray | None = None
+        self._depth_window_sub: DepthWindowSub | None = None
+        self._missing_depth_window_warned = False
+        self._proprioception_window: np.ndarray | None = None
+        self._proprioception_initialized = False
+        self._waiting_for_motion_clip_logged = False
+        self._policy_armed = False
+        self._logged_fused_input_stats = False
+        self._saved_debug_depth_window = False
 
         # initialize motion state
         self.motion_clip_progressing = False
@@ -180,6 +189,35 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return ""
         return str(self._residual_fused_export_spec.get("di_encoder_mode", "fused"))
 
+    def _uses_fused_proprioception_window(self) -> bool:
+        if self._residual_fused_export_spec is None:
+            return False
+        return bool(self._residual_fused_export_spec.get("uses_proprioception_window", False))
+
+    def _reset_proprioception_window(self) -> None:
+        self._proprioception_window = None
+        self._proprioception_initialized = False
+
+    def _close_depth_window_subscriber(self) -> None:
+        if self._depth_window_sub is not None:
+            self._depth_window_sub.close()
+            self._depth_window_sub = None
+
+    def _start_depth_window_subscriber(self, export_spec: dict) -> None:
+        depth_shape = tuple(int(value) for value in export_spec["depth_window_shape"])
+        if self.config.task.depth_window_zmq_port <= 0:
+            return
+
+        self._depth_window_sub = DepthWindowSub(
+            port=self.config.task.depth_window_zmq_port,
+            host=self.config.task.depth_window_zmq_host,
+            timeout_ms=self.config.task.depth_window_zmq_timeout_ms,
+            expected_shape=depth_shape,
+            show_window=self.config.task.show_depth_window,
+            display_scale=self.config.task.depth_window_display_scale,
+        )
+        self._depth_window_sub.start()
+
     def _maybe_resolve_di_model_path(self, model_path: str, export_spec: dict) -> str | None:
         if self.config.task.di_model_path:
             return self.config.task.di_model_path
@@ -200,6 +238,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._di_model_path = self._maybe_resolve_di_model_path(model_path, export_spec)
         self._static_di_latent = None
         self._static_depth_window = None
+        self._depth_window_sub = None
+        self._missing_depth_window_warned = False
+        self._reset_proprioception_window()
 
         latent_dim = int(export_spec["latent_dim"])
         if self.config.task.di_latent_path:
@@ -218,6 +259,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
             depth_window = np.asarray(np.load(self.config.task.depth_window_npy_path), dtype=np.float32)
             self._static_depth_window = self._prepare_depth_window_input(depth_window)
             logger.info(f"Loaded static depth window override: {self.config.task.depth_window_npy_path}")
+        elif self._static_di_latent is None:
+            self._start_depth_window_subscriber(export_spec)
 
         if self._di_model_path:
             self._di_onnx_session = onnxruntime.InferenceSession(self._di_model_path)
@@ -238,10 +281,16 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._di_model_path = None
         self._static_di_latent = None
         self._static_depth_window = None
+        self._depth_window_sub = None
+        self._missing_depth_window_warned = False
+        self._reset_proprioception_window()
         if self.config.task.depth_window_npy_path:
             depth_window = np.asarray(np.load(self.config.task.depth_window_npy_path), dtype=np.float32)
             self._static_depth_window = self._prepare_depth_window_input(depth_window)
             logger.info(f"Loaded static depth window override: {self.config.task.depth_window_npy_path}")
+            return
+
+        self._start_depth_window_subscriber(self._residual_fused_export_spec)
 
     def _prepare_depth_window_input(self, depth_window: np.ndarray) -> np.ndarray:
         depth_window_np = np.asarray(depth_window, dtype=np.float32)
@@ -251,7 +300,15 @@ class WholeBodyTrackingPolicy(BasePolicy):
             raise ValueError(
                 f"Expected depth window shape [T, H, W] or [1, T, H, W], got {depth_window_np.shape}."
             )
-        return depth_window_np.astype(np.float32, copy=False)
+        if self._residual_fused_export_spec is not None:
+            expected_shape = tuple(int(value) for value in self._residual_fused_export_spec["depth_window_shape"])
+            actual_shape = tuple(int(value) for value in depth_window_np.shape[1:])
+            if actual_shape == (expected_shape[0], expected_shape[2], expected_shape[1]):
+                depth_window_np = depth_window_np.transpose(0, 1, 3, 2)
+                actual_shape = tuple(int(value) for value in depth_window_np.shape[1:])
+            if actual_shape != expected_shape:
+                raise ValueError(f"Expected depth window shape [1, {expected_shape}], got {depth_window_np.shape}.")
+        return np.ascontiguousarray(depth_window_np, dtype=np.float32)
 
     def _get_current_depth_window(self) -> np.ndarray | None:
         if self._static_depth_window is not None:
@@ -261,9 +318,129 @@ class WholeBodyTrackingPolicy(BasePolicy):
         if callable(get_depth_window):
             depth_window = get_depth_window()
             if depth_window is None:
+                pass
+            else:
+                return self._prepare_depth_window_input(depth_window)
+        if self._depth_window_sub is not None:
+            depth_window = self._depth_window_sub.get_depth_window()
+            if depth_window is None:
                 return None
             return self._prepare_depth_window_input(depth_window)
         return None
+
+    def _maybe_log_fused_model_input(
+        self,
+        shared_obs: np.ndarray,
+        depth_window: np.ndarray,
+        proprioception_window: np.ndarray | None,
+        actor_obs: np.ndarray,
+    ) -> None:
+        if not self.config.task.log_depth_window_input_stats or self._logged_fused_input_stats:
+            return
+
+        finite_depth = depth_window[np.isfinite(depth_window) & (depth_window > 0.0)]
+        if finite_depth.size:
+            depth_stats = (
+                f"shape={depth_window.shape}, min={float(finite_depth.min()):.4f}, "
+                f"max={float(finite_depth.max()):.4f}, mean={float(finite_depth.mean()):.4f}, "
+                f"valid_ratio={finite_depth.size / depth_window.size:.4f}"
+            )
+        else:
+            depth_stats = f"shape={depth_window.shape}, no positive finite pixels"
+
+        proprio_stats = "none"
+        if proprioception_window is not None:
+            proprio_stats = (
+                f"shape={proprioception_window.shape}, min={float(np.min(proprioception_window)):.4f}, "
+                f"max={float(np.max(proprioception_window)):.4f}, mean={float(np.mean(proprioception_window)):.4f}"
+            )
+
+        logger.info(
+            "Fused ONNX input check: "
+            f"shared_obs_shape={shared_obs.shape}, depth=({depth_stats}), "
+            f"proprio=({proprio_stats}), actor_obs_shape={actor_obs.shape}"
+        )
+
+        debug_path = self.config.task.depth_window_debug_npy_path
+        if debug_path and not self._saved_debug_depth_window:
+            np.save(debug_path, depth_window)
+            logger.info(f"Saved first fused ONNX depth window to {debug_path}")
+            self._saved_debug_depth_window = True
+
+        self._logged_fused_input_stats = True
+
+    def _get_fused_depth_window_or_zeros(self) -> np.ndarray:
+        depth_window = self._get_current_depth_window()
+        if depth_window is not None:
+            return depth_window
+
+        if self._residual_fused_export_spec is None:
+            raise RuntimeError("Residual fused export spec is missing.")
+
+        depth_shape = tuple(int(value) for value in self._residual_fused_export_spec["depth_window_shape"])
+        if not self.config.task.allow_missing_depth_window:
+            if self._depth_window_sub is None:
+                raise RuntimeError(
+                    "Fused residual WBT ONNX requires a depth window, but no depth provider is configured. "
+                    "Start a simulator bridge that publishes depth, pass `--task.depth-window-npy-path`, or set "
+                    "`--task.allow-missing-depth-window` only for unsafe debugging with zero depth."
+                )
+            raise RuntimeError(
+                "Fused residual WBT ONNX requires a live depth window, but no simulator depth frame has arrived on "
+                f"ZMQ port {self.config.task.depth_window_zmq_port}. Start the simulator bridge depth "
+                "publisher before starting the policy, or set `--task.allow-missing-depth-window` only for unsafe "
+                "debugging with zero depth."
+            )
+
+        if not self._missing_depth_window_warned:
+            if self._depth_window_sub is None:
+                logger.warning(
+                    "Fused residual WBT ONNX needs a depth window, but no depth provider was found. "
+                    "Using a zero depth window so inference can start. For meaningful HOI behavior, provide "
+                    "`--task.depth-window-npy-path`, a simulator depth ZMQ publisher, or an interface exposing "
+                    "`get_depth_window()`."
+                )
+            else:
+                logger.warning(
+                    "Fused residual WBT ONNX needs a depth window, but no simulator depth frame has arrived on "
+                    f"ZMQ port {self.config.task.depth_window_zmq_port} yet. Using zeros until frames arrive."
+                )
+            self._missing_depth_window_warned = True
+        return np.zeros((1, *depth_shape), dtype=np.float32)
+
+    def _get_current_proprioception(self, robot_state_data: np.ndarray) -> np.ndarray:
+        if self.config.task.debug.force_zero_angular_velocity:
+            base_ang_vel = np.zeros((1, 3), dtype=np.float32)
+        else:
+            base_ang_vel = robot_state_data[:, 7 + self.num_dofs + 3 : 7 + self.num_dofs + 6]
+        dof_pos = robot_state_data[:, 7 : 7 + self.num_dofs] - self.default_dof_angles
+        dof_vel = robot_state_data[:, 7 + self.num_dofs + 6 : 7 + self.num_dofs + 6 + self.num_dofs]
+        return np.concatenate([base_ang_vel, dof_pos, dof_vel], axis=1).astype(np.float32, copy=False)
+
+    def _get_current_proprioception_window(self, robot_state_data: np.ndarray) -> np.ndarray:
+        if self._residual_fused_export_spec is None:
+            raise RuntimeError("Residual fused export spec is missing.")
+
+        proprioception_shape = self._residual_fused_export_spec.get("proprioception_window_shape")
+        if proprioception_shape is None:
+            raise RuntimeError("Fused export does not declare a proprioception_window_shape.")
+        window_size, feature_dim = (int(value) for value in proprioception_shape)
+
+        proprioception = self._get_current_proprioception(robot_state_data)
+        if proprioception.shape != (1, feature_dim):
+            raise ValueError(f"Expected proprioception shape (1, {feature_dim}), got {proprioception.shape}.")
+
+        if self._proprioception_window is None:
+            self._proprioception_window = np.zeros((1, window_size, feature_dim), dtype=np.float32)
+
+        if not self._proprioception_initialized:
+            self._proprioception_window[:] = np.repeat(proprioception[:, None, :], window_size, axis=1)
+            self._proprioception_initialized = True
+        else:
+            self._proprioception_window[:, :-1, :] = self._proprioception_window[:, 1:, :].copy()
+            self._proprioception_window[:, -1, :] = proprioception
+
+        return self._proprioception_window.copy()
 
     def _get_di_latent(self) -> np.ndarray:
         assert self._residual_fused_export_spec is not None
@@ -327,6 +504,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         self.onnx_kp = np.array(metadata["kp"]) if "kp" in metadata else None
         self.onnx_kd = np.array(metadata["kd"]) if "kd" in metadata else None
+        self.policy_action_scale = self._resolve_policy_action_scale_from_metadata(metadata, model_path)
         self._residual_fused_export_spec = None
         self._uses_residual_fused_export = False
         self._apply_observation_config(self._default_observation_config)
@@ -361,7 +539,11 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 assert self._residual_fused_export_spec is not None
                 depth_flat_dim = int(self._residual_fused_export_spec["depth_window_flat_dim"])
                 depth_flat = np.zeros((1, depth_flat_dim), dtype=np.float32)
-                obs = np.concatenate([shared_obs_template, depth_flat], axis=1).astype(np.float32, copy=False)
+                obs_parts = [shared_obs_template, depth_flat]
+                if self._uses_fused_proprioception_window():
+                    proprio_flat_dim = int(self._residual_fused_export_spec["proprioception_window_flat_dim"])
+                    obs_parts.append(np.zeros((1, proprio_flat_dim), dtype=np.float32))
+                obs = np.concatenate(obs_parts, axis=1).astype(np.float32, copy=False)
             else:
                 latent_template = self.obs_buf_dict.get("di_ae_latent")
                 if latent_template is None:
@@ -406,6 +588,15 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 "di_model_path": self._di_model_path,
                 "static_di_latent": None if self._static_di_latent is None else self._static_di_latent.copy(),
                 "static_depth_window": None if self._static_depth_window is None else self._static_depth_window.copy(),
+                "depth_window_sub": self._depth_window_sub,
+                "missing_depth_window_warned": self._missing_depth_window_warned,
+                "proprioception_window": (
+                    None if self._proprioception_window is None else self._proprioception_window.copy()
+                ),
+                "proprioception_initialized": self._proprioception_initialized,
+                "policy_armed": self._policy_armed,
+                "logged_fused_input_stats": self._logged_fused_input_stats,
+                "saved_debug_depth_window": self._saved_debug_depth_window,
             }
         )
         return state
@@ -423,12 +614,21 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._static_di_latent = None if static_di_latent is None else static_di_latent.copy()
         static_depth_window = state.get("static_depth_window")
         self._static_depth_window = None if static_depth_window is None else static_depth_window.copy()
+        self._depth_window_sub = state.get("depth_window_sub")
+        self._missing_depth_window_warned = bool(state.get("missing_depth_window_warned", False))
+        proprioception_window = state.get("proprioception_window")
+        self._proprioception_window = None if proprioception_window is None else proprioception_window.copy()
+        self._proprioception_initialized = bool(state.get("proprioception_initialized", False))
         self.motion_command_0 = state["motion_command_0"].copy()
         self.ref_quat_xyzw_0 = state["ref_quat_xyzw_0"].copy()
         self.motion_clip_progressing = False
         self.timestep_util.reset(start_timestep=0)
         self.curr_motion_timestep = self.timestep_util.timestep
         self.robot_yaw_offset = 0.0
+        self._waiting_for_motion_clip_logged = False
+        self._policy_armed = bool(state.get("policy_armed", False))
+        self._logged_fused_input_stats = bool(state.get("logged_fused_input_stats", False))
+        self._saved_debug_depth_window = bool(state.get("saved_debug_depth_window", False))
 
     def _on_policy_switched(self, model_path: str):
         super()._on_policy_switched(model_path)
@@ -438,7 +638,13 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.timestep_util.reset(start_timestep=0)
         self.curr_motion_timestep = self.timestep_util.timestep
         self._stiff_hold_active = True
+        self._policy_armed = False
         self.robot_yaw_offset = 0.0
+        self._waiting_for_motion_clip_logged = False
+        self._logged_fused_input_stats = False
+        self._reset_proprioception_window()
+        if self._depth_window_sub is not None:
+            self._depth_window_sub.reset()
 
     def get_init_target(self, robot_state_data):
         """Get initialization target joint positions."""
@@ -499,18 +705,15 @@ class WholeBodyTrackingPolicy(BasePolicy):
         if "shared_obs" not in group_outputs:
             raise KeyError("Residual fused WBT policy requires 'shared_obs' observation group.")
         shared_obs = group_outputs["shared_obs"].astype(np.float32, copy=False)
+        depth_window = None
+        proprioception_window = None
         if self._residual_di_mode() == "fused":
-            depth_window = self._get_current_depth_window()
-            if depth_window is None:
-                raise RuntimeError(
-                    "Fused residual WBT ONNX requires a depth window. "
-                    "Provide `--task.depth-window-npy-path` for offline testing or expose "
-                    "`interface.get_depth_window()` in the runtime interface."
-                )
-            actor_obs = np.concatenate(
-                [shared_obs, depth_window.reshape(depth_window.shape[0], -1)],
-                axis=1,
-            ).astype(np.float32, copy=False)
+            depth_window = self._get_fused_depth_window_or_zeros()
+            obs_parts = [shared_obs, depth_window.reshape(depth_window.shape[0], -1)]
+            if self._uses_fused_proprioception_window():
+                proprioception_window = self._get_current_proprioception_window(robot_state_data)
+                obs_parts.append(proprioception_window.reshape(proprioception_window.shape[0], -1))
+            actor_obs = np.concatenate(obs_parts, axis=1).astype(np.float32, copy=False)
         else:
             if "di_ae_latent" not in group_outputs:
                 raise KeyError("Residual fused WBT policy requires 'di_ae_latent' group in separate mode.")
@@ -519,6 +722,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         obs_dict = dict(group_outputs)
         obs_dict["actor_obs"] = actor_obs
+        if depth_window is not None:
+            self._maybe_log_fused_model_input(shared_obs, depth_window, proprioception_window, actor_obs)
         return obs_dict
 
     def rl_inference(self, robot_state_data):
@@ -527,6 +732,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
             # Keep motion index pinned at the configured start while waiting to trigger the clip.
             self.timestep_util.reset(start_timestep=self.config.task.motion_start_timestep)
             self.curr_motion_timestep = self.timestep_util.timestep
+            if not self._waiting_for_motion_clip_logged:
+                self.logger.info("Policy running at fixed start timestep; press `s` to play the motion clip.")
+                self._waiting_for_motion_clip_logged = True
 
         obs = self.prepare_obs_for_rl(robot_state_data)
         if self.config.task.print_observations:
@@ -549,6 +757,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
     def _get_manual_command(self, robot_state_data):
         # TODO: instead of adding kp/kd_override in def _set_motor_command,
         # just use the motor_kp/motor_kd when calling it in _fill_motor_commands
+        if self.config.task.show_depth_window and self._policy_armed:
+            self._get_current_depth_window()
         if not self._stiff_hold_active:
             return None
         return {
@@ -560,6 +770,17 @@ class WholeBodyTrackingPolicy(BasePolicy):
     def _handle_start_policy(self):
         super()._handle_start_policy()
         self._stiff_hold_active = False
+        self._policy_armed = True
+        self.motion_clip_progressing = False
+        self.timestep_util.reset(start_timestep=self.config.task.motion_start_timestep)
+        self.curr_motion_timestep = self.timestep_util.timestep
+        self.ref_quat_xyzw_t = self.ref_quat_xyzw_0.copy()
+        self.motion_command_t = self.motion_command_0.copy()
+        self._waiting_for_motion_clip_logged = False
+        self._logged_fused_input_stats = False
+        self._reset_proprioception_window()
+        if self._depth_window_sub is not None:
+            self._depth_window_sub.reset()
         self._capture_robot_yaw_offset()
         self._capture_motion_yaw_offset(self.ref_quat_xyzw_0)
 
@@ -586,6 +807,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.use_policy_action = False
         self.get_ready_state = False
         self._stiff_hold_active = True
+        self._policy_armed = False
         self.logger.info("Actions set to stiff startup command")
         if hasattr(self.interface, "no_action"):
             self.interface.no_action = 0
@@ -596,12 +818,28 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.ref_quat_xyzw_t = self.ref_quat_xyzw_0.copy()
         self.motion_command_t = self.motion_command_0.copy()
         self.robot_yaw_offset = 0.0
+        self._waiting_for_motion_clip_logged = False
+        self._logged_fused_input_stats = False
+        self._reset_proprioception_window()
+        if self._depth_window_sub is not None:
+            self._depth_window_sub.reset()
 
     def _handle_start_motion_clip(self):
         """Handle start motion clip action."""
+        self.use_policy_action = True
+        self.get_ready_state = False
+        self._stiff_hold_active = False
+        self._policy_armed = True
         self.timestep_util.reset(start_timestep=self.config.task.motion_start_timestep)
         self.curr_motion_timestep = self.timestep_util.timestep
         self.motion_clip_progressing = True
+        self._waiting_for_motion_clip_logged = False
+        self._logged_fused_input_stats = False
+        self._capture_robot_yaw_offset()
+        self._capture_motion_yaw_offset(self.ref_quat_xyzw_0)
+        self._reset_proprioception_window()
+        if self._depth_window_sub is not None:
+            self._depth_window_sub.reset()
 
         if self.config.task.motion_start_timestep > 0 or self.config.task.motion_end_timestep is not None:
             start_str = str(self.config.task.motion_start_timestep)

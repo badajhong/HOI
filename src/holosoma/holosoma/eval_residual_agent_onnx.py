@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import json
 import math
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
+import numpy as np
+import onnx
+import onnxruntime as ort
 import tyro
 from loguru import logger
 from pydantic.dataclasses import dataclass
@@ -15,6 +20,7 @@ from holosoma.agents.base_algo.base_algo import BaseAlgo
 from holosoma.config_types.command import MotionConfig
 from holosoma.config_types.env import resolve_observation_term_overrides
 from holosoma.config_types.experiment import ExperimentConfig
+from holosoma.config_types.observation import ObservationManagerCfg, ObsGroupCfg, ObsTermCfg
 from holosoma.config_types.randomization import RandomizationManagerCfg, RandomizationTermCfg
 from holosoma.eval_student_agent import StudentEvalConfig, _resolve_device
 from holosoma.utils.config_utils import CONFIG_NAME
@@ -27,20 +33,34 @@ from holosoma.utils.eval_utils import (
 from holosoma.utils.experiment_paths import get_experiment_dir, get_timestamp
 from holosoma.utils.helpers import get_class
 from holosoma.utils.object_urdf import resolve_multi_object_urdf_config
+from holosoma.utils.rotations import quat_rotate_inverse
 from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.sim_utils import close_simulation_app, setup_simulation_environment
 from holosoma.utils.tyro_utils import TYRO_CONIFG
 
-DEFAULT_CHECKPOINT = "/home/rllab/haechan/holosoma/logs/20260515_results/model_03000.pt"
+DEFAULT_CHECKPOINT = "/home/rllab/haechan/holosoma/logs/20260515_results/model_03000.onnx"
 DEFAULT_OBJECT_SCALE = 0.6
 DEFAULT_OBJECT_SCALE_EVAL_VALUES: tuple[float, ...] = ()
 DEFAULT_OBJECT_DYNAMIC_FRICTION = 0.2
 DEFAULT_OBJECT_STATIC_FRICTION = 0.2
+FUSED_RESIDUAL_ONNX_KIND = "wbt_student_residual_fused"
 
 @dataclass(frozen=True)
 class ResidualEvalConfig(StudentEvalConfig):
     checkpoint: str | None = DEFAULT_CHECKPOINT
-    """Residual checkpoint to evaluate."""
+    """Residual checkpoint to evaluate. Prefer a fused .onnx for this script."""
+
+    motion_file: str | None = None
+    """Optional motion override. None uses the motion config embedded in ONNX metadata/saved config."""
+
+    motion_folder: str | None = None
+    """Optional motion-folder override. None uses the saved config."""
+
+    object_urdf_path: str | None = None
+    """Optional object URDF override. None uses the saved config."""
+
+    di_pro_ae: str | None = None
+    """Disabled by default for ONNX eval because the DI-pro encoder is embedded in the fused ONNX."""
 
     num_envs: int | None = 1
     """Override evaluation environment count."""
@@ -623,6 +643,116 @@ def _resolve_eval_config(config: ExperimentConfig, cli_cfg: ResidualEvalConfig) 
     return _apply_fixed_object_friction(config, cli_cfg)
 
 
+def _is_onnx_checkpoint(checkpoint: str | None) -> bool:
+    return bool(checkpoint) and str(checkpoint).lower().endswith(".onnx")
+
+
+def _json_metadata_value(raw_value: str) -> Any:
+    try:
+        return json.loads(raw_value)
+    except json.JSONDecodeError:
+        return raw_value
+
+
+def _load_onnx_metadata(onnx_path: str | Path) -> dict[str, Any]:
+    model = onnx.load(str(onnx_path), load_external_data=False)
+    return {entry.key: _json_metadata_value(entry.value) for entry in model.metadata_props}
+
+
+def _load_onnx_experiment_config(onnx_path: str | Path) -> tuple[ExperimentConfig, str | None, dict[str, Any]]:
+    metadata = _load_onnx_metadata(onnx_path)
+    config_data = metadata.get("experiment_config")
+    if not isinstance(config_data, dict):
+        raise ValueError(
+            f"ONNX checkpoint '{onnx_path}' does not contain an experiment_config metadata entry. "
+            "Re-export the policy from a checkpoint that saves ONNX metadata."
+        )
+
+    export_spec = metadata.get("policy_export_spec")
+    if not isinstance(export_spec, dict):
+        raise ValueError(
+            f"ONNX checkpoint '{onnx_path}' does not contain policy_export_spec metadata. "
+            "This evaluator needs the fused-policy input layout."
+        )
+    if export_spec.get("kind") != FUSED_RESIDUAL_ONNX_KIND:
+        raise ValueError(
+            f"Unsupported ONNX policy kind '{export_spec.get('kind')}'. "
+            f"Expected '{FUSED_RESIDUAL_ONNX_KIND}'."
+        )
+
+    return ExperimentConfig(**config_data), metadata.get("wandb_run_path"), metadata
+
+
+def _minimal_onnx_observation_config(config: ExperimentConfig) -> ObservationManagerCfg:
+    clip_observations = 100.0
+    if config.observation is not None:
+        clip_observations = config.observation.clip_observations
+
+    return ObservationManagerCfg(
+        groups={
+            "actor_obs": ObsGroupCfg(
+                concatenate=True,
+                enable_noise=False,
+                history_length=1,
+                terms={
+                    "base_ang_vel": ObsTermCfg(
+                        func="holosoma.managers.observation.terms.wbt:base_ang_vel",
+                        scale=1.0,
+                        noise=0.0,
+                    )
+                },
+            )
+        },
+        clip_observations=clip_observations,
+    )
+
+
+def _enable_robot_depth_camera(config: ExperimentConfig) -> ExperimentConfig:
+    simulator_init_config = dataclasses.replace(config.simulator.config, enable_robot_depth_camera=True)
+    return dataclasses.replace(config, simulator=dataclasses.replace(config.simulator, config=simulator_init_config))
+
+
+def _resolve_onnx_eval_config(config: ExperimentConfig, cli_cfg: ResidualEvalConfig) -> ExperimentConfig:
+    """Prepare the simulator config for direct ONNXRuntime inference.
+
+    The fused ONNX embeds the frozen student actor and DI/DI-pro encoder, so the
+    environment observation manager must not instantiate those checkpoint-backed
+    terms during eval. WBT reset/reward still use the motion_command config from
+    the saved run because the current ONNX export does not contain the full body
+    and object trajectories required by MotionCommand.
+    """
+    has_motion_override = (
+        cli_cfg.motion_file is not None
+        or cli_cfg.motion_folder is not None
+        or cli_cfg.start_at_timestep_zero_prob is not None
+    )
+    if has_motion_override:
+        config = _apply_motion_overrides(config, cli_cfg)
+    config = _apply_object_overrides(config, cli_cfg)
+    config = _apply_training_overrides(config, cli_cfg)
+    config = _apply_simulator_overrides(config, cli_cfg)
+    config = _apply_object_randomization_overrides(config, cli_cfg)
+    config = _apply_robot_randomization_overrides(config, cli_cfg)
+    config = _apply_fixed_object_friction(config, cli_cfg)
+    config = _enable_robot_depth_camera(config)
+    return dataclasses.replace(
+        config,
+        teacher=None,
+        student=None,
+        ir_ae=None,
+        ir_ae_body_source=None,
+        di_ae=None,
+        di_pro_ae=None,
+        observation=_minimal_onnx_observation_config(config),
+    )
+
+
+def _append_enable_cameras_arg_for_onnx() -> None:
+    if "--enable_cameras" not in sys.argv:
+        sys.argv.append("--enable_cameras")
+        logger.info("Enabled IsaacSim cameras for fused ONNX depth input via --enable_cameras.")
+
+
 def _make_actor_state(algo: BaseAlgo) -> dict[str, Any]:
     if not all(hasattr(algo, attr) for attr in ("actor_obs_keys", "critic_obs_keys", "num_act")):
         raise TypeError(f"{algo.__class__.__name__} does not expose the PPO eval interface.")
@@ -716,6 +846,407 @@ def watch_residual_policy(algo: BaseAlgo, log_interval: int = 100) -> None:
         algo._post_evaluate_policy()  # type: ignore[attr-defined]
 
 
+class FusedResidualOnnxRuntimePolicy:
+    """Direct ONNXRuntime runner for the fused residual/student/DI policy export."""
+
+    def __init__(self, onnx_path: str | Path, export_spec: dict[str, Any], env: Any, device: str):
+        if env.num_envs != 1:
+            raise ValueError(
+                "The current fused ONNX export has a fixed batch size of 1. "
+                f"Run ONNX eval with --num-envs=1, got {env.num_envs}."
+            )
+
+        available_providers = ort.get_available_providers()
+        providers = ["CPUExecutionProvider"]
+        if device.startswith("cuda") and "CUDAExecutionProvider" in available_providers:
+            providers.insert(0, "CUDAExecutionProvider")
+        self.session = ort.InferenceSession(str(onnx_path), providers=providers)
+        self.output_names = [output.name for output in self.session.get_outputs()]
+
+        input_names = [input_info.name for input_info in self.session.get_inputs()]
+        if "obs" not in input_names or "time_step" not in input_names:
+            raise ValueError(f"Expected ONNX inputs ['obs', 'time_step'], got {input_names}.")
+        self.obs_input_name = "obs"
+        self.time_input_name = "time_step"
+
+        self.device = device
+        self.export_spec = export_spec
+        self.num_envs = int(env.num_envs)
+        self.num_actions = int(export_spec["num_actions"])
+        self.input_dim = int(self.session.get_inputs()[input_names.index("obs")].shape[1])
+        self.shared_obs_dims = {str(k): int(v) for k, v in export_spec["shared_obs_dims"].items()}
+        self.shared_obs_scales = dict(export_spec.get("shared_obs_scales") or {})
+        metadata_terms = [str(term) for term in export_spec["shared_obs_terms"]]
+        self.shared_obs_terms = sorted(metadata_terms)
+        if metadata_terms != self.shared_obs_terms:
+            logger.info(
+                "Using alphabetic observation term order for ONNX input to match ObservationManager: "
+                f"{self.shared_obs_terms}"
+            )
+
+        self.depth_shape = tuple(int(value) for value in export_spec["depth_window_shape"])
+        self.depth_window = torch.zeros(self.num_envs, *self.depth_shape, device=device, dtype=torch.float32)
+        self.depth_initialized = torch.zeros(self.num_envs, device=device, dtype=torch.bool)
+
+        proprioception_shape = export_spec.get("proprioception_window_shape")
+        self.proprioception_shape = (
+            tuple(int(value) for value in proprioception_shape) if proprioception_shape is not None else None
+        )
+        if self.proprioception_shape is not None:
+            self.proprioception_window = torch.zeros(
+                self.num_envs,
+                *self.proprioception_shape,
+                device=device,
+                dtype=torch.float32,
+            )
+            self.proprioception_initialized = torch.zeros(self.num_envs, device=device, dtype=torch.bool)
+        else:
+            self.proprioception_window = None
+            self.proprioception_initialized = None
+
+        self.real_object_scale_dim = int(export_spec.get("real_object_scale_dim") or 0)
+        if self.real_object_scale_dim:
+            raise NotImplementedError(
+                "This ONNX eval path does not yet support fused exports that require real_object_scale input."
+            )
+
+        self.prev_actions = torch.zeros(self.num_envs, self.num_actions, device=device, dtype=torch.float32)
+        expected_input_dim = (
+            sum(self.shared_obs_dims.values())
+            + int(export_spec["depth_window_flat_dim"])
+            + int(export_spec.get("proprioception_window_flat_dim") or 0)
+            + self.real_object_scale_dim
+        )
+        if expected_input_dim != self.input_dim:
+            raise ValueError(
+                f"ONNX metadata input dim {expected_input_dim} does not match graph input {self.input_dim}."
+            )
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        if env_ids is None:
+            self.prev_actions.zero_()
+            self.depth_window.zero_()
+            self.depth_initialized.zero_()
+            if self.proprioception_window is not None and self.proprioception_initialized is not None:
+                self.proprioception_window.zero_()
+                self.proprioception_initialized.zero_()
+            return
+
+        env_ids = env_ids.to(device=self.device, dtype=torch.long)
+        if env_ids.numel() == 0:
+            return
+        self.prev_actions[env_ids] = 0.0
+        self.depth_window[env_ids] = 0.0
+        self.depth_initialized[env_ids] = False
+        if self.proprioception_window is not None and self.proprioception_initialized is not None:
+            self.proprioception_window[env_ids] = 0.0
+            self.proprioception_initialized[env_ids] = False
+
+    def _run_session(self, obs: torch.Tensor, time_steps: torch.Tensor) -> dict[str, torch.Tensor]:
+        obs_np = obs.detach().cpu().numpy().astype(np.float32, copy=False)
+        time_np = time_steps.detach().view(self.num_envs, 1).cpu().numpy().astype(np.float32, copy=False)
+        outputs = self.session.run(
+            self.output_names,
+            {
+                self.obs_input_name: obs_np,
+                self.time_input_name: time_np,
+            },
+        )
+        return {
+            name: torch.as_tensor(value, device=self.device, dtype=torch.float32)
+            for name, value in zip(self.output_names, outputs, strict=True)
+        }
+
+    def _lookup_embedded_motion(self, time_steps: torch.Tensor) -> dict[str, torch.Tensor]:
+        dummy_obs = torch.zeros(self.num_envs, self.input_dim, device=self.device, dtype=torch.float32)
+        return self._run_session(dummy_obs, time_steps)
+
+    def _current_time_steps(self, env: Any, fallback_step: int) -> torch.Tensor:
+        motion_command = None
+        if getattr(env, "command_manager", None) is not None:
+            motion_command = env.command_manager.get_state("motion_command")
+        if motion_command is not None and hasattr(motion_command, "time_steps"):
+            return motion_command.time_steps.detach().to(device=self.device, dtype=torch.float32)
+        return torch.full((self.num_envs,), float(fallback_step), device=self.device, dtype=torch.float32)
+
+    def _read_depth_frames(self, env: Any) -> torch.Tensor:
+        depth_camera = getattr(env.simulator, "robot_depth_camera", None)
+        if depth_camera is None:
+            raise RuntimeError(
+                "Fused ONNX policy needs live robot depth frames, but simulator.robot_depth_camera is missing."
+            )
+
+        depth_output = depth_camera.data.output.get("distance_to_image_plane")
+        if depth_output is None:
+            raise RuntimeError("Robot depth camera has no 'distance_to_image_plane' output.")
+
+        depth_frames = depth_output.to(device=self.device, dtype=torch.float32)
+        if depth_frames.ndim == 4 and depth_frames.shape[-1] == 1:
+            depth_frames = depth_frames[..., 0]
+        if depth_frames.ndim != 3:
+            raise RuntimeError(f"Unexpected robot depth batch shape {tuple(depth_frames.shape)}.")
+
+        _, expected_height, expected_width = self.depth_shape
+        if depth_frames.shape[1:] == (expected_width, expected_height):
+            depth_frames = depth_frames.transpose(1, 2)
+        if depth_frames.shape[1:] != (expected_height, expected_width):
+            raise RuntimeError(
+                f"Unexpected robot depth spatial shape {tuple(depth_frames.shape[1:])}; "
+                f"expected {(expected_height, expected_width)}."
+            )
+        return torch.nan_to_num(depth_frames, nan=0.0, posinf=0.0, neginf=0.0)
+
+    def _update_depth_window(self, env: Any) -> torch.Tensor:
+        depth_frames = self._read_depth_frames(env)
+        new_mask = ~self.depth_initialized
+        if torch.any(new_mask):
+            self.depth_window[new_mask] = depth_frames[new_mask].unsqueeze(1).repeat(1, self.depth_shape[0], 1, 1)
+
+        existing_mask = self.depth_initialized
+        if torch.any(existing_mask):
+            existing_history = self.depth_window[existing_mask].clone()
+            existing_history[:, :-1] = existing_history[:, 1:].clone()
+            existing_history[:, -1] = depth_frames[existing_mask]
+            self.depth_window[existing_mask] = existing_history
+
+        self.depth_initialized[:] = True
+        return self.depth_window
+
+    def _base_ang_vel(self, env: Any) -> torch.Tensor:
+        if hasattr(env, "base_quat"):
+            env.base_quat[:] = env.simulator.base_quat[:]
+            base_quat = env.base_quat
+        else:
+            base_quat = env.simulator.base_quat
+        return quat_rotate_inverse(base_quat, env.simulator.robot_root_states[:, 10:13], w_last=True)
+
+    def _current_proprioception(self, env: Any, base_ang_vel: torch.Tensor) -> torch.Tensor:
+        dof_pos = env.simulator.dof_pos - env.default_dof_pos
+        dof_vel = env.simulator.dof_vel
+        return torch.cat((base_ang_vel, dof_pos, dof_vel), dim=-1)
+
+    def _update_proprioception_window(self, proprioception: torch.Tensor) -> torch.Tensor | None:
+        if self.proprioception_window is None or self.proprioception_initialized is None:
+            return None
+
+        new_mask = ~self.proprioception_initialized
+        if torch.any(new_mask):
+            self.proprioception_window[new_mask] = proprioception[new_mask].unsqueeze(1).repeat(
+                1,
+                self.proprioception_shape[0],  # type: ignore[index]
+                1,
+            )
+
+        existing_mask = self.proprioception_initialized
+        if torch.any(existing_mask):
+            existing_history = self.proprioception_window[existing_mask].clone()
+            existing_history[:, :-1] = existing_history[:, 1:].clone()
+            existing_history[:, -1] = proprioception[existing_mask]
+            self.proprioception_window[existing_mask] = existing_history
+
+        self.proprioception_initialized[:] = True
+        return self.proprioception_window
+
+    def _object_type_one_hot(self, env: Any) -> torch.Tensor:
+        expected_dim = self.shared_obs_dims.get("obj_type_one_hot", 1)
+        motion_command = None
+        if getattr(env, "command_manager", None) is not None:
+            motion_command = env.command_manager.get_state("motion_command")
+        if motion_command is None or not hasattr(motion_command, "object_type_ids"):
+            return torch.ones(self.num_envs, expected_dim, device=self.device, dtype=torch.float32)
+
+        object_type_ids = motion_command.object_type_ids.to(device=self.device, dtype=torch.long)
+        object_type_ids = torch.clamp(object_type_ids, min=0, max=max(expected_dim - 1, 0))
+        return torch.nn.functional.one_hot(object_type_ids, num_classes=expected_dim).float()
+
+    def _scale_term(self, term_name: str, value: torch.Tensor) -> torch.Tensor:
+        scale = self.shared_obs_scales.get(term_name, 1.0)
+        if isinstance(scale, list | tuple):
+            scale_tensor = torch.tensor(scale, device=self.device, dtype=value.dtype).view(1, -1)
+            return value * scale_tensor
+        return value * float(scale)
+
+    def _build_shared_obs(self, env: Any, motion_outputs: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        base_ang_vel = self._base_ang_vel(env)
+        term_values = {
+            "actions": self.prev_actions,
+            "base_ang_vel": base_ang_vel,
+            "dof_pos": env.simulator.dof_pos - env.default_dof_pos,
+            "dof_vel": env.simulator.dof_vel,
+            "motion_command_joint_pos": motion_outputs["joint_pos"],
+            "obj_type_one_hot": self._object_type_one_hot(env),
+        }
+
+        pieces = []
+        for term_name in self.shared_obs_terms:
+            if term_name not in term_values:
+                raise RuntimeError(f"Unsupported fused ONNX shared observation term '{term_name}'.")
+            value = self._scale_term(term_name, term_values[term_name])
+            expected_dim = self.shared_obs_dims[term_name]
+            if value.shape[1] != expected_dim:
+                raise RuntimeError(
+                    f"Observation term '{term_name}' has dim {value.shape[1]}, expected {expected_dim}."
+                )
+            pieces.append(value)
+        return torch.cat(pieces, dim=-1), base_ang_vel
+
+    def build_input(self, env: Any, fallback_step: int) -> tuple[torch.Tensor, torch.Tensor]:
+        time_steps = self._current_time_steps(env, fallback_step)
+        motion_outputs = self._lookup_embedded_motion(time_steps)
+        shared_obs, base_ang_vel = self._build_shared_obs(env, motion_outputs)
+        depth_window = self._update_depth_window(env).flatten(1)
+
+        pieces = [shared_obs, depth_window]
+        if self.proprioception_shape is not None:
+            proprioception = self._current_proprioception(env, base_ang_vel)
+            proprioception_window = self._update_proprioception_window(proprioception)
+            assert proprioception_window is not None
+            pieces.append(proprioception_window.flatten(1))
+
+        actor_obs = torch.cat(pieces, dim=-1)
+        if actor_obs.shape[1] != self.input_dim:
+            raise RuntimeError(f"Built ONNX input dim {actor_obs.shape[1]}, expected {self.input_dim}.")
+        return actor_obs, time_steps
+
+    def act(self, env: Any, fallback_step: int) -> torch.Tensor:
+        actor_obs, time_steps = self.build_input(env, fallback_step)
+        outputs = self._run_session(actor_obs, time_steps)
+        actions = outputs["actions"]
+        self.prev_actions[:] = actions
+        if hasattr(env, "student_prev_actions"):
+            env.student_prev_actions[:] = actions
+        if hasattr(env, "student_base_actions"):
+            env.student_base_actions[:] = actions
+        return actions
+
+    def handle_dones(self, dones: torch.Tensor) -> None:
+        done_env_ids = dones.nonzero(as_tuple=False).flatten()
+        self.reset(done_env_ids)
+
+
+@torch.no_grad()
+def evaluate_onnx_policy_with_summary(
+    env: Any,
+    policy: FusedResidualOnnxRuntimePolicy,
+    max_eval_steps: int,
+) -> dict[str, float | int]:
+    env.set_is_evaluating()
+    env.reset_all()
+    policy.reset()
+
+    rollout_rewards = torch.zeros(env.num_envs, device=env.device)
+    episode_rewards = torch.zeros(env.num_envs, device=env.device)
+    episode_lengths = torch.zeros(env.num_envs, device=env.device)
+    completed_episode_rewards: list[float] = []
+    completed_episode_lengths: list[float] = []
+
+    actor_state: dict[str, torch.Tensor] = {"actions": torch.zeros(env.num_envs, env.dim_actions, device=env.device)}
+    for step in itertools.islice(itertools.count(), max_eval_steps):
+        actor_state["actions"] = policy.act(env, step)
+        _, rewards, dones, _ = env.step(actor_state)
+
+        rewards = rewards.detach().to(device=env.device).view(-1)
+        dones = dones.detach().to(device=env.device).view(-1).bool()
+        rollout_rewards += rewards
+        episode_rewards += rewards
+        episode_lengths += 1.0
+
+        if dones.any():
+            completed_episode_rewards.extend(episode_rewards[dones].detach().cpu().tolist())
+            completed_episode_lengths.extend(episode_lengths[dones].detach().cpu().tolist())
+            episode_rewards[dones] = 0.0
+            episode_lengths[dones] = 0.0
+            policy.handle_dones(dones)
+
+    summary: dict[str, float | int] = {
+        "steps": max_eval_steps,
+        "num_envs": int(env.num_envs),
+        "completed_episodes": len(completed_episode_rewards),
+        "mean_reward_per_step": float((rollout_rewards / max(max_eval_steps, 1)).mean().detach().cpu()),
+        "mean_rollout_return_per_env": float(rollout_rewards.mean().detach().cpu()),
+    }
+    if completed_episode_rewards:
+        rewards_tensor = torch.tensor(completed_episode_rewards)
+        lengths_tensor = torch.tensor(completed_episode_lengths)
+        summary.update(
+            {
+                "mean_episode_return": float(rewards_tensor.mean()),
+                "min_episode_return": float(rewards_tensor.min()),
+                "max_episode_return": float(rewards_tensor.max()),
+                "mean_episode_length": float(lengths_tensor.mean()),
+            }
+        )
+    return summary
+
+
+@torch.no_grad()
+def watch_onnx_policy(env: Any, policy: FusedResidualOnnxRuntimePolicy, log_interval: int = 100) -> None:
+    env.set_is_evaluating()
+    env.reset_all()
+    policy.reset()
+
+    actor_state: dict[str, torch.Tensor] = {"actions": torch.zeros(env.num_envs, env.dim_actions, device=env.device)}
+    logger.info("ONNX watch loop started. Close the viewer or press Ctrl+C to stop.")
+    try:
+        for step in itertools.count():
+            actor_state["actions"] = policy.act(env, step)
+            _, rewards, dones, _ = env.step(actor_state)
+            dones = dones.detach().view(-1).bool()
+            if dones.any():
+                policy.handle_dones(dones)
+            if step == 0 or (step + 1) % log_interval == 0:
+                reward_mean = float(rewards.detach().mean().cpu())
+                done_count = int(dones.detach().sum().cpu())
+                logger.info(f"ONNX watch step {step + 1}: reward_mean={reward_mean:.4f}, done_count={done_count}")
+    except KeyboardInterrupt:
+        logger.info("ONNX watch mode interrupted by user.")
+
+
+def run_onnx_residual_eval_with_tyro(
+    tyro_config: ExperimentConfig,
+    onnx_path: str | Path,
+    metadata: dict[str, Any],
+    *,
+    device: str,
+    object_scale: float | None = None,
+) -> None:
+    _append_enable_cameras_arg_for_onnx()
+    tyro_config = resolve_observation_term_overrides(tyro_config)
+    env, device, simulation_app = setup_simulation_environment(tyro_config, device=device)
+    _ensure_eval_runtime_randomization_defaults(env)
+
+    eval_log_dir = get_experiment_dir(tyro_config.logger, tyro_config.training, get_timestamp(), task_name="eval")
+    if object_scale is not None:
+        eval_log_dir = eval_log_dir.with_name(f"{eval_log_dir.name}-scale_{_scale_label(object_scale)}")
+    eval_log_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Saving ONNX eval logs to {eval_log_dir}")
+    tyro_config.save_config(str(eval_log_dir / CONFIG_NAME))
+
+    export_spec = metadata["policy_export_spec"]
+    policy = FusedResidualOnnxRuntimePolicy(onnx_path, export_spec, env, device)
+    logger.info(
+        "Loaded fused ONNX policy. Student actor and DI/DI-pro encoder are embedded in the graph; "
+        "no student/DI checkpoint files are loaded by this eval path."
+    )
+    logger.warning(
+        "The current fused ONNX export contains joint_pos/joint_vel/ref pose arrays only. "
+        "WBT simulator reset, rewards, and termination still use motion_command from the saved config."
+    )
+
+    try:
+        if tyro_config.training.max_eval_steps is None:
+            watch_onnx_policy(env, policy)
+        else:
+            summary = evaluate_onnx_policy_with_summary(env, policy, tyro_config.training.max_eval_steps)
+            scale_suffix = "" if object_scale is None else f" at object_scale={object_scale:g}"
+            logger.info(f"Residual ONNX eval summary{scale_suffix}:")
+            for key, value in summary.items():
+                logger.info(f"  {key}: {value}")
+    finally:
+        if simulation_app:
+            close_simulation_app(simulation_app)
+
+
 def run_residual_eval_with_tyro(
     tyro_config: ExperimentConfig,
     checkpoint_cfg: CheckpointConfig,
@@ -788,6 +1319,53 @@ def main() -> None:
         return
 
     residual_eval_cfg, remaining_args = tyro.cli(ResidualEvalConfig, return_unknown_args=True, add_help=False)
+    if _is_onnx_checkpoint(residual_eval_cfg.checkpoint):
+        assert residual_eval_cfg.checkpoint is not None
+        onnx_path = Path(residual_eval_cfg.checkpoint).expanduser()
+        saved_cfg, _, metadata = _load_onnx_experiment_config(onnx_path)
+        eval_cfg = saved_cfg.get_eval_config()
+        eval_cfg = _resolve_onnx_eval_config(eval_cfg, residual_eval_cfg)
+        eval_cfg = resolve_multi_object_urdf_config(eval_cfg)
+
+        overwritten_tyro_config = tyro.cli(
+            ExperimentConfig,
+            default=eval_cfg,
+            args=remaining_args,
+            description="Overriding config on top of what's loaded from ONNX metadata.",
+            config=TYRO_CONIFG,
+        )
+        print("overwritten_tyro_config: ", overwritten_tyro_config)
+        device = _resolve_device(residual_eval_cfg)
+        object_scale_eval_values = _resolve_object_scale_eval_values(residual_eval_cfg)
+        if object_scale_eval_values:
+            num_scales = len(object_scale_eval_values)
+            for scale_index, object_scale in enumerate(object_scale_eval_values, start=1):
+                logger.info(
+                    f"Starting residual ONNX eval scale pass {scale_index}/{num_scales}: "
+                    f"object_scale={object_scale:g}"
+                )
+                scaled_tyro_config = _apply_fixed_object_spawn_scale(
+                    overwritten_tyro_config,
+                    object_scale,
+                    residual_eval_cfg.object_scale_height,
+                )
+                run_onnx_residual_eval_with_tyro(
+                    scaled_tyro_config,
+                    onnx_path,
+                    metadata,
+                    device=device,
+                    object_scale=object_scale,
+                )
+            return
+
+        run_onnx_residual_eval_with_tyro(
+            overwritten_tyro_config,
+            onnx_path,
+            metadata,
+            device=device,
+        )
+        return
+
     checkpoint_cfg = CheckpointConfig(checkpoint=residual_eval_cfg.checkpoint)
     saved_cfg, saved_wandb_path = load_saved_experiment_config(checkpoint_cfg)
 

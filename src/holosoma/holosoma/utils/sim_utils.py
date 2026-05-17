@@ -131,7 +131,10 @@ def setup_isaaclab_launcher(config: ExperimentConfig | RunSimConfig, device: str
 
     # Check if video recording is enabled and add --enable_cameras flag
     video_enabled = config.logger.video.enabled or config.logger.headless_recording
-    depth_camera_required = _observation_requires_depth_camera(config)
+    bridge_cfg = getattr(config.simulator.config, "bridge", None)
+    depth_camera_required = _observation_requires_depth_camera(config) or bool(
+        getattr(bridge_cfg, "publish_depth", False)
+    )
     if video_enabled or depth_camera_required:
         args_cli.enable_cameras = True
 

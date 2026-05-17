@@ -101,7 +101,7 @@ nohup python src/holosoma/holosoma/train_agent.py \
     --training.project residual \
     --command.setup-terms.motion-command.params.motion-config.motion-file="./train/rl/suitcase/sub1_suitcase_001.npz" \
     --robot.object.object-urdf-path="./src/holosoma_retargeting/holosoma_retargeting/models/objects/suitcase/suitcase.urdf" \
-    --training.num-envs 4096 \
+    --training.num-envs 2048 \
     --algo.config.save-interval 200 \
     --algo.config.module-dict.actor.layer-config.hidden-dims '[512,256,128]' \
     --algo.config.module-dict.critic.layer-config.hidden-dims '[512,256,128]' \
@@ -153,4 +153,5 @@ HF_HOME=/workspace/HOI/.hf_cache nohup ...
 
 
 
-ddd
+nohup bash scripts/setup_mujoco.sh \
+    > setup.log 2>&1 &
