@@ -12,7 +12,7 @@ python src/holosoma/holosoma/run_sim.py simulator:mujoco robot:g1_29dof_w_object
 
 source scripts/source_inference_setup.sh
 python src/holosoma_inference/holosoma_inference/run_policy.py inference:hoi \
-    --task.model-path /home/rllab/haechan/holosoma/logs/20260515_results/model_03000.onnx \
+    --task.model-path ./logs/20260515_results/model_03000.onnx \
     --task.no-use-joystick \
     --task.use-sim-time \
     --task.rl-rate 50 \
@@ -21,3 +21,9 @@ python src/holosoma_inference/holosoma_inference/run_policy.py inference:hoi \
     --task.show-depth-window \
     --task.depth-window-display-scale 4 \
     --secondary none
+
+source scripts/source_rsinference_setup.sh
+python src/holosoma_inference/holosoma_inference/run_policy.py inference:hoi_real \
+    --task.model-path ./logs/20260515_results/model_03000.onnx \
+    --task.use-joystick \
+    --task.interface auto

@@ -65,9 +65,24 @@ g1_29dof_wbt = InferenceConfig(
     secondary=_g1_safety_secondary,
 )
 
+g1_29dof_wbt_real = InferenceConfig(
+    robot=_g1_29dof_wbt_robot,
+    observation=observation.wbt,
+    task=replace(
+        task.wbt,
+        interface="auto",
+        use_joystick=True,
+        use_sim_time=False,
+        depth_window_source="realsense",
+        depth_window_warmup_seconds=3.0,
+    ),
+    secondary=None,
+)
+
 # Core defaults - no extension imports at module load time
 DEFAULTS = {
     "hoi": g1_29dof_wbt,
+    "hoi_real": g1_29dof_wbt_real,
     "g1-29dof-loco": g1_29dof_loco,
     "t1-29dof-loco": t1_29dof_loco,
     "g1-29dof-wbt": g1_29dof_wbt,

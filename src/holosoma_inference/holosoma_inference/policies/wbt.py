@@ -218,6 +218,50 @@ class WholeBodyTrackingPolicy(BasePolicy):
         )
         self._depth_window_sub.start()
 
+    def _configure_interface_depth_provider(self, export_spec: dict) -> bool:
+        configure_depth_window = getattr(self.interface, "configure_depth_window", None)
+        if not callable(configure_depth_window):
+            return False
+
+        depth_shape = tuple(int(value) for value in export_spec["depth_window_shape"])
+        configure_depth_window(
+            expected_shape=depth_shape,
+            show_window=self.config.task.show_depth_window,
+            display_scale=self.config.task.depth_window_display_scale,
+        )
+        logger.info(f"Configured interface depth provider with window_shape={depth_shape}")
+
+        warmup_seconds = float(self.config.task.depth_window_warmup_seconds)
+        if warmup_seconds > 0.0:
+            warmup_depth_window = getattr(self.interface, "warmup_depth_window", None)
+            if not callable(warmup_depth_window):
+                raise RuntimeError(
+                    "task.depth_window_warmup_seconds was requested, but the runtime interface does not expose "
+                    "warmup_depth_window()."
+                )
+            warmup_depth_window(warmup_seconds, rate_hz=self.config.task.rl_rate)
+        return True
+
+    def _setup_live_depth_provider(self, export_spec: dict) -> None:
+        depth_source = str(self.config.task.depth_window_source).lower()
+        if depth_source not in {"zmq", "realsense", "auto"}:
+            raise ValueError(
+                f"Unsupported task.depth_window_source={self.config.task.depth_window_source!r}; "
+                "expected 'zmq', 'realsense', or 'auto'."
+            )
+
+        if depth_source in {"realsense", "auto"} and self._configure_interface_depth_provider(export_spec):
+            logger.info("Using RealSense/interface depth provider; no external depth publisher is required.")
+            return
+
+        if depth_source == "realsense":
+            raise RuntimeError(
+                "task.depth_window_source='realsense' was requested, but the runtime interface does not expose "
+                "configure_depth_window()/get_depth_window()."
+            )
+
+        self._start_depth_window_subscriber(export_spec)
+
     def _maybe_resolve_di_model_path(self, model_path: str, export_spec: dict) -> str | None:
         if self.config.task.di_model_path:
             return self.config.task.di_model_path
@@ -260,7 +304,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self._static_depth_window = self._prepare_depth_window_input(depth_window)
             logger.info(f"Loaded static depth window override: {self.config.task.depth_window_npy_path}")
         elif self._static_di_latent is None:
-            self._start_depth_window_subscriber(export_spec)
+            self._setup_live_depth_provider(export_spec)
 
         if self._di_model_path:
             self._di_onnx_session = onnxruntime.InferenceSession(self._di_model_path)
@@ -290,7 +334,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             logger.info(f"Loaded static depth window override: {self.config.task.depth_window_npy_path}")
             return
 
-        self._start_depth_window_subscriber(self._residual_fused_export_spec)
+        self._setup_live_depth_provider(self._residual_fused_export_spec)
 
     def _prepare_depth_window_input(self, depth_window: np.ndarray) -> np.ndarray:
         depth_window_np = np.asarray(depth_window, dtype=np.float32)

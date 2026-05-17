@@ -111,6 +111,12 @@ class TaskConfig:
     allow_missing_depth_window: bool = False
     """Allow fused WBT ONNX to run with zero depth when no live/static depth window is available."""
 
+    depth_window_source: str = "zmq"
+    """Live depth provider for fused WBT policies: ``"zmq"``, ``"realsense"``, or ``"auto"``."""
+
+    depth_window_warmup_seconds: float = 0.0
+    """Seconds to pre-fill a live interface depth window before policy execution starts."""
+
     object_type_id: int = 0
     """Object type index used to build `obj_type_one_hot` for residual WBT exports."""
 
