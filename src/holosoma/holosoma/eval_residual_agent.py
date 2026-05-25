@@ -32,7 +32,7 @@ from holosoma.utils.sim_utils import close_simulation_app, setup_simulation_envi
 from holosoma.utils.tyro_utils import TYRO_CONIFG
 
 DEFAULT_CHECKPOINT = "/home/rllab/haechan/holosoma/logs/20260515_results/model_03000.pt"
-DEFAULT_OBJECT_SCALE = 0.6
+DEFAULT_OBJECT_SCALE = 1.6
 DEFAULT_OBJECT_SCALE_EVAL_VALUES: tuple[float, ...] = ()
 DEFAULT_OBJECT_DYNAMIC_FRICTION = 0.2
 DEFAULT_OBJECT_STATIC_FRICTION = 0.2

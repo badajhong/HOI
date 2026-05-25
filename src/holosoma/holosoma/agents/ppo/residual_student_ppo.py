@@ -737,3 +737,68 @@ class ResidualStudentPPO(PPO):
             return residual_action + base_action
 
         return inference_fn
+
+
+class ResidualStudentMiddleLayerCopyPPO(ResidualStudentPPO):
+    """Residual PPO initialized from the frozen student's compatible hidden layers."""
+
+    copy_linear_indices: tuple[int, ...] = (1, 2)
+
+    def _initialize_residual_actor_output(self) -> None:
+        student_bundle = self._load_frozen_student_export_bundle()
+        student_actor = student_bundle["actor"]
+
+        residual_linears = self._get_actor_linear_layers(self.actor)
+        student_linears = self._get_actor_linear_layers(student_actor)
+        if not residual_linears or not student_linears:
+            logger.warning("Could not find student/residual actor Linear layers for middle-layer copy init.")
+            return
+
+        copied_indices = []
+        for linear_index in self.copy_linear_indices:
+            if linear_index >= len(residual_linears) or linear_index >= len(student_linears):
+                logger.warning(
+                    f"Skipping Linear layer index {linear_index}: "
+                    f"residual has {len(residual_linears)} layers, student has {len(student_linears)} layers."
+                )
+                continue
+
+            residual_linear = residual_linears[linear_index]
+            student_linear = student_linears[linear_index]
+            if residual_linear.weight.shape != student_linear.weight.shape:
+                logger.warning(
+                    f"Skipping Linear layer index {linear_index}: weight shape mismatch "
+                    f"residual={tuple(residual_linear.weight.shape)}, student={tuple(student_linear.weight.shape)}."
+                )
+                continue
+            if residual_linear.bias is not None and student_linear.bias is not None:
+                if residual_linear.bias.shape != student_linear.bias.shape:
+                    logger.warning(
+                        f"Skipping Linear layer index {linear_index}: bias shape mismatch "
+                        f"residual={tuple(residual_linear.bias.shape)}, student={tuple(student_linear.bias.shape)}."
+                    )
+                    continue
+
+            with torch.no_grad():
+                residual_linear.weight.copy_(student_linear.weight)
+                if residual_linear.bias is not None and student_linear.bias is not None:
+                    residual_linear.bias.copy_(student_linear.bias)
+            copied_indices.append(linear_index)
+
+        self._zero_residual_output_layer(residual_linears[-1])
+        logger.info(
+            "Initialized residual actor by copying student middle Linear layers "
+            f"{copied_indices} and zero-initializing the residual output layer."
+        )
+
+    def _get_actor_linear_layers(self, actor: nn.Module) -> list[nn.Linear]:
+        actor_module = getattr(getattr(actor, "actor_module", None), "module", None)
+        if actor_module is None:
+            return []
+        return [module for module in actor_module.modules() if isinstance(module, nn.Linear)]
+
+    def _zero_residual_output_layer(self, output_linear: nn.Linear) -> None:
+        with torch.no_grad():
+            output_linear.weight.zero_()
+            if output_linear.bias is not None:
+                output_linear.bias.zero_()

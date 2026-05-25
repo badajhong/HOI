@@ -23,11 +23,11 @@ from holosoma.utils.tyro_utils import TYRO_CONIFG
 
 DEFAULT_EXPERIMENT = "exp:g1-29dof-wbt-w-object-multi-res"
 DEFAULT_MOTION_FILE = (
-    "/home/rllab/haechan/holosoma/train/rl/suitcase/sub1_suitcase_001.npz"
+    "/home/rllab/haechan/holosoma/train/rl/whitechair/sub5_whitechair_010.npz"
 )
 DEFAULT_OBJECT_URDF_PATH = (
     "/home/rllab/haechan/holosoma/src/holosoma_retargeting/holosoma_retargeting/"
-    "models/objects/suitcase/suitcase.urdf"
+    "models/objects/whitechair/whitechair.urdf"
 )
 DEFAULT_VOLUME_RATIOS = (0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6)
 

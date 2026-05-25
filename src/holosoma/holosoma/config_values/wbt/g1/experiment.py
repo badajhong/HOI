@@ -318,6 +318,14 @@ g1_29dof_wbt_w_object_multi_res = replace(
     ),
 )
 
+g1_29dof_wbt_w_object_multi_res_copy = replace(
+    g1_29dof_wbt_w_object_multi_res,
+    algo=replace(
+        g1_29dof_wbt_w_object_multi_res.algo,
+        _target_="holosoma.agents.ppo.residual_student_ppo.ResidualStudentMiddleLayerCopyPPO",
+    ),
+)
+
 g1_29dof_wbt_w_object_multi_res_scale_probe = replace(
     g1_29dof_wbt_w_object_multi_res,
     observation=observation.g1_29dof_wbt_observation_w_object_multi_res_scale_probe,
@@ -357,6 +365,7 @@ __all__ = [
     "g1_29dof_wbt_w_object",
     "g1_29dof_wbt_w_object_multi",
     "g1_29dof_wbt_w_object_multi_res",
+    "g1_29dof_wbt_w_object_multi_res_copy",
     "g1_29dof_wbt_w_object_multi_res_scale_probe",
     "g1_29dof_wbt_w_object_multi_student",
     "g1_29dof_wbt_w_object_multi_teacher",

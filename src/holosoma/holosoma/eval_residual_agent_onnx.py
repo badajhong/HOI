@@ -38,8 +38,8 @@ from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.sim_utils import close_simulation_app, setup_simulation_environment
 from holosoma.utils.tyro_utils import TYRO_CONIFG
 
-DEFAULT_CHECKPOINT = "/home/rllab/haechan/holosoma/logs/20260515_results/model_03000.onnx"
-DEFAULT_OBJECT_SCALE = 0.6
+DEFAULT_CHECKPOINT = "/home/rllab/haechan/holosoma/logs/residual/20260520_082821-residual_ppo-locomotion/model_02400.pt"
+DEFAULT_OBJECT_SCALE = 1.6
 DEFAULT_OBJECT_SCALE_EVAL_VALUES: tuple[float, ...] = ()
 DEFAULT_OBJECT_DYNAMIC_FRICTION = 0.2
 DEFAULT_OBJECT_STATIC_FRICTION = 0.2
