@@ -164,3 +164,14 @@ python examples/robot_retarget.py \
   --retargeter.visualize \
   --robot myrobot
 ```
+
+```bash
+python examples/robot_retarget.py \
+  --data_path demo_data/OMOMO_new \
+  --task-type robot_only \
+  --task-name sub3_largebox_003 \
+  --data_format smplh \
+  --retargeter.debug \
+  --retargeter.visualize \
+  --robot r1
+```

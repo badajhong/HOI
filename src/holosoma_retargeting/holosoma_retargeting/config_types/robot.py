@@ -18,6 +18,7 @@ class RobotDefaults(TypedDict):
 _ROBOT_DEFAULTS: dict[str, RobotDefaults] = {
     "g1": {"robot_dof": 29, "robot_height": 1.32, "object_name": "ground"},
     "t1": {"robot_dof": 23, "robot_height": 1.2, "object_name": "ground"},
+    "r1": {"robot_dof": 26, "robot_height": 1.23, "object_name": "ground"},
 }
 
 
@@ -154,6 +155,17 @@ class RobotConfig:
                 "left_foot_sphere_5_link",
                 "right_foot_sphere_5_link",
             ]
+        if self.robot_type == "r1":
+            return [
+                "left_foot_front_outer_link",
+                "right_foot_front_outer_link",
+                "left_foot_front_inner_link",
+                "right_foot_front_inner_link",
+                "left_foot_rear_outer_link",
+                "right_foot_rear_outer_link",
+                "left_foot_rear_inner_link",
+                "right_foot_rear_inner_link",
+            ]
         raise ValueError(f"Invalid robot type: {self.robot_type}")
 
     FOOT_STICKING_LINKS = property(
@@ -219,6 +231,8 @@ class RobotConfig:
 
         if self.robot_type == "g1":
             return {"19": 0.2, "20": 0.2}  # waist yaw, waist roll
+        if self.robot_type == "r1":
+            return {"19": 0.2, "20": 0.2}  # waist roll, waist yaw
         return {}
 
     MANUAL_COST = property(_manual_cost, doc="Get manual cost weights.")
