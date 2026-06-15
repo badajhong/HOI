@@ -175,3 +175,15 @@ python examples/robot_retarget.py \
   --retargeter.visualize \
   --robot r1
 ```
+
+```bash
+python examples/robot_retarget.py \
+  --data_path demo_data/OMOMO_new \
+  --task-type object_interaction \
+  --task-name sub1_suitcase_001 \
+  --data_format smplh \
+  --retargeter.debug \
+  --retargeter.visualize \
+  --task-config.object-name suitcase \
+  --robot r1
+```
