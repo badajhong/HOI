@@ -40,6 +40,9 @@ class TerminationManager:
         self._term_instances: dict[str, TerminationTermBase] = {}
         self._term_names: list[str] = []
         self._term_cfgs: list[TerminationTermCfg] = []
+        self.last_term_results: dict[str, torch.Tensor] = {}
+        self.last_reset_flags = torch.zeros(self.env.num_envs, dtype=torch.bool, device=self.device)
+        self.last_timeout_flags = torch.zeros_like(self.last_reset_flags)
 
         self._initialize_terms()
 
@@ -79,6 +82,7 @@ class TerminationManager:
         """
         reset_flags = torch.zeros(self.env.num_envs, dtype=torch.bool, device=self.device)
         timeout_flags = torch.zeros_like(reset_flags)
+        self.last_term_results = {}
 
         for term_name, term_cfg in zip(self._term_names, self._term_cfgs):
             if term_name in self._term_instances:
@@ -91,11 +95,15 @@ class TerminationManager:
                     f"Termination term '{term_name}' returned dtype {result.dtype}, expected torch.bool tensor."
                 )
 
+            self.last_term_results[term_name] = result.detach().clone()
+
             if term_cfg.is_timeout:
                 timeout_flags |= result
             else:
                 reset_flags |= result
 
+        self.last_reset_flags = reset_flags.detach().clone()
+        self.last_timeout_flags = timeout_flags.detach().clone()
         return reset_flags, timeout_flags
 
     def reset(self, env_ids: torch.Tensor | None = None) -> None:

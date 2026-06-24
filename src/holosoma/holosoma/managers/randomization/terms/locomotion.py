@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
+from collections.abc import Sequence as SequenceABC
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Sequence
 
@@ -23,6 +24,10 @@ if TYPE_CHECKING:
     from isaaclab.managers import SceneEntityCfg
 
     from holosoma.simulator.isaacsim.isaacsim import IsaacSim
+
+
+OBJECT_RANDOMIZATION_PRIVILEGED_DIM = 10
+OBJECT_RANDOMIZATION_INERTIA_ORDER = ("Ixx", "Iyy", "Izz", "Ixy", "Iyz", "Ixz")
 
 
 def _ensure_env_ids_tensor(env: Any, env_ids: torch.Tensor | Sequence[int] | None) -> torch.Tensor:
@@ -66,6 +71,317 @@ def _get_object_scene_entity_names(simulator: Any) -> list[str]:
         return object_names
 
     return []
+
+
+def _load_object_parm_config(env: Any) -> dict[str, Any]:
+    object_cfg = getattr(getattr(env, "robot_config", None), "object", None)
+    object_parm = getattr(object_cfg, "object_parm", None)
+    if not object_parm:
+        return {}
+
+    cache_key = "_object_parm_config_cache"
+    cached = getattr(env, cache_key, None)
+    if cached is not None:
+        return cached
+
+    try:
+        import yaml
+    except ImportError as exc:  # pragma: no cover - defensive
+        raise RuntimeError("Object parameter YAML loading requires PyYAML.") from exc
+
+    resolved_path = Path(resolve_data_file_path(object_parm))
+    if not resolved_path.exists():
+        raise FileNotFoundError(f"Object parameter YAML does not exist: {resolved_path}")
+
+    with resolved_path.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Object parameter YAML must contain a mapping at top level: {resolved_path}")
+
+    setattr(env, cache_key, data)
+    logger.info(f"Loaded object parameter YAML: {resolved_path}")
+    return data
+
+
+def _get_object_key_from_scene_entity(env: Any, object_name: str) -> str:
+    if object_name.startswith("object_"):
+        return object_name.removeprefix("object_")
+
+    object_cfg = getattr(getattr(env, "robot_config", None), "object", None)
+    name_to_path = getattr(object_cfg, "object_urdf_name_to_path", {}) or {}
+    if len(name_to_path) == 1:
+        return next(iter(name_to_path.keys()))
+
+    object_urdf_path = getattr(object_cfg, "object_urdf_path", None)
+    if object_urdf_path:
+        path = Path(str(object_urdf_path))
+        if path.stem:
+            return path.stem
+
+    return object_name
+
+
+def _ensure_object_randomization_privileged_buffer(env: Any, object_key: str) -> torch.Tensor:
+    buffers = getattr(env, "object_randomization_privileged_by_key", None)
+    if buffers is None:
+        buffers = {}
+        setattr(env, "object_randomization_privileged_by_key", buffers)
+
+    buffer = buffers.get(object_key)
+    if buffer is None or buffer.shape != (env.num_envs, OBJECT_RANDOMIZATION_PRIVILEGED_DIM):
+        buffer = torch.zeros(
+            env.num_envs,
+            OBJECT_RANDOMIZATION_PRIVILEGED_DIM,
+            device=env.device,
+            dtype=torch.float32,
+        )
+        buffers[object_key] = buffer
+    return buffer
+
+
+def _store_object_randomization_privileged_values(
+    env: Any,
+    object_key: str,
+    env_ids_cpu: torch.Tensor,
+    column_slice: slice,
+    values: torch.Tensor,
+) -> None:
+    buffer = _ensure_object_randomization_privileged_buffer(env, object_key)
+    env_ids_device = env_ids_cpu.to(device=env.device, dtype=torch.long)
+    buffer[env_ids_device, column_slice] = values.to(device=env.device, dtype=torch.float32)
+
+
+def _sample_uniform_cpu(
+    lower: float | torch.Tensor,
+    upper: float | torch.Tensor,
+    shape: tuple[int, ...],
+) -> torch.Tensor:
+    lower_tensor = torch.as_tensor(lower, device="cpu", dtype=torch.float32)
+    upper_tensor = torch.as_tensor(upper, device="cpu", dtype=torch.float32)
+    rand = torch.rand(shape, device="cpu", dtype=torch.float32)
+    return lower_tensor + rand * (upper_tensor - lower_tensor)
+
+
+def _resolve_asset_body_ids(asset: Any, asset_cfg: Any) -> torch.Tensor:
+    body_ids_cfg = getattr(asset_cfg, "body_ids", slice(None))
+    if body_ids_cfg == slice(None):
+        body_names = getattr(asset_cfg, "body_names", None)
+        if body_names is not None and hasattr(asset, "find_bodies"):
+            body_ids, _ = asset.find_bodies(body_names)
+            return torch.as_tensor(body_ids, dtype=torch.long, device="cpu")
+        num_bodies = int(getattr(asset, "num_bodies", 1))
+        return torch.arange(num_bodies, dtype=torch.long, device="cpu")
+    return torch.as_tensor(body_ids_cfg, dtype=torch.long, device="cpu")
+
+
+def _isaacsim_randomize_object_material_with_samples(
+    simulator: IsaacSim,
+    env_ids_cpu: torch.Tensor,
+    asset_cfg: SceneEntityCfg,
+    static_friction_range: tuple[float, float],
+    dynamic_friction_range: tuple[float, float],
+    restitution_range: tuple[float, float],
+    num_buckets: int,
+) -> torch.Tensor:
+    asset = simulator.scene[asset_cfg.name]
+    ranges = torch.tensor(
+        [static_friction_range, dynamic_friction_range, restitution_range],
+        device="cpu",
+        dtype=torch.float32,
+    )
+    material_buckets = _sample_uniform_cpu(ranges[:, 0], ranges[:, 1], (num_buckets, 3))
+    total_num_shapes = int(asset.root_physx_view.max_shapes)
+    bucket_ids = torch.randint(0, num_buckets, (len(env_ids_cpu), total_num_shapes), device="cpu")
+    material_samples = material_buckets[bucket_ids]
+
+    materials = asset.root_physx_view.get_material_properties()
+    materials[env_ids_cpu] = material_samples.to(device=materials.device, dtype=materials.dtype)
+    asset.root_physx_view.set_material_properties(materials, env_ids_cpu)
+    return material_samples.mean(dim=1)
+
+
+def _isaacsim_randomize_object_mass_with_samples(
+    simulator: IsaacSim,
+    env_ids_cpu: torch.Tensor,
+    asset_cfg: SceneEntityCfg,
+    mass_distribution_params: tuple[float, float],
+    *,
+    min_mass: float = 1e-6,
+) -> torch.Tensor:
+    asset = simulator.scene[asset_cfg.name]
+    body_ids = _resolve_asset_body_ids(asset, asset_cfg)
+    masses = asset.root_physx_view.get_masses()
+    default_mass = getattr(getattr(asset, "data", None), "default_mass", masses).clone()
+
+    if masses.ndim == 1:
+        mass_add = _sample_uniform_cpu(mass_distribution_params[0], mass_distribution_params[1], (len(env_ids_cpu),))
+        masses[env_ids_cpu] = default_mass[env_ids_cpu] + mass_add.to(device=masses.device, dtype=masses.dtype)
+        selected_masses = masses[env_ids_cpu]
+        selected_default_mass = default_mass[env_ids_cpu]
+    else:
+        mass_add = _sample_uniform_cpu(
+            mass_distribution_params[0],
+            mass_distribution_params[1],
+            (len(env_ids_cpu), len(body_ids)),
+        )
+        masses[env_ids_cpu[:, None], body_ids] = (
+            default_mass[env_ids_cpu[:, None], body_ids] + mass_add.to(device=masses.device, dtype=masses.dtype)
+        )
+        selected_masses = masses[env_ids_cpu[:, None], body_ids]
+        selected_default_mass = default_mass[env_ids_cpu[:, None], body_ids]
+
+    masses = torch.clamp(masses, min=min_mass)
+    asset.root_physx_view.set_masses(masses, env_ids_cpu)
+
+    default_inertia = getattr(getattr(asset, "data", None), "default_inertia", None)
+    if default_inertia is not None:
+        ratios = selected_masses / selected_default_mass
+        inertias = asset.root_physx_view.get_inertias()
+        if inertias.ndim == 3:
+            inertias[env_ids_cpu[:, None], body_ids] = default_inertia[env_ids_cpu[:, None], body_ids] * ratios[
+                ..., None
+            ]
+        else:
+            ratio_for_inertia = ratios.reshape(len(env_ids_cpu), -1).mean(dim=1, keepdim=True)
+            inertias[env_ids_cpu] = default_inertia[env_ids_cpu] * ratio_for_inertia
+        asset.root_physx_view.set_inertias(inertias, env_ids_cpu)
+
+    return mass_add.reshape(len(env_ids_cpu), -1).mean(dim=1, keepdim=True)
+
+
+def _isaacsim_randomize_object_inertia_with_samples(
+    simulator: IsaacSim,
+    env_ids_cpu: torch.Tensor,
+    asset_cfg: SceneEntityCfg,
+    inertia_distribution_params: tuple[torch.Tensor, torch.Tensor],
+) -> torch.Tensor:
+    asset = simulator.scene[asset_cfg.name]
+    body_ids = _resolve_asset_body_ids(asset, asset_cfg)
+    inertias_original = asset.root_physx_view.get_inertias()
+
+    if inertias_original.ndim == 2:
+        inertias = inertias_original.unsqueeze(1).clone()
+    else:
+        inertias = inertias_original.clone()
+
+    lower_bounds, upper_bounds = inertia_distribution_params
+    inertia_random = _sample_uniform_cpu(
+        lower_bounds.view(1, 1, 6),
+        upper_bounds.view(1, 1, 6),
+        (len(env_ids_cpu), len(body_ids), 6),
+    )
+
+    selected_inertias_bias = torch.ones(
+        len(env_ids_cpu),
+        len(body_ids),
+        9,
+        device=inertias.device,
+        dtype=inertias.dtype,
+    )
+    for param_idx, matrix_idx in ((0, 0), (1, 4), (2, 8)):
+        selected_inertias_bias[:, :, matrix_idx] = inertia_random[:, :, param_idx].to(inertias.device)
+    for param_idx, primary_idx, symmetric_idx in ((3, 1, 3), (4, 7, 5), (5, 6, 2)):
+        selected_inertias_bias[:, :, primary_idx] = inertia_random[:, :, param_idx].to(inertias.device)
+        selected_inertias_bias[:, :, symmetric_idx] = selected_inertias_bias[:, :, primary_idx]
+
+    inertias[env_ids_cpu[:, None], body_ids] *= selected_inertias_bias
+    if inertias_original.ndim == 2:
+        inertias = inertias.squeeze(1)
+
+    asset.root_physx_view.set_inertias(inertias, env_ids_cpu)
+    return inertia_random.mean(dim=1)
+
+
+def _get_object_parm_sections(
+    object_parm_cfg: dict[str, Any],
+    object_key: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    defaults = object_parm_cfg.get("defaults", object_parm_cfg.get("default", {}))
+    if defaults is None:
+        defaults = {}
+    if not isinstance(defaults, dict):
+        raise ValueError("'defaults' in object parameter YAML must be a mapping.")
+
+    objects = (
+        object_parm_cfg.get("objects")
+        or object_parm_cfg.get("object_params")
+        or object_parm_cfg.get("object_parms")
+        or {}
+    )
+    if not isinstance(objects, dict):
+        raise ValueError("'objects' in object parameter YAML must be a mapping.")
+
+    section = objects.get(object_key, {})
+    if section is None:
+        section = {}
+    if not isinstance(section, dict):
+        raise ValueError(f"Object parameter entry for '{object_key}' must be a mapping.")
+
+    return defaults, section
+
+
+def _lookup_nested(mapping: dict[str, Any], path: Sequence[str]) -> Any:
+    current: Any = mapping
+    for part in path:
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def _as_float_range(value: Any, label: str) -> tuple[float, float]:
+    if not isinstance(value, SequenceABC) or isinstance(value, (str, bytes)) or len(value) != 2:
+        raise ValueError(f"{label} must be a 2-value range, got {value!r}")
+    return (float(value[0]), float(value[1]))
+
+
+def _object_range_param(
+    object_parm_cfg: dict[str, Any],
+    object_key: str,
+    *,
+    flat_keys: Sequence[str],
+    nested_paths: Sequence[Sequence[str]],
+    fallback: Sequence[float],
+) -> tuple[float, float]:
+    if object_parm_cfg:
+        defaults, section = _get_object_parm_sections(object_parm_cfg, object_key)
+        for mapping in (section, defaults):
+            for key in flat_keys:
+                if key in mapping:
+                    return _as_float_range(mapping[key], f"{object_key}.{key}")
+            for path in nested_paths:
+                value = _lookup_nested(mapping, path)
+                if value is not None:
+                    return _as_float_range(value, f"{object_key}.{'.'.join(path)}")
+    return _as_float_range(fallback, object_key)
+
+
+def _object_inertia_param(
+    object_parm_cfg: dict[str, Any],
+    object_key: str,
+    fallback: dict[str, tuple[float, float]],
+) -> dict[str, tuple[float, float]]:
+    if not object_parm_cfg:
+        return fallback
+
+    defaults, section = _get_object_parm_sections(object_parm_cfg, object_key)
+    value = (
+        section.get("inertia_distribution_params_dict")
+        or _lookup_nested(section, ("inertia", "distribution_params_dict"))
+        or _lookup_nested(section, ("inertia", "scale_range"))
+        or defaults.get("inertia_distribution_params_dict")
+        or _lookup_nested(defaults, ("inertia", "distribution_params_dict"))
+        or _lookup_nested(defaults, ("inertia", "scale_range"))
+    )
+    if value is None:
+        return fallback
+    if not isinstance(value, dict):
+        raise ValueError(f"Inertia params for '{object_key}' must be a mapping.")
+    merged = dict(fallback)
+    merged.update(
+        {key: _as_float_range(range_value, f"{object_key}.inertia.{key}") for key, range_value in value.items()}
+    )
+    return merged
 
 
 def _get_scene_entity_prim_paths(simulator: Any, entity_name: str) -> list[str]:
@@ -1373,19 +1689,63 @@ def randomize_object_rigid_body_material_startup(
         logger.warning("No object scene entities found for material randomization. Skipping.")
         return
 
+    object_parm_cfg = _load_object_parm_config(env)
     num_buckets = 64
     for object_name in object_names:
+        object_key = _get_object_key_from_scene_entity(env, object_name)
+        object_static_friction_range = _object_range_param(
+            object_parm_cfg,
+            object_key,
+            flat_keys=("static_friction_range",),
+            nested_paths=(
+                ("friction", "static"),
+                ("friction", "static_range"),
+                ("friction", "static_friction_range"),
+                ("material", "static_friction_range"),
+            ),
+            fallback=static_friction_range,
+        )
+        object_dynamic_friction_range = _object_range_param(
+            object_parm_cfg,
+            object_key,
+            flat_keys=("dynamic_friction_range",),
+            nested_paths=(
+                ("friction", "dynamic"),
+                ("friction", "dynamic_range"),
+                ("friction", "dynamic_friction_range"),
+                ("material", "dynamic_friction_range"),
+            ),
+            fallback=dynamic_friction_range,
+        )
+        object_restitution_range = _object_range_param(
+            object_parm_cfg,
+            object_key,
+            flat_keys=("restitution_range",),
+            nested_paths=(
+                ("friction", "restitution"),
+                ("friction", "restitution_range"),
+                ("material", "restitution_range"),
+            ),
+            fallback=restitution_range,
+        )
         asset_cfg = SceneEntityCfg(object_name, body_names=".*")
         asset_cfg.resolve(simulator.scene)
 
-        _isaacsim_randomize_rigid_body_material(
+        material_samples = _isaacsim_randomize_object_material_with_samples(
             simulator,
             env_ids_cpu,
             asset_cfg,
-            static_friction_range=(static_friction_range[0], static_friction_range[1]),
-            dynamic_friction_range=(dynamic_friction_range[0], dynamic_friction_range[1]),
-            restitution_range=(restitution_range[0], restitution_range[1]),
+            static_friction_range=object_static_friction_range,
+            dynamic_friction_range=object_dynamic_friction_range,
+            restitution_range=object_restitution_range,
             num_buckets=num_buckets,
+        )
+        _store_object_randomization_privileged_values(
+            env,
+            object_key,
+            env_ids_cpu,
+            slice(0, 3),
+            material_samples,
         )
 
 
@@ -1426,16 +1786,41 @@ def randomize_object_rigid_body_mass_startup(
         logger.warning("No object scene entities found for mass randomization. Skipping.")
         return
 
+    object_parm_cfg = _load_object_parm_config(env)
     for object_name in object_names:
+        object_key = _get_object_key_from_scene_entity(env, object_name)
+        object_mass_distribution_params = _object_range_param(
+            object_parm_cfg,
+            object_key,
+            flat_keys=(
+                "mass_distribution_params",
+                "mass_change_range",
+                "weight_change_range",
+            ),
+            nested_paths=(
+                ("mass", "distribution_params"),
+                ("mass", "range"),
+                ("mass", "add_range"),
+                ("weight", "range"),
+                ("weight", "add_range"),
+            ),
+            fallback=mass_distribution_params,
+        )
         asset_cfg = SceneEntityCfg(object_name, body_names=".*")
         asset_cfg.resolve(simulator.scene)
 
-        _isaacsim_randomize_rigid_body_mass(
+        mass_add_samples = _isaacsim_randomize_object_mass_with_samples(
             simulator,
             env_ids_cpu,
             asset_cfg,
-            (mass_distribution_params[0], mass_distribution_params[1]),
-            operation="add",
+            object_mass_distribution_params,
+        )
+        _store_object_randomization_privileged_values(
+            env,
+            object_key,
+            env_ids_cpu,
+            slice(3, 4),
+            mass_add_samples,
         )
 
 
@@ -1466,8 +1851,6 @@ def randomize_object_rigid_body_inertia_startup(
     except ImportError as exc:  # pragma: no cover - defensive
         raise RuntimeError("IsaacSim inertia randomization requires isaaclab.") from exc
 
-    from holosoma.simulator.isaacsim.events import randomize_rigid_body_inertia
-
     env_ids_cpu = idx.to(device="cpu", dtype=torch.long)
     if env_ids_cpu.numel() == 0:
         return
@@ -1477,22 +1860,35 @@ def randomize_object_rigid_body_inertia_startup(
         logger.warning("No object scene entities found for inertia randomization. Skipping.")
         return
 
-    ordering = ["Ixx", "Iyy", "Izz", "Ixy", "Iyz", "Ixz"]
-    lower_bounds = [inertia_distribution_params_dict[key][0] for key in ordering]
-    upper_bounds = [inertia_distribution_params_dict[key][1] for key in ordering]
-    inertia_distribution_params = (torch.tensor(lower_bounds, device="cpu"), torch.tensor(upper_bounds, device="cpu"))
-
+    object_parm_cfg = _load_object_parm_config(env)
     for object_name in object_names:
+        object_key = _get_object_key_from_scene_entity(env, object_name)
+        object_inertia_distribution_params_dict = _object_inertia_param(
+            object_parm_cfg,
+            object_key,
+            inertia_distribution_params_dict,
+        )
+        lower_bounds = [object_inertia_distribution_params_dict[key][0] for key in OBJECT_RANDOMIZATION_INERTIA_ORDER]
+        upper_bounds = [object_inertia_distribution_params_dict[key][1] for key in OBJECT_RANDOMIZATION_INERTIA_ORDER]
+        inertia_distribution_params = (
+            torch.tensor(lower_bounds, device="cpu"),
+            torch.tensor(upper_bounds, device="cpu"),
+        )
         asset_cfg = SceneEntityCfg(object_name, body_names=".*")
         asset_cfg.resolve(simulator.scene)
 
-        randomize_rigid_body_inertia(
+        inertia_samples = _isaacsim_randomize_object_inertia_with_samples(
             simulator,
             env_ids_cpu,
             asset_cfg,
             inertia_distribution_params,
-            operation="scale",
-            distribution="uniform",
+        )
+        _store_object_randomization_privileged_values(
+            env,
+            object_key,
+            env_ids_cpu,
+            slice(4, 10),
+            inertia_samples,
         )
 
 

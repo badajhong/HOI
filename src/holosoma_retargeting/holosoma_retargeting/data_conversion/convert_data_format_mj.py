@@ -116,6 +116,7 @@ class MotionLoader:
         output_fps: int,
         device: torch.device,
         line_range: tuple[int, int] | None,
+        robot_dof: int,
         has_dynamic_object: bool,
         use_omniretarget_data: bool,
     ):
@@ -127,6 +128,7 @@ class MotionLoader:
         self.current_idx = 0
         self.device = device
         self.line_range = line_range
+        self.robot_dof = robot_dof
         self.has_dynamic_object = has_dynamic_object
         self.use_omniretarget_data = use_omniretarget_data
         self._load_motion()
@@ -137,7 +139,11 @@ class MotionLoader:
         """Loads the motion from the csv file."""
         if self.motion_file.endswith(".npz"):
             data = np.load(self.motion_file)
-            self.input_fps = round(1 / data.get("fps", 1 / self.input_fps))
+            fps_value = data.get("fps")
+            if fps_value is not None:
+                fps_scalar = float(np.asarray(fps_value))
+                self.input_fps = round(1 / fps_scalar) if fps_scalar < 1 else round(fps_scalar)
+                self.input_dt = 1.0 / self.input_fps
             motion = torch.from_numpy(data["qpos"]).to(torch.float32)
         else:
             raise ValueError("Unsupported motion file format. Use .csv or .npz.")
@@ -162,7 +168,15 @@ class MotionLoader:
             self.motion_base_poss_input = motion[:, :3]
             self.motion_base_rots_input = motion[:, 3:7]
 
-        self.motion_dof_poss_input = motion[:, 7:36]
+        dof_end = 7 + self.robot_dof
+        expected_cols = dof_end + (7 if self.has_dynamic_object else 0)
+        if motion.shape[1] < expected_cols:
+            raise ValueError(
+                f"Motion has {motion.shape[1]} qpos columns, but robot_dof={self.robot_dof} "
+                f"and has_dynamic_object={self.has_dynamic_object} require at least {expected_cols}."
+            )
+
+        self.motion_dof_poss_input = motion[:, 7:dof_end]
 
         if self.has_dynamic_object:
             if self.use_omniretarget_data:
@@ -355,26 +369,6 @@ def world_body_velocities(model, data):
 
 def run_simulator(args_cli: DataConversionConfig):
     """Runs the simulation loop."""
-    joint_names = args_cli.JOINT_NAMES
-    # Load motion
-    device = torch.device("cpu")
-    has_dynamic_object = args_cli.has_dynamic_object
-    use_omniretarget_data = args_cli.use_omniretarget_data
-    line_range: tuple[int, int] | None = args_cli.line_range
-    motion = MotionLoader(
-        motion_file=args_cli.input_file,
-        input_fps=args_cli.input_fps,
-        output_fps=args_cli.output_fps,
-        device=device,
-        line_range=line_range,
-        has_dynamic_object=has_dynamic_object,
-        use_omniretarget_data=use_omniretarget_data,
-    )
-
-    object_name = args_cli.object_name
-    if object_name is None:
-        object_name = "largebox" if has_dynamic_object else None
-
     if args_cli.robot_config.robot_type != args_cli.robot:
         robot_config = RobotConfig(robot_type=args_cli.robot)
     else:
@@ -390,6 +384,27 @@ def run_simulator(args_cli: DataConversionConfig):
         )
     else:
         motion_config = args_cli.motion_data_config
+
+    joint_names = args_cli.JOINT_NAMES
+    # Load motion
+    device = torch.device("cpu")
+    has_dynamic_object = args_cli.has_dynamic_object
+    use_omniretarget_data = args_cli.use_omniretarget_data
+    line_range: tuple[int, int] | None = args_cli.line_range
+    motion = MotionLoader(
+        motion_file=args_cli.input_file,
+        input_fps=args_cli.input_fps,
+        output_fps=args_cli.output_fps,
+        device=device,
+        line_range=line_range,
+        robot_dof=robot_config.ROBOT_DOF,
+        has_dynamic_object=has_dynamic_object,
+        use_omniretarget_data=use_omniretarget_data,
+    )
+
+    object_name = args_cli.object_name
+    if object_name is None:
+        object_name = "largebox" if has_dynamic_object else None
 
     constants = create_task_constants(
         robot_config,

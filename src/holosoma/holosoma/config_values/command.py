@@ -8,6 +8,7 @@ from holosoma.config_values.wbt.g1.command import (
     g1_29dof_wbt_command_w_object_multi,
     g1_29dof_wbt_command_w_object_multi_teacher,
 )
+from holosoma.config_values.wbt.r1.command import r1_26dof_wbt_command_w_object_multi_teacher
 
 none = None
 
@@ -19,4 +20,5 @@ DEFAULTS = {
     "g1_29dof_wbt_w_object": g1_29dof_wbt_command_w_object,
     "g1_29dof_wbt_w_object_multi": g1_29dof_wbt_command_w_object_multi,
     "g1_29dof_wbt_w_object_multi_teacher": g1_29dof_wbt_command_w_object_multi_teacher,
+    "r1_26dof_wbt_w_object_multi_teacher": r1_26dof_wbt_command_w_object_multi_teacher,
 }

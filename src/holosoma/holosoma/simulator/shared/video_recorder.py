@@ -58,6 +58,8 @@ class VideoRecorderInterface(ABC):
         "base_link",  # ROS standard naming convention
         "Waist",  # Alternative trunk naming (e.g., user's example)
         "pelvis",  # Anatomical naming for hip area
+        "pelvis_link",  # R1 root link
+        "waist_yaw_link",  # R1 torso tracking link
         "hip",  # Simple hip naming
         "base",  # Generic base naming
     ]

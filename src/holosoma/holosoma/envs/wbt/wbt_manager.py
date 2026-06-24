@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import torch
 
@@ -23,9 +24,6 @@ class WholeBodyTrackingManager(BaseTask):
         self.need_to_refresh_envs = torch.ones(self.num_envs, dtype=torch.bool, device=self.device, requires_grad=False)
         self._configure_default_dof_pos()
         self._init_domain_rand_buffers()
-        self._object_log_episode_reward_sum = torch.zeros(
-            self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
-        )
 
     def _configure_default_dof_pos(self):
         self.default_dof_pos_base = torch.zeros(
@@ -48,8 +46,6 @@ class WholeBodyTrackingManager(BaseTask):
         self.need_to_refresh_envs[env_ids] = True
         self.episode_length_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
-        if hasattr(self, "_object_log_episode_reward_sum"):
-            self._object_log_episode_reward_sum[env_ids] = 0.0
         # pending_episode_update_mask is only used in curriculum_term::AverageEpisodeLengthTracker.
         self._pending_episode_update_mask[env_ids] = True
 
@@ -74,9 +70,8 @@ class WholeBodyTrackingManager(BaseTask):
 
     def _update_log_dict(self):
         # _update_log_dict happens before reset_envs_idx
-        self._object_log_episode_reward_sum += self.rew_buf.detach()
         for key in list(self.log_dict.keys()):
-            if key.startswith("Object/"):
+            if key.startswith(("Object/", "Motion/", "Termination/", "TerminationFailRate/")):
                 del self.log_dict[key]
 
         # -------------------------------- terms same with locomotion_manager.py [start]--------------------------------
@@ -87,12 +82,20 @@ class WholeBodyTrackingManager(BaseTask):
         motion_command = self.command_manager.get_state("motion_command")
         motion_command.update_metrics()
         self.log_dict.update(motion_command.metrics)
-        self._update_object_start0_log_dict(motion_command)
+        self._update_motion_start0_log_dict(motion_command)
+        self._update_motion_termination_log_dict(motion_command)
 
-    def _update_object_start0_log_dict(self, motion_command):
-        if motion_command is None or not getattr(motion_command.motion, "has_object", False):
+    def _update_motion_start0_log_dict(self, motion_command):
+        if motion_command is None:
             return
-        if not hasattr(motion_command, "started_at_timestep_zero"):
+        required_attrs = (
+            "started_at_timestep_zero",
+            "clip_ids",
+            "clip_start_steps",
+            "clip_end_steps",
+            "time_steps",
+        )
+        if not all(hasattr(motion_command, attr) for attr in required_attrs):
             return
 
         done_env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
@@ -104,21 +107,133 @@ class WholeBodyTrackingManager(BaseTask):
         if env_ids.numel() == 0:
             return
 
-        object_key_to_id = getattr(motion_command, "object_key_to_id", {}) or {}
-        if not object_key_to_id:
-            object_key_to_id = {getattr(motion_command, "object_name", "object"): 0}
+        clip_ids = motion_command.clip_ids[env_ids]
+        clip_progress = (motion_command.time_steps[env_ids] - motion_command.clip_start_steps[env_ids]).to(
+            dtype=torch.float32
+        )
+        terminal_progress = (motion_command.clip_end_steps[env_ids] - motion_command.clip_start_steps[env_ids] - 2).to(
+            dtype=torch.float32
+        )
+        terminal_progress = torch.clamp(terminal_progress, min=1.0)
+        completion_percent = torch.clamp(clip_progress / terminal_progress, min=0.0, max=1.0) * 100.0
 
-        object_type_ids = motion_command.object_type_ids[env_ids]
-        episode_returns = self._object_log_episode_reward_sum[env_ids].detach()
-        episode_lengths = self.episode_length_buf[env_ids].to(dtype=torch.float32).detach()
+        if hasattr(motion_command, "update_hard_motion_sampling_stats"):
+            motion_command.update_hard_motion_sampling_stats(clip_ids, completion_percent)
 
-        for object_key, object_type_id in sorted(object_key_to_id.items()):
-            object_mask = object_type_ids == int(object_type_id)
-            if not object_mask.any():
+        for clip_id in torch.unique(clip_ids).tolist():
+            clip_id_int = int(clip_id)
+            clip_mask = clip_ids == clip_id_int
+            if not clip_mask.any():
                 continue
-            metric_prefix = f"Object/{object_key}"
-            self.log_dict[f"{metric_prefix}/mean_reward_start0"] = episode_returns[object_mask]
-            self.log_dict[f"{metric_prefix}/mean_episode_length_start0"] = episode_lengths[object_mask]
+            metric_prefix = self._get_motion_metric_prefix(motion_command, clip_id_int)
+            self.log_dict[f"{metric_prefix}/completion_percent_start0"] = completion_percent[clip_mask].detach()
+
+    def _update_motion_termination_log_dict(self, motion_command):
+        if motion_command is None or self.termination_manager is None:
+            return
+        if not hasattr(motion_command, "clip_ids"):
+            return
+
+        done_env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
+        if done_env_ids.numel() == 0:
+            return
+
+        outcome_masks, detail_masks = self._get_termination_masks()
+        if not outcome_masks:
+            return
+
+        clip_ids = motion_command.clip_ids[done_env_ids]
+        for clip_id in torch.unique(clip_ids).tolist():
+            clip_id_int = int(clip_id)
+            clip_mask = clip_ids == clip_id_int
+            if not clip_mask.any():
+                continue
+
+            env_ids_for_clip = done_env_ids[clip_mask]
+            metric_prefix = self._get_termination_metric_prefix(motion_command, clip_id_int)
+            episode_count = torch.as_tensor(float(env_ids_for_clip.numel()), device=self.device)
+            self.log_dict[f"{metric_prefix}/episode"] = episode_count.detach()
+
+            for outcome_name in ("motion_ends", "bad_tracking", "timeout"):
+                outcome_count = outcome_masks[outcome_name][env_ids_for_clip].to(dtype=torch.float32).sum()
+                self.log_dict[f"{metric_prefix}/{outcome_name}"] = outcome_count.detach()
+
+            bad_tracking_mask = outcome_masks["bad_tracking"][env_ids_for_clip]
+            bad_tracking_count = bad_tracking_mask.to(dtype=torch.float32).sum()
+            fail_rate_prefix = self._get_termination_fail_rate_metric_prefix(motion_command, clip_id_int)
+            for detail_name, detail_mask in detail_masks.items():
+                detail_count = (detail_mask[env_ids_for_clip] & bad_tracking_mask).to(dtype=torch.float32).sum()
+                rate_parts = torch.stack((detail_count, bad_tracking_count))
+                self.log_dict[f"{fail_rate_prefix}/{detail_name}"] = rate_parts.detach()
+
+    def _get_termination_masks(self) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+        zero = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        term_manager = self.termination_manager
+        if term_manager is None:
+            return {}, {}
+
+        last_term_results = getattr(term_manager, "last_term_results", {}) or {}
+
+        def _term_mask(term_name: str) -> torch.Tensor:
+            mask = last_term_results.get(term_name)
+            if mask is None:
+                return zero
+            return mask.to(device=self.device, dtype=torch.bool)
+
+        outcome_masks: dict[str, torch.Tensor] = {
+            "motion_ends": _term_mask("motion_ends"),
+            "bad_tracking": _term_mask("bad_tracking"),
+            "timeout": getattr(term_manager, "last_timeout_flags", zero).to(device=self.device, dtype=torch.bool),
+        }
+
+        bad_tracking_term = getattr(term_manager, "_term_instances", {}).get("bad_tracking")
+        bad_tracking_reasons = getattr(bad_tracking_term, "last_reason_results", {}) or {}
+        detail_masks: dict[str, torch.Tensor] = {}
+        for detail_name in (
+            "bad_object_pos",
+            "bad_object_ori",
+            "bad_motion_body_pos",
+            "bad_ref_pos",
+            "bad_ref_ori",
+        ):
+            mask = bad_tracking_reasons.get(detail_name)
+            if mask is None:
+                mask = zero
+            detail_masks[detail_name] = mask.to(device=self.device, dtype=torch.bool)
+
+        return outcome_masks, detail_masks
+
+    @staticmethod
+    def _sanitize_metric_component(value: str) -> str:
+        return value.replace("/", "_").replace("\\", "_").replace(" ", "_")
+
+    def _get_motion_metric_prefix(self, motion_command, clip_id: int) -> str:
+        clip_files = getattr(motion_command.motion, "clip_files", [])
+        clip_object_keys = getattr(motion_command.motion, "clip_object_keys", [])
+
+        if 0 <= clip_id < len(clip_files):
+            motion_name = Path(str(clip_files[clip_id])).stem
+        else:
+            motion_name = f"clip_{clip_id:03d}"
+        motion_name = self._sanitize_metric_component(motion_name)
+
+        object_key = clip_object_keys[clip_id] if 0 <= clip_id < len(clip_object_keys) else None
+        if object_key is None:
+            return f"Motion/{motion_name}"
+        object_name = self._sanitize_metric_component(str(object_key))
+        return f"Motion/{object_name}/{motion_name}"
+
+    def _get_termination_metric_prefix(self, motion_command, clip_id: int) -> str:
+        motion_prefix = self._get_motion_metric_prefix(motion_command, clip_id)
+        if motion_prefix.startswith("Motion/"):
+            return f"Termination/{motion_prefix[len('Motion/'):]}"
+        return f"Termination/{motion_prefix}"
+
+    def _get_termination_fail_rate_metric_prefix(self, motion_command, clip_id: int) -> str:
+        motion_prefix = self._get_motion_metric_prefix(motion_command, clip_id)
+        if motion_prefix.startswith("Motion/"):
+            return f"TerminationFailRate/{motion_prefix[len('Motion/'):]}"
+        return f"TerminationFailRate/{motion_prefix}"
 
     def reset_all(self):
         # If reset_all is called several times, clear buffer in motion_command

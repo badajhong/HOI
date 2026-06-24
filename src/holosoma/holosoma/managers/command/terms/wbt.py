@@ -593,6 +593,19 @@ class MotionCommand(CommandTermBase):
         else:
             self.motion_cfg = MotionConfig(**cfg.params["motion_config"])
         self.init_pose_cfg: NoiseToInitialPoseConfig = self.motion_cfg.noise_to_initial_pose
+        self.hard_motion_sampling_ratio = float(self.motion_cfg.hard_motion_sampling_ratio)
+        self.hard_motion_sampling_ema_alpha = float(self.motion_cfg.hard_motion_sampling_ema_alpha)
+
+        if not 0.0 <= self.hard_motion_sampling_ratio <= 1.0:
+            raise ValueError(
+                "motion_config.hard_motion_sampling_ratio must be in [0, 1], "
+                f"got {self.hard_motion_sampling_ratio}."
+            )
+        if not 0.0 < self.hard_motion_sampling_ema_alpha <= 1.0:
+            raise ValueError(
+                "motion_config.hard_motion_sampling_ema_alpha must be in (0, 1], "
+                f"got {self.hard_motion_sampling_ema_alpha}."
+            )
 
     def setup(self) -> None:
         self.num_envs = self._env.num_envs
@@ -720,10 +733,7 @@ class MotionCommand(CommandTermBase):
         if torch.any(clip_lens < 2):
             raise ValueError("Each motion clip must have at least 2 frames for safe stepping.")
 
-        if self._env.is_evaluating:
-            sampled_clip_ids = torch.zeros(num_resets, dtype=torch.long, device=self.device)
-        else:
-            sampled_clip_ids = torch.randint(0, num_clips, (num_resets,), device=self.device)
+        sampled_clip_ids = self._sample_clip_ids_for_reset(num_resets, num_clips)
 
         sampled_starts = clip_starts[sampled_clip_ids]
         sampled_ends = clip_ends[sampled_clip_ids]
@@ -1198,6 +1208,9 @@ class MotionCommand(CommandTermBase):
             (self.num_envs,), self.motion.time_step_total, dtype=torch.long, device=self.device
         )
         self.started_at_timestep_zero = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        num_clips = len(self.motion.clip_ranges)
+        self.hard_motion_completion_ema = torch.full((num_clips,), 100.0, dtype=torch.float32, device=self.device)
+        self.hard_motion_completion_update_count = torch.zeros(num_clips, dtype=torch.long, device=self.device)
         if self.motion.has_object:
             self.active_object_indices = self.object_indices_in_simulator.clone()
             self.object_type_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -1217,6 +1230,66 @@ class MotionCommand(CommandTermBase):
 
         if self.motion_cfg.use_adaptive_timesteps_sampler:
             self.adaptive_timesteps_sampler.init_buffers()
+
+    def _sample_clip_ids_for_reset(self, num_resets: int, num_clips: int) -> torch.Tensor:
+        if self._env.is_evaluating:
+            return torch.zeros(num_resets, dtype=torch.long, device=self.device)
+
+        sampled_clip_ids = torch.randint(0, num_clips, (num_resets,), device=self.device)
+        if self.hard_motion_sampling_ratio <= 0.0 or num_clips <= 1:
+            return sampled_clip_ids
+
+        num_hard_samples = int(round(num_resets * self.hard_motion_sampling_ratio))
+        num_hard_samples = max(0, min(num_hard_samples, num_resets))
+        if num_hard_samples == 0:
+            return sampled_clip_ids
+
+        hard_slots = torch.randperm(num_resets, device=self.device)[:num_hard_samples]
+        sampled_clip_ids[hard_slots] = self._sample_hard_motion_clip_ids(num_hard_samples)
+        return sampled_clip_ids
+
+    def _sample_hard_motion_clip_ids(self, num_samples: int) -> torch.Tensor:
+        probabilities = self._hard_motion_sampling_probabilities()
+        return torch.multinomial(probabilities, num_samples, replacement=True)
+
+    def _hard_motion_sampling_probabilities(self) -> torch.Tensor:
+        hard_scores = torch.clamp(100.0 - self.hard_motion_completion_ema, min=0.0)
+        score_sum = hard_scores.sum()
+        if score_sum <= 0.0:
+            return torch.full_like(hard_scores, 1.0 / max(int(hard_scores.numel()), 1))
+        return hard_scores / score_sum
+
+    def update_hard_motion_sampling_stats(
+        self,
+        clip_ids: torch.Tensor,
+        completion_percent_start0: torch.Tensor,
+    ) -> None:
+        if clip_ids.numel() == 0 or completion_percent_start0.numel() == 0:
+            return
+
+        clip_ids = clip_ids.to(device=self.device, dtype=torch.long).view(-1)
+        completion_percent_start0 = completion_percent_start0.to(
+            device=self.device,
+            dtype=torch.float32,
+        ).view(-1)
+        completion_percent_start0 = torch.clamp(completion_percent_start0, min=0.0, max=100.0)
+
+        for clip_id in torch.unique(clip_ids).tolist():
+            clip_id_int = int(clip_id)
+            clip_mask = clip_ids == clip_id_int
+            if not clip_mask.any():
+                continue
+
+            mean_completion = completion_percent_start0[clip_mask].mean()
+            if self.hard_motion_completion_update_count[clip_id_int].item() == 0:
+                self.hard_motion_completion_ema[clip_id_int] = mean_completion
+            else:
+                self.hard_motion_completion_ema[clip_id_int] = (
+                    self.hard_motion_sampling_ema_alpha * mean_completion
+                    + (1.0 - self.hard_motion_sampling_ema_alpha)
+                    * self.hard_motion_completion_ema[clip_id_int]
+                )
+            self.hard_motion_completion_update_count[clip_id_int] += 1
 
     def _park_object_actor(self, object_key: str, env_ids: torch.Tensor) -> None:
         """Move an inactive object actor outside depth/render/collision range for the selected envs."""

@@ -144,6 +144,44 @@ class TestSphericalCameraMode:
         controller._resolve_tracking_body()
         assert controller.robot_body_id == 1
 
+    def test_spherical_camera_auto_tracking_includes_r1_pelvis_link(self, mock_simulator):
+        """Test auto tracking can resolve the R1 pelvis link."""
+
+        def find_body(name: str) -> int:
+            if name == "pelvis_link":
+                return 3
+            raise ValueError("Body not found")
+
+        mock_simulator.find_rigid_body_indice = Mock(side_effect=find_body)
+
+        config = SphericalCameraConfig(
+            distance=3.0,
+            azimuth=45.0,
+            elevation=20.0,
+            tracking_body_name="auto",
+        )
+        controller = CameraController(config, mock_simulator)
+
+        controller._resolve_tracking_body()
+
+        assert controller.robot_body_id == 3
+
+    def test_spherical_camera_auto_tracking_skips_none_result(self, mock_simulator):
+        """Test auto tracking keeps searching when lookup returns None."""
+        mock_simulator.find_rigid_body_indice = Mock(side_effect=[None, 2])
+
+        config = SphericalCameraConfig(
+            distance=3.0,
+            azimuth=45.0,
+            elevation=20.0,
+            tracking_body_name="auto",
+        )
+        controller = CameraController(config, mock_simulator)
+
+        controller._resolve_tracking_body()
+
+        assert controller.robot_body_id == 2
+
     def test_spherical_camera_tracking_failure(self, mock_simulator):
         """Test spherical camera fails if no tracking body found."""
         # Mock find_rigid_body_indice to always fail

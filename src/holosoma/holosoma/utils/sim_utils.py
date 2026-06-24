@@ -102,6 +102,25 @@ def setup_isaaclab_launcher(config: ExperimentConfig | RunSimConfig, device: str
     Any | None
         IsaacSim simulation app instance, or None for other simulators.
     """
+    video_enabled = config.logger.video.enabled or config.logger.headless_recording
+    bridge_cfg = getattr(config.simulator.config, "bridge", None)
+    depth_camera_required = _observation_requires_depth_camera(config) or bool(
+        getattr(bridge_cfg, "publish_depth", False)
+    )
+    cameras_enabled = video_enabled or depth_camera_required
+
+    if config.training.headless and cameras_enabled and os.environ.get("HOLOSOMA_KEEP_DISPLAY", "0") != "1":
+        removed_display_vars = {
+            key: os.environ.pop(key)
+            for key in ("DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY")
+            if key in os.environ
+        }
+        if removed_display_vars:
+            logger.info(
+                "Cleared display environment variables before IsaacSim AppLauncher "
+                f"to avoid GLX in headless camera rendering: {sorted(removed_display_vars)}"
+            )
+
     from isaaclab.app import AppLauncher  # noqa: PLC0415
 
     parser = argparse.ArgumentParser(description="Run simulation with IsaacSim.")
@@ -130,12 +149,7 @@ def setup_isaaclab_launcher(config: ExperimentConfig | RunSimConfig, device: str
         pass
 
     # Check if video recording is enabled and add --enable_cameras flag
-    video_enabled = config.logger.video.enabled or config.logger.headless_recording
-    bridge_cfg = getattr(config.simulator.config, "bridge", None)
-    depth_camera_required = _observation_requires_depth_camera(config) or bool(
-        getattr(bridge_cfg, "publish_depth", False)
-    )
-    if video_enabled or depth_camera_required:
+    if cameras_enabled:
         args_cli.enable_cameras = True
 
     app_launcher = AppLauncher(args_cli)

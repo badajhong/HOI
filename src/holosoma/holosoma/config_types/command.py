@@ -103,6 +103,16 @@ class MotionConfig:
     use_adaptive_timesteps_sampler: bool = False
     """During training, whether to prioritize training on motion segments where the robot fails often."""
 
+    hard_motion_sampling_ratio: float = 0.0
+    """Fraction of reset environments sampled from low-completion motions.
+
+    The remaining reset environments are sampled uniformly. A value of 0.5 means that roughly half of the reset batch
+    uses hard-motion weighted sampling, while the other half keeps uniform motion exploration.
+    """
+
+    hard_motion_sampling_ema_alpha: float = 0.1
+    """EMA update rate for per-motion start0 completion percent used by hard-motion sampling."""
+
     start_at_timestep_zero_prob: float = 0.2
     """Probability of starting at timestep zero."""
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -679,6 +680,9 @@ class InteractionMeshRetargeter:
 
         # -------- Solve with Clarabel --------
         solver_kwargs = {"verbose": verbose}
+        cvxpy_canon_backend = os.environ.get("CVXPY_CANON_BACKEND")
+        if cvxpy_canon_backend:
+            solver_kwargs["canon_backend"] = cvxpy_canon_backend
         problem.solve(solver=cp.CLARABEL, **solver_kwargs)
         if (problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE)) and init_t:
             constraints = [c for c in constraints if not isinstance(c, cp.constraints.second_order.SOC)]

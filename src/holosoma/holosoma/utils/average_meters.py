@@ -33,10 +33,18 @@ class AverageMeter(nn.Module):
 
 
 class TensorAverageMeter:
-    def __init__(self):
+    def __init__(self, mode: str = "mean"):
+        if mode not in {"mean", "sum", "ratio"}:
+            raise ValueError(f"Unsupported TensorAverageMeter mode: {mode}")
+        self.mode = mode
         self.tensors = []
 
     def add(self, x):
+        if self.mode == "ratio":
+            if x.numel() == 0:
+                return
+            self.tensors.append(x.reshape(-1, 2))
+            return
         if len(x.shape) == 0:
             x = x.unsqueeze(0)
         self.tensors.append(x)
@@ -47,6 +55,12 @@ class TensorAverageMeter:
         cat = torch.cat(self.tensors, dim=0)
         if cat.numel() == 0:
             return 0
+        if self.mode == "ratio":
+            numerator = cat[:, 0].sum()
+            denominator = cat[:, 1].sum()
+            return torch.where(denominator > 0.0, numerator / denominator, torch.zeros_like(numerator))
+        if self.mode == "sum":
+            return cat.sum()
         return cat.mean()
 
     def clear(self):
@@ -67,7 +81,13 @@ class TensorAverageMeterDict:
             # Originally used a defaultdict, this had lambda
             # pickling issues with DDP.
             if k not in self.data:
-                self.data[k] = TensorAverageMeter()
+                if k.startswith("TerminationFailRate/"):
+                    mode = "ratio"
+                elif k.startswith("Termination/") or k.endswith("_count"):
+                    mode = "sum"
+                else:
+                    mode = "mean"
+                self.data[k] = TensorAverageMeter(mode=mode)
             self.data[k].add(v)
 
     def mean(self):

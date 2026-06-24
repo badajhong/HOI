@@ -295,6 +295,28 @@ def obj_type_one_hot(env: WholeBodyTrackingManager) -> torch.Tensor:
     return torch.nn.functional.one_hot(motion_command.object_type_ids, num_classes=num_classes).float()
 
 
+def object_randomization_privileged(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Object physics randomization and reset spawn offset for teacher policies."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    output = torch.zeros(env.num_envs, 13, device=env.device, dtype=torch.float32)
+
+    physics_by_key = getattr(env, "object_randomization_privileged_by_key", None) or {}
+    object_keys = _object_keys_for_envs(motion_command, env.num_envs)
+    for object_key in sorted({key for key in object_keys if key is not None}):
+        physics = physics_by_key.get(object_key)
+        if physics is None:
+            continue
+        mask = torch.tensor([key == object_key for key in object_keys], device=env.device, dtype=torch.bool)
+        if mask.any():
+            output[mask, :10] = physics.to(device=env.device, dtype=torch.float32)[mask]
+
+    object_spawn_offset = getattr(motion_command, "object_pos_reward_offset", None)
+    if object_spawn_offset is not None:
+        output[:, 10:13] = object_spawn_offset.to(device=env.device, dtype=torch.float32)
+
+    return output
+
+
 def _normalize_ir_surface_feature_body_source(body_source: str) -> str:
     normalized = body_source.strip().lower()
     if normalized not in IR_SURFACE_FEATURE_BODY_SOURCE_CHOICES:

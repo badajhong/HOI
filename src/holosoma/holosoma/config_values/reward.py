@@ -10,6 +10,7 @@ from holosoma.config_values.wbt.g1.reward import (
     g1_29dof_wbt_reward_w_object_multi_teacher,
     g1_29dof_wbt_reward_w_object_multi_res,
 )
+from holosoma.config_values.wbt.r1.reward import r1_26dof_wbt_reward_w_object_multi_teacher
 
 none = None
 
@@ -25,4 +26,5 @@ DEFAULTS = {
     "g1_29dof_wbt_w_object_multi": g1_29dof_wbt_reward_w_object_multi,
     "g1_29dof_wbt_w_object_multi_teacher": g1_29dof_wbt_reward_w_object_multi_teacher,
     "g1_29dof_wbt_w_object_multi_res": g1_29dof_wbt_reward_w_object_multi_res,
+    "r1_26dof_wbt_w_object_multi_teacher": r1_26dof_wbt_reward_w_object_multi_teacher,
 }

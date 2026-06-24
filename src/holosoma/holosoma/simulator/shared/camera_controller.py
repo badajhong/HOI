@@ -92,6 +92,8 @@ class CameraController:
         "base_link",  # ROS standard naming convention
         "Waist",  # Alternative trunk naming
         "pelvis",  # Anatomical naming for hip area
+        "pelvis_link",  # R1 root link
+        "waist_yaw_link",  # R1 torso tracking link
         "hip",  # Simple hip naming
         "base",  # Generic base naming
     ]
@@ -273,7 +275,10 @@ class CameraController:
         # Try each name in order until one works
         for name in names_to_try:
             try:
-                self.robot_body_id = self.simulator.find_rigid_body_indice(name)
+                robot_body_id = self.simulator.find_rigid_body_indice(name)
+                if robot_body_id is None:
+                    continue
+                self.robot_body_id = robot_body_id
                 logger.debug(f"Camera controller resolved tracking body: {name}")
                 return
             except Exception:  # noqa: S112, PERF203

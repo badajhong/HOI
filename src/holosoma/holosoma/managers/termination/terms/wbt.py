@@ -58,6 +58,7 @@ class BadTracking(TerminationTermBase):
 
         self.bad_object_pos_threshold = cfg.params["bad_object_pos_threshold"]
         self.bad_object_ori_threshold = cfg.params["bad_object_ori_threshold"]
+        self.last_reason_results: dict[str, torch.Tensor] = {}
 
     def __call__(self, env: Any, **kwargs) -> torch.Tensor:
         motion_command = self.env.command_manager.get_state("motion_command")
@@ -72,11 +73,21 @@ class BadTracking(TerminationTermBase):
         bad_ref_ori = self.bad_ref_ori(motion_command)
         bad_motion_body_pos = self.bad_motion_body_pos(motion_command)
         bad_tracking = bad_ref_pos | bad_ref_ori | bad_motion_body_pos
+        bad_object_pos = torch.zeros_like(bad_tracking)
+        bad_object_ori = torch.zeros_like(bad_tracking)
 
         if motion_command.motion.has_object:
             bad_object_pos = self.bad_object_pos(motion_command)
             bad_object_ori = self.bad_object_ori(motion_command)
             bad_tracking |= bad_object_pos | bad_object_ori
+
+        self.last_reason_results = {
+            "bad_ref_pos": bad_ref_pos.detach().clone(),
+            "bad_ref_ori": bad_ref_ori.detach().clone(),
+            "bad_motion_body_pos": bad_motion_body_pos.detach().clone(),
+            "bad_object_pos": bad_object_pos.detach().clone(),
+            "bad_object_ori": bad_object_ori.detach().clone(),
+        }
 
         if motion_command.motion_cfg.use_adaptive_timesteps_sampler and torch.any(bad_tracking):
             failed_at_time_step = motion_command.time_steps[bad_tracking]

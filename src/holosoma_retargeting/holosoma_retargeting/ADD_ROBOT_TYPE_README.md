@@ -169,7 +169,7 @@ python examples/robot_retarget.py \
 python examples/robot_retarget.py \
   --data_path demo_data/OMOMO_new \
   --task-type robot_only \
-  --task-name sub3_largebox_003 \
+  --task-name sub4_whitechair_027 \
   --data_format smplh \
   --retargeter.debug \
   --retargeter.visualize \
@@ -180,10 +180,11 @@ python examples/robot_retarget.py \
 python examples/robot_retarget.py \
   --data_path demo_data/OMOMO_new \
   --task-type object_interaction \
-  --task-name sub1_suitcase_001 \
+  --task-name sub17_smalltable_010 \
   --data_format smplh \
+  --task-config.object-name smalltable \
   --retargeter.debug \
   --retargeter.visualize \
-  --task-config.object-name suitcase \
-  --robot r1
+  --robot r1 \
+  --retargeter.penetration-tolerance 0.02
 ```

@@ -77,6 +77,7 @@ class ObjectConfig:
     object_urdf_asset: str | None = None
     object_urdf_folder: str | None = None
     object_urdf_name_to_path: dict[str, str] = field(default_factory=dict)
+    object_parm: str | None = None
 
 
 @dataclass(frozen=True)

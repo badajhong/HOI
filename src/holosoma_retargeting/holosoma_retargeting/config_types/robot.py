@@ -193,6 +193,23 @@ class RobotConfig:
                     "35": -0.05,
                 }
             )
+        elif self.robot_type == "r1":
+            base.update(
+                {
+                    # R1 retargeting indices include the 7D floating base first.
+                    # The official joint list has EMPTY slots; the model's active-joint order does not.
+                    "21": -2.2,  # left_shoulder_pitch_joint
+                    "22": -0.15,  # left_shoulder_roll_joint
+                    "23": -1.2,  # left_shoulder_yaw_joint
+                    #"24": 0.0,  # left_elbow_joint
+                    "26": -2.2,  # right_shoulder_pitch_joint
+                    "27": -1.4,  # right_shoulder_roll_joint
+                    "28": -1.2,  # right_shoulder_yaw_joint
+                    #"29": 0.0,  # right_elbow_joint
+                    "31": -0.3,
+                    "32": -1.5,
+                }
+            )
 
         return base
 
@@ -219,6 +236,23 @@ class RobotConfig:
                     "35": 0.05,
                 }
             )
+        elif self.robot_type == "r1":
+            base.update(
+                {
+                    # Practical arm limits for retargeting, narrower than the official
+                    # limits to reduce visually inverted shoulder/elbow poses.
+                    "21": 1.2,  # left_shoulder_pitch_joint
+                    "22": 1.4,  # left_shoulder_roll_joint
+                    "23": 1.2,  # left_shoulder_yaw_joint
+                    #"24": 1.6,  # left_elbow_joint
+                    "26": 1.2,  # right_shoulder_pitch_joint
+                    "27": 0.15,  # right_shoulder_roll_joint
+                    "28": 1.2,  # right_shoulder_yaw_joint
+                    #"29": 1.6,  # right_elbow_joint
+                    "31": 0.3,
+                    "32": 1.5,
+                }
+            )
 
         return base
 
@@ -232,7 +266,16 @@ class RobotConfig:
         if self.robot_type == "g1":
             return {"19": 0.2, "20": 0.2}  # waist yaw, waist roll
         if self.robot_type == "r1":
-            return {"19": 0.2, "20": 0.2}  # waist roll, waist yaw
+            return {
+                "19": 0.1,  # waist roll
+                "20": 0.2,  # waist yaw
+                "22": 0.05,  # left_shoulder_roll_joint
+                "23": 0.08,  # left_shoulder_yaw_joint
+                "27": 0.05,  # right_shoulder_roll_joint
+                "28": 0.08,  # right_shoulder_yaw_joint
+                "31": 0.05,  # head_pitch_joint
+                "32": 0.05,  # head_yaw_joint
+            }
         return {}
 
     MANUAL_COST = property(_manual_cost, doc="Get manual cost weights.")

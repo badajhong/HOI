@@ -1,0 +1,874 @@
+2026-06-22 17:08:40.762 | INFO     | __main__:_resolve_multi_object_urdf_config:221 - Resolved object URDFs from folder: {'largebox': '/home/rllab/haechan/holosoma/train_r1/objects/largebox/largebox.urdf', 'plasticbox': '/home/rllab/haechan/holosoma/train_r1/objects/plasticbox/plasticbox.urdf', 'smalltable': '/home/rllab/haechan/holosoma/train_r1/objects/smalltable/smalltable.urdf', 'suitcase': '/home/rllab/haechan/holosoma/train_r1/objects/suitcase/suitcase.urdf', 'whitechair': '/home/rllab/haechan/holosoma/train_r1/objects/whitechair/whitechair.urdf'}
+2026-06-22 17:08:40.762 | INFO     | holosoma.utils.sim_utils:setup_isaaclab_launcher:119 - Cleared display environment variables before IsaacSim AppLauncher to avoid GLX in headless camera rendering: ['DISPLAY', 'XAUTHORITY']
+Loading user config located at: '/home/rllab/.holosoma_deps/miniconda3/envs/hssim/lib/python3.11/site-packages/isaacsim/kit/data/Kit/Isaac-Sim/5.1/user.config.json'
+[Info] [carb] Logging to file: /home/rllab/.holosoma_deps/miniconda3/envs/hssim/lib/python3.11/site-packages/isaacsim/kit/logs/Kit/Isaac-Sim/5.1/kit_20260622_170840.log
+2026-06-22T08:08:40Z [83ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-06-22T08:08:40Z [83ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-06-22T08:08:40Z [104ms] [Warning] [omni.platforminfo.plugin] failed to open the default display.  Can't verify X Server version.
+2026-06-22T08:08:41Z [242ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-06-22T08:08:41Z [242ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-06-22T08:08:41Z [391ms] [Warning] [gpu.foundation.plugin] Skipping unsupported non-NVIDIA GPU: Intel(R) Graphics (RPL-S)
+2026-06-22T08:08:41Z [391ms] [Warning] [gpu.foundation.plugin] Skipping unsupported non-NVIDIA GPU: Intel(R) Graphics (RPL-S)
+
+|---------------------------------------------------------------------------------------------|
+| Driver Version: 590.48.01     | Graphics API: Vulkan
+|=============================================================================================|
+| GPU | Name                             | Active | LDA | GPU Memory | Vendor-ID | LUID       |
+|     |                                  |        |     |            | Device-ID | UUID       |
+|     |                                  |        |     |            | Bus-ID    |            |
+|---------------------------------------------------------------------------------------------|
+| 0   | NVIDIA RTX A6000                 | Yes: 0 |     | 49140   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2230      | d3197827.. |
+|     |                                  |        |     |            | 1         |            |
+|---------------------------------------------------------------------------------------------|
+| 1   | Intel(R) Graphics (RPL-S)        |        |     | 96391   MB | 8086      | 0          |
+|     |                                  |        |     |            | a780      | 868080a7.. |
+|     |                                  |        |     |            | 0         |            |
+|=============================================================================================|
+| OS: 22.04.5 LTS (Jammy Jellyfish) ubuntu, Version: 22.04.5, Kernel: 6.8.0-124-generic
+| Processor: 13th Gen Intel(R) Core(TM) i9-13900KS
+| Bare Metal Cores: 24 | Bare Metal Logical Cores: 48
+| Available Cores:  32 
+|---------------------------------------------------------------------------------------------|
+| Total Memory (MB): 128521 | Free Memory: 111934
+| Total Page/Swap (MB): 2047 | Free Page/Swap: 2047
+|---------------------------------------------------------------------------------------------|
+2026-06-22T08:08:41Z [669ms] [Warning] [gpu.foundation.plugin] CPU performance profile is set to powersave. This profile sets the CPU to the lowest frequency reducing performance.
+2026-06-22T08:08:41Z [678ms] [Warning] [gpu.foundation.plugin] IOMMU is enabled.
+2026-06-22T08:08:41Z [678ms] [Warning] [gpu.foundation.plugin] Detected IOMMU is enabled. Running CUDA peer-to-peer bandwidth and latency validation.
+Unidirectional P2P=Enabled Bandwidth (P2P Writes) Matrix (GB/s)
+   D\D     0 
+     0 603.33 
+P2P=Enabled Latency (P2P Writes) Matrix (us)
+   GPU     0 
+     0   1.66 
+
+   CPU     0 
+     0   1.20 
+2026-06-22T08:08:41Z [1,119ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-06-22T08:08:41Z [1,119ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-06-22T08:08:42Z [1,220ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-06-22T08:08:42Z [1,220ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-06-22T08:08:42Z [1,228ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-06-22T08:08:42Z [1,228ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-06-22T08:08:42Z [1,241ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-06-22T08:08:42Z [1,241ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-06-22T08:08:42Z [1,243ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-06-22T08:08:42Z [1,243ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-06-22T08:08:42Z [1,244ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-06-22T08:08:42Z [1,244ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-06-22T08:08:42Z [1,340ms] [Warning] [omni.log] Source: omni.hydra was already registered.
+2026-06-22T08:08:42Z [1,523ms] [Warning] [carb] Acquiring non optional plugin interface which is not listed as dependency: [omni::physx::IPhysxBenchmarks v1.0] (plugin: <default plugin>), by client: omni.physics.physx.plugin. Add it to CARB_PLUGIN_IMPL_DEPS() macro of a client.
+2026-06-22T08:08:42Z [1,536ms] [Warning] [omni.isaac.dynamic_control] omni.isaac.dynamic_control is deprecated as of Isaac Sim 4.5. No action is needed from end-users.
+2026-06-22T08:08:42Z [1,822ms] [Warning] [pxr.Semantics] pxr.Semantics is deprecated - please use Semantics instead
+2026-06-22T08:08:42Z [1,911ms] [Warning] [omni.graph.core.plugin] Found duplicate of category 'Replicator' - was 'Annotators', adding 'Fabric Reader'
+2026-06-22T08:08:42Z [1,911ms] [Warning] [omni.graph.core.plugin] Category 'Replicator' not accepted on node type 'omni.replicator.core.FabricReader' in extension 'omni.replicator.core'
+2026-06-22T08:08:42Z [1,911ms] [Warning] [omni.replicator.core.scripts.extension] No material configuration file, adding configuration to material settings directly.
+2026-06-22T08:08:43Z [3,083ms] [Warning] [omni.kvdb.plugin] Disabling key-value database because another kit process is locking it
+2026-06-22 17:09:44.755 | INFO     | holosoma.utils.sim_utils:setup_isaaclab_launcher:158 - IsaacSim args_cli: Namespace(num_envs=2048, seed=42, env_spacing=5.0, output_dir='logs', enable_cameras=True, xr=False, device='cuda:0', cpu=False, verbose=False, info=False, rendering_mode=None, kit_args='', anim_recording_enabled=False, anim_recording_start_time=0, anim_recording_stop_time=10, headless=True, hide_ui=True, create_new_stage=False, physics_gpu=0, active_gpu=0)
+2026-06-22 17:09:44.755 | INFO     | holosoma.utils.sim_utils:setup_isaaclab_launcher:159 - IsaacSim unknown_args: ['exp:r1-teacher', 'logger:wandb', '--training.project', 'teacher', '--command.setup-terms.motion-command.params.motion-config.motion-folder=./train_r1/rl', '--robot.object.object-urdf-asset=./train_r1/objects', '--robot.object.object-parm=./train_r1/objects/objects_parm.yaml', '--training.num-envs', '2048', '--algo.config.save-interval', '1000', '--algo.config.module-dict.actor.layer-config.hidden-dims', '[1024,512,256,128]', '--algo.config.module-dict.critic.layer-config.hidden-dims', '[1024,512,256,128]', '--command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob', '0.5', '--simulator.config.scene.env-spacing', '5.0', '--logger.video.enabled', 'True', '--logger.video.camera.tracking-body-name', 'pelvis_link', '--logger.video.camera.offset', '[3.0, -3.0, 1.5]']
+/home/rllab/.holosoma_deps/miniconda3/envs/hssim/lib/python3.11/site-packages/requests/__init__.py:113: RequestsDependencyWarning: urllib3 (2.6.3) or chardet (6.0.0.post1)/charset_normalizer (3.3.2) doesn't match a supported version!
+  warnings.warn(
+CurriculumManagerCfg(params={'num_compute_average_epl': 1000}, setup_terms={'average_episode_tracker': CurriculumTermCfg(func='holosoma.managers.curriculum.terms.locomotion:AverageEpisodeLengthTracker', params={})}, reset_terms={}, step_terms={})
+
+
+
+simulator type:  SimulatorConfig(_target_='holosoma.simulator.isaacsim.isaacsim.IsaacSim', _recursive_=False, config=SimulatorInitConfig(name='isaacsim', sim=SimEngineConfig(fps=200, control_decimation=4, substeps=1, physx=PhysxConfig(solver_type=1, num_position_iterations=8, num_velocity_iterations=4, num_threads=4, enable_dof_force_sensors=False, bounce_threshold_velocity=0.5), render_mode='human', render_interval=4, max_episode_length_s=20.0), debug_viz=True, viewer=ViewerConfig(enable_tracking=False, camera=None), scene=SceneConfig(replicate_physics=True, asset_root=None, scene_files=None, rigid_objects=None, env_spacing=5.0), reset_manager=ResetManagerConfig(events=[]), contact_sensor_history_length=3, enable_robot_depth_camera=False, robot_mjcf_filter=MujocoXMLFilterCfg(enable=False, remove_lights=True, remove_ground=True, ground_names=['floor', 'ground', 'plane']), mujoco_backend=<MujocoBackend.CLASSIC: 'classic'>, mujoco_warp=MujocoWarpConfig(nconmax_per_env=96, njmax_per_env=None), bridge=BridgeConfig(enabled=False, use_joystick=False, joystick_device=0, joystick_type='xbox', domain_id=0, interface=None, rate_limit_dt=None, use_ros=False, publish_depth=False, depth_port=5556, depth_env_id=0, depth_publish_rate_hz=50.0), virtual_gantry=VirtualGantryCfg(enabled=False, attachment_body_names=['Trunk', 'torso_link', 'torso', 'base_link', 'pelvis_link', 'pelvis', 'base'], stiffness=200.0, damping=100.0, height=3.0, point=None, length=0.0, apply_force=0.0, apply_force_sign=-1)))
+[INFO][AppLauncher]: Using device: cuda:0
+[INFO][AppLauncher]: Loading experience file: /home/rllab/.holosoma_deps/IsaacLab/apps/isaaclab.python.headless.rendering.kit
+[32m2026-06-22 17:09:45.734[0m | [1mINFO    [0m | [36mlogging[0m:[36mcallHandlers[0m:[36m1706[0m - [1mSetting seed: 42[0m
+[32m2026-06-22 17:09:45.735[0m | [1mINFO    [0m | [36m__main__[0m:[36mtrain[0m:[36m302[0m - [1mSaving wandb logs to logs/teacher/20260622_080945-r1_teacher-locomotion/.wandb[0m
+wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from /home/rllab/.netrc.
+wandb: Currently logged in as: badajhong95 (badajhong95-unist) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: setting up run d90nvf38
+wandb: Tracking run with wandb version 0.25.0
+wandb: Run data is saved locally in logs/teacher/20260622_080945-r1_teacher-locomotion/.wandb/wandb/run-20260622_170946-d90nvf38
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run 20260622_080945_r1_teacher_default_r1_26dof
+wandb: ⭐️ View project at https://wandb.ai/badajhong95-unist/teacher
+wandb: 🚀 View run at https://wandb.ai/badajhong95-unist/teacher/runs/d90nvf38
+generating randomized terrains 0 / 200     generating randomized terrains 1 / 200     generating randomized terrains 2 / 200     generating randomized terrains 3 / 200     generating randomized terrains 4 / 200     generating randomized terrains 5 / 200     generating randomized terrains 6 / 200     generating randomized terrains 7 / 200     generating randomized terrains 8 / 200     generating randomized terrains 9 / 200     generating randomized terrains 10 / 200     generating randomized terrains 11 / 200     generating randomized terrains 12 / 200     generating randomized terrains 13 / 200     generating randomized terrains 14 / 200     generating randomized terrains 15 / 200     generating randomized terrains 16 / 200     generating randomized terrains 17 / 200     generating randomized terrains 18 / 200     generating randomized terrains 19 / 200     generating randomized terrains 20 / 200     generating randomized terrains 21 / 200     generating randomized terrains 22 / 200     generating randomized terrains 23 / 200     generating randomized terrains 24 / 200     generating randomized terrains 25 / 200     generating randomized terrains 26 / 200     generating randomized terrains 27 / 200     generating randomized terrains 28 / 200     generating randomized terrains 29 / 200     generating randomized terrains 30 / 200     generating randomized terrains 31 / 200     generating randomized terrains 32 / 200     generating randomized terrains 33 / 200     generating randomized terrains 34 / 200     generating randomized terrains 35 / 200     generating randomized terrains 36 / 200     generating randomized terrains 37 / 200     generating randomized terrains 38 / 200     generating randomized terrains 39 / 200     generating randomized terrains 40 / 200     generating randomized terrains 41 / 200     generating randomized terrains 42 / 200     generating randomized terrains 43 / 200     generating randomized terrains 44 / 200     generating randomized terrains 45 / 200     generating randomized terrains 46 / 200     generating randomized terrains 47 / 200     generating randomized terrains 48 / 200     generating randomized terrains 49 / 200     generating randomized terrains 50 / 200     generating randomized terrains 51 / 200     generating randomized terrains 52 / 200     generating randomized terrains 53 / 200     generating randomized terrains 54 / 200     generating randomized terrains 55 / 200     generating randomized terrains 56 / 200     generating randomized terrains 57 / 200     generating randomized terrains 58 / 200     generating randomized terrains 59 / 200     generating randomized terrains 60 / 200     generating randomized terrains 61 / 200     generating randomized terrains 62 / 200     generating randomized terrains 63 / 200     generating randomized terrains 64 / 200     generating randomized terrains 65 / 200     generating randomized terrains 66 / 200     generating randomized terrains 67 / 200     generating randomized terrains 68 / 200     generating randomized terrains 69 / 200     generating randomized terrains 70 / 200     generating randomized terrains 71 / 200     generating randomized terrains 72 / 200     generating randomized terrains 73 / 200     generating randomized terrains 74 / 200     generating randomized terrains 75 / 200     generating randomized terrains 76 / 200     generating randomized terrains 77 / 200     generating randomized terrains 78 / 200     generating randomized terrains 79 / 200     generating randomized terrains 80 / 200     generating randomized terrains 81 / 200     generating randomized terrains 82 / 200     generating randomized terrains 83 / 200     generating randomized terrains 84 / 200     generating randomized terrains 85 / 200     generating randomized terrains 86 / 200     generating randomized terrains 87 / 200     generating randomized terrains 88 / 200     generating randomized terrains 89 / 200     generating randomized terrains 90 / 200     generating randomized terrains 91 / 200     generating randomized terrains 92 / 200     generating randomized terrains 93 / 200     generating randomized terrains 94 / 200     generating randomized terrains 95 / 200     generating randomized terrains 96 / 200     generating randomized terrains 97 / 200     generating randomized terrains 98 / 200     generating randomized terrains 99 / 200     generating randomized terrains 100 / 200     generating randomized terrains 101 / 200     generating randomized terrains 102 / 200     generating randomized terrains 103 / 200     generating randomized terrains 104 / 200     generating randomized terrains 105 / 200     generating randomized terrains 106 / 200     generating randomized terrains 107 / 200     generating randomized terrains 108 / 200     generating randomized terrains 109 / 200     generating randomized terrains 110 / 200     generating randomized terrains 111 / 200     generating randomized terrains 112 / 200     generating randomized terrains 113 / 200     generating randomized terrains 114 / 200     generating randomized terrains 115 / 200     generating randomized terrains 116 / 200     generating randomized terrains 117 / 200     generating randomized terrains 118 / 200     generating randomized terrains 119 / 200     generating randomized terrains 120 / 200     generating randomized terrains 121 / 200     generating randomized terrains 122 / 200     generating randomized terrains 123 / 200     generating randomized terrains 124 / 200     generating randomized terrains 125 / 200     generating randomized terrains 126 / 200     generating randomized terrains 127 / 200     generating randomized terrains 128 / 200     generating randomized terrains 129 / 200     generating randomized terrains 130 / 200     generating randomized terrains 131 / 200     generating randomized terrains 132 / 200     generating randomized terrains 133 / 200     generating randomized terrains 134 / 200     generating randomized terrains 135 / 200     generating randomized terrains 136 / 200     generating randomized terrains 137 / 200     generating randomized terrains 138 / 200     generating randomized terrains 139 / 200     generating randomized terrains 140 / 200     generating randomized terrains 141 / 200     generating randomized terrains 142 / 200     generating randomized terrains 143 / 200     generating randomized terrains 144 / 200     generating randomized terrains 145 / 200     generating randomized terrains 146 / 200     generating randomized terrains 147 / 200     generating randomized terrains 148 / 200     generating randomized terrains 149 / 200     generating randomized terrains 150 / 200     generating randomized terrains 151 / 200     generating randomized terrains 152 / 200     generating randomized terrains 153 / 200     generating randomized terrains 154 / 200     generating randomized terrains 155 / 200     generating randomized terrains 156 / 200     generating randomized terrains 157 / 200     generating randomized terrains 158 / 200     generating randomized terrains 159 / 200     generating randomized terrains 160 / 200     generating randomized terrains 161 / 200     generating randomized terrains 162 / 200     generating randomized terrains 163 / 200     generating randomized terrains 164 / 200     generating randomized terrains 165 / 200     generating randomized terrains 166 / 200     generating randomized terrains 167 / 200     generating randomized terrains 168 / 200     generating randomized terrains 169 / 200     generating randomized terrains 170 / 200     generating randomized terrains 171 / 200     generating randomized terrains 172 / 200     generating randomized terrains 173 / 200     generating randomized terrains 174 / 200     generating randomized terrains 175 / 200     generating randomized terrains 176 / 200     generating randomized terrains 177 / 200     generating randomized terrains 178 / 200     generating randomized terrains 179 / 200     generating randomized terrains 180 / 200     generating randomized terrains 181 / 200     generating randomized terrains 182 / 200     generating randomized terrains 183 / 200     generating randomized terrains 184 / 200     generating randomized terrains 185 / 200     generating randomized terrains 186 / 200     generating randomized terrains 187 / 200     generating randomized terrains 188 / 200     generating randomized terrains 189 / 200     generating randomized terrains 190 / 200     generating randomized terrains 191 / 200     generating randomized terrains 192 / 200     generating randomized terrains 193 / 200     generating randomized terrains 194 / 200     generating randomized terrains 195 / 200     generating randomized terrains 196 / 200     generating randomized terrains 197 / 200     generating randomized terrains 198 / 200     generating randomized terrains 199 / 200     
+ generated all randomized terrains!
+[32m2026-06-22 17:09:47.687[0m | [1mINFO    [0m | [36mholosoma.simulator.isaacsim.isaacsim[0m:[36m__init__[0m:[36m127[0m - [1mIsaacSim initialized.[0m
+[32m2026-06-22 17:09:47.688[0m | [1mINFO    [0m | [36mholosoma.simulator.isaacsim.isaacsim[0m:[36m__init__[0m:[36m129[0m - [1m[INFO]: Base environment:[0m
+[32m2026-06-22 17:09:47.688[0m | [1mINFO    [0m | [36mholosoma.simulator.isaacsim.isaacsim[0m:[36m__init__[0m:[36m130[0m - [1m	Environment device    : cuda:0[0m
+[32m2026-06-22 17:09:47.688[0m | [1mINFO    [0m | [36mholosoma.simulator.isaacsim.isaacsim[0m:[36m__init__[0m:[36m131[0m - [1m	Physics step-size     : 0.005[0m
+[32m2026-06-22 17:09:47.688[0m | [1mINFO    [0m | [36mholosoma.simulator.isaacsim.isaacsim[0m:[36m__init__[0m:[36m132[0m - [1m	Rendering step-size   : 0.005[0m
+key: hip_pitch, kp: 40.179238471, kd: 2.557889765
+key: hip_roll, kp: 99.098427777, kd: 6.308801854
+key: hip_yaw, kp: 40.179238471, kd: 2.557889765
+key: knee, kp: 99.098427777, kd: 6.308801854
+key: ankle_pitch, kp: 28.501246196, kd: 1.814445687
+key: ankle_roll, kp: 28.501246196, kd: 1.814445687
+key: hip_pitch, kp: 40.179238471, kd: 2.557889765
+key: hip_roll, kp: 99.098427777, kd: 6.308801854
+key: hip_yaw, kp: 40.179238471, kd: 2.557889765
+key: knee, kp: 99.098427777, kd: 6.308801854
+key: ankle_pitch, kp: 28.501246196, kd: 1.814445687
+key: ankle_roll, kp: 28.501246196, kd: 1.814445687
+key: waist_roll, kp: 28.501246196, kd: 1.814445687
+key: waist_yaw, kp: 40.179238471, kd: 2.557889765
+key: shoulder_pitch, kp: 14.250623098, kd: 0.907222843
+key: shoulder_roll, kp: 14.250623098, kd: 0.907222843
+key: shoulder_yaw, kp: 14.250623098, kd: 0.907222843
+key: elbow, kp: 14.250623098, kd: 0.907222843
+key: wrist_roll, kp: 14.250623098, kd: 0.907222843
+key: shoulder_pitch, kp: 14.250623098, kd: 0.907222843
+key: shoulder_roll, kp: 14.250623098, kd: 0.907222843
+key: shoulder_yaw, kp: 14.250623098, kd: 0.907222843
+key: elbow, kp: 14.250623098, kd: 0.907222843
+key: wrist_roll, kp: 14.250623098, kd: 0.907222843
+key: head_pitch, kp: 14.250623098, kd: 0.907222843
+key: head_yaw, kp: 14.250623098, kd: 0.907222843
+/World/envs/env_0/Robot
+├── /World/envs/env_0/Robot/pelvis_link
+│   ├── /World/envs/env_0/Robot/pelvis_link/visuals
+└── /World/envs/env_0/Robot/pelvis_link/collisions
+├── /World/envs/env_0/Robot/imu_in_pelvis_link
+│   ├── /World/envs/env_0/Robot/imu_in_pelvis_link/visuals
+└── /World/envs/env_0/Robot/imu_in_pelvis_link/collisions
+├── /World/envs/env_0/Robot/joints
+│   ├── /World/envs/env_0/Robot/joints/imu_in_pelvis_joint
+│   ├── /World/envs/env_0/Robot/joints/left_hip_pitch_joint
+│   ├── /World/envs/env_0/Robot/joints/left_hip_roll_joint
+│   ├── /World/envs/env_0/Robot/joints/left_hip_yaw_joint
+│   ├── /World/envs/env_0/Robot/joints/left_knee_joint
+│   ├── /World/envs/env_0/Robot/joints/left_ankle_A_joint
+│   ├── /World/envs/env_0/Robot/joints/left_ankle_A_rod_joint
+│   ├── /World/envs/env_0/Robot/joints/left_ankle_B_joint
+│   ├── /World/envs/env_0/Robot/joints/left_ankle_B_rod_joint
+│   ├── /World/envs/env_0/Robot/joints/left_ankle_pitch_joint
+│   ├── /World/envs/env_0/Robot/joints/left_ankle_roll_joint
+│   ├── /World/envs/env_0/Robot/joints/left_ankle_constraint_A_joint
+│   ├── /World/envs/env_0/Robot/joints/left_ankle_constraint_B_joint
+│   ├── /World/envs/env_0/Robot/joints/left_foot_front_inner_joint
+│   ├── /World/envs/env_0/Robot/joints/left_foot_front_outer_joint
+│   ├── /World/envs/env_0/Robot/joints/left_foot_rear_inner_joint
+│   ├── /World/envs/env_0/Robot/joints/left_foot_rear_outer_joint
+│   ├── /World/envs/env_0/Robot/joints/right_hip_pitch_joint
+│   ├── /World/envs/env_0/Robot/joints/right_hip_roll_joint
+│   ├── /World/envs/env_0/Robot/joints/right_hip_yaw_joint
+│   ├── /World/envs/env_0/Robot/joints/right_knee_joint
+│   ├── /World/envs/env_0/Robot/joints/right_ankle_A_joint
+│   ├── /World/envs/env_0/Robot/joints/right_ankle_A_rod_joint
+│   ├── /World/envs/env_0/Robot/joints/right_ankle_B_joint
+│   ├── /World/envs/env_0/Robot/joints/right_ankle_B_rod_joint
+│   ├── /World/envs/env_0/Robot/joints/right_ankle_pitch_joint
+│   ├── /World/envs/env_0/Robot/joints/right_ankle_roll_joint
+│   ├── /World/envs/env_0/Robot/joints/right_ankle_constraint_A_joint
+│   ├── /World/envs/env_0/Robot/joints/right_ankle_constraint_B_joint
+│   ├── /World/envs/env_0/Robot/joints/right_foot_front_inner_joint
+│   ├── /World/envs/env_0/Robot/joints/right_foot_front_outer_joint
+│   ├── /World/envs/env_0/Robot/joints/right_foot_rear_inner_joint
+│   ├── /World/envs/env_0/Robot/joints/right_foot_rear_outer_joint
+│   ├── /World/envs/env_0/Robot/joints/waist_roll_joint
+│   ├── /World/envs/env_0/Robot/joints/waist_yaw_joint
+│   ├── /World/envs/env_0/Robot/joints/head_pitch_joint
+│   ├── /World/envs/env_0/Robot/joints/head_yaw_joint
+│   ├── /World/envs/env_0/Robot/joints/left_shoulder_pitch_joint
+│   ├── /World/envs/env_0/Robot/joints/left_shoulder_roll_joint
+│   ├── /World/envs/env_0/Robot/joints/left_shoulder_yaw_joint
+│   ├── /World/envs/env_0/Robot/joints/left_elbow_joint
+│   ├── /World/envs/env_0/Robot/joints/left_wrist_roll_joint
+│   ├── /World/envs/env_0/Robot/joints/right_shoulder_pitch_joint
+│   ├── /World/envs/env_0/Robot/joints/right_shoulder_roll_joint
+│   ├── /World/envs/env_0/Robot/joints/right_shoulder_yaw_joint
+│   ├── /World/envs/env_0/Robot/joints/right_elbow_joint
+└── /World/envs/env_0/Robot/joints/right_wrist_roll_joint
+├── /World/envs/env_0/Robot/left_hip_pitch_link
+│   ├── /World/envs/env_0/Robot/left_hip_pitch_link/visuals
+└── /World/envs/env_0/Robot/left_hip_pitch_link/collisions
+├── /World/envs/env_0/Robot/left_hip_roll_link
+│   ├── /World/envs/env_0/Robot/left_hip_roll_link/visuals
+└── /World/envs/env_0/Robot/left_hip_roll_link/collisions
+├── /World/envs/env_0/Robot/left_hip_yaw_link
+│   ├── /World/envs/env_0/Robot/left_hip_yaw_link/visuals
+└── /World/envs/env_0/Robot/left_hip_yaw_link/collisions
+├── /World/envs/env_0/Robot/left_knee_link
+│   ├── /World/envs/env_0/Robot/left_knee_link/visuals
+└── /World/envs/env_0/Robot/left_knee_link/collisions
+├── /World/envs/env_0/Robot/left_ankle_A_link
+│   ├── /World/envs/env_0/Robot/left_ankle_A_link/visuals
+└── /World/envs/env_0/Robot/left_ankle_A_link/collisions
+├── /World/envs/env_0/Robot/left_ankle_A_rod_link
+│   ├── /World/envs/env_0/Robot/left_ankle_A_rod_link/visuals
+└── /World/envs/env_0/Robot/left_ankle_A_rod_link/collisions
+├── /World/envs/env_0/Robot/left_ankle_B_link
+│   ├── /World/envs/env_0/Robot/left_ankle_B_link/visuals
+└── /World/envs/env_0/Robot/left_ankle_B_link/collisions
+├── /World/envs/env_0/Robot/left_ankle_B_rod_link
+│   ├── /World/envs/env_0/Robot/left_ankle_B_rod_link/visuals
+└── /World/envs/env_0/Robot/left_ankle_B_rod_link/collisions
+├── /World/envs/env_0/Robot/left_ankle_pitch_link
+│   ├── /World/envs/env_0/Robot/left_ankle_pitch_link/visuals
+└── /World/envs/env_0/Robot/left_ankle_pitch_link/collisions
+├── /World/envs/env_0/Robot/left_ankle_roll_link
+│   ├── /World/envs/env_0/Robot/left_ankle_roll_link/visuals
+└── /World/envs/env_0/Robot/left_ankle_roll_link/collisions
+├── /World/envs/env_0/Robot/left_ankle_constraint_A_link
+│   ├── /World/envs/env_0/Robot/left_ankle_constraint_A_link/visuals
+└── /World/envs/env_0/Robot/left_ankle_constraint_A_link/collisions
+├── /World/envs/env_0/Robot/left_ankle_constraint_B_link
+│   ├── /World/envs/env_0/Robot/left_ankle_constraint_B_link/visuals
+└── /World/envs/env_0/Robot/left_ankle_constraint_B_link/collisions
+├── /World/envs/env_0/Robot/left_foot_front_inner_link
+│   ├── /World/envs/env_0/Robot/left_foot_front_inner_link/visuals
+└── /World/envs/env_0/Robot/left_foot_front_inner_link/collisions
+├── /World/envs/env_0/Robot/left_foot_front_outer_link
+│   ├── /World/envs/env_0/Robot/left_foot_front_outer_link/visuals
+└── /World/envs/env_0/Robot/left_foot_front_outer_link/collisions
+├── /World/envs/env_0/Robot/left_foot_rear_inner_link
+│   ├── /World/envs/env_0/Robot/left_foot_rear_inner_link/visuals
+└── /World/envs/env_0/Robot/left_foot_rear_inner_link/collisions
+├── /World/envs/env_0/Robot/left_foot_rear_outer_link
+│   ├── /World/envs/env_0/Robot/left_foot_rear_outer_link/visuals
+└── /World/envs/env_0/Robot/left_foot_rear_outer_link/collisions
+├── /World/envs/env_0/Robot/right_hip_pitch_link
+│   ├── /World/envs/env_0/Robot/right_hip_pitch_link/visuals
+└── /World/envs/env_0/Robot/right_hip_pitch_link/collisions
+├── /World/envs/env_0/Robot/right_hip_roll_link
+│   ├── /World/envs/env_0/Robot/right_hip_roll_link/visuals
+└── /World/envs/env_0/Robot/right_hip_roll_link/collisions
+├── /World/envs/env_0/Robot/right_hip_yaw_link
+│   ├── /World/envs/env_0/Robot/right_hip_yaw_link/visuals
+└── /World/envs/env_0/Robot/right_hip_yaw_link/collisions
+├── /World/envs/env_0/Robot/right_knee_link
+│   ├── /World/envs/env_0/Robot/right_knee_link/visuals
+└── /World/envs/env_0/Robot/right_knee_link/collisions
+├── /World/envs/env_0/Robot/right_ankle_A_link
+│   ├── /World/envs/env_0/Robot/right_ankle_A_link/visuals
+└── /World/envs/env_0/Robot/right_ankle_A_link/collisions
+├── /World/envs/env_0/Robot/right_ankle_A_rod_link
+│   ├── /World/envs/env_0/Robot/right_ankle_A_rod_link/visuals
+└── /World/envs/env_0/Robot/right_ankle_A_rod_link/collisions
+├── /World/envs/env_0/Robot/right_ankle_B_link
+│   ├── /World/envs/env_0/Robot/right_ankle_B_link/visuals
+└── /World/envs/env_0/Robot/right_ankle_B_link/collisions
+├── /World/envs/env_0/Robot/right_ankle_B_rod_link
+│   ├── /World/envs/env_0/Robot/right_ankle_B_rod_link/visuals
+└── /World/envs/env_0/Robot/right_ankle_B_rod_link/collisions
+├── /World/envs/env_0/Robot/right_ankle_pitch_link
+│   ├── /World/envs/env_0/Robot/right_ankle_pitch_link/visuals
+└── /World/envs/env_0/Robot/right_ankle_pitch_link/collisions
+├── /World/envs/env_0/Robot/right_ankle_roll_link
+│   ├── /World/envs/env_0/Robot/right_ankle_roll_link/visuals
+└── /World/envs/env_0/Robot/right_ankle_roll_link/collisions
+├── /World/envs/env_0/Robot/right_ankle_constraint_A_link
+│   ├── /World/envs/env_0/Robot/right_ankle_constraint_A_link/visuals
+└── /World/envs/env_0/Robot/right_ankle_constraint_A_link/collisions
+├── /World/envs/env_0/Robot/right_ankle_constraint_B_link
+│   ├── /World/envs/env_0/Robot/right_ankle_constraint_B_link/visuals
+└── /World/envs/env_0/Robot/right_ankle_constraint_B_link/collisions
+├── /World/envs/env_0/Robot/right_foot_front_inner_link
+│   ├── /World/envs/env_0/Robot/right_foot_front_inner_link/visuals
+└── /World/envs/env_0/Robot/right_foot_front_inner_link/collisions
+├── /World/envs/env_0/Robot/right_foot_front_outer_link
+│   ├── /World/envs/env_0/Robot/right_foot_front_outer_link/visuals
+└── /World/envs/env_0/Robot/right_foot_front_outer_link/collisions
+├── /World/envs/env_0/Robot/right_foot_rear_inner_link
+│   ├── /World/envs/env_0/Robot/right_foot_rear_inner_link/visuals
+└── /World/envs/env_0/Robot/right_foot_rear_inner_link/collisions
+├── /World/envs/env_0/Robot/right_foot_rear_outer_link
+│   ├── /World/envs/env_0/Robot/right_foot_rear_outer_link/visuals
+└── /World/envs/env_0/Robot/right_foot_rear_outer_link/collisions
+├── /World/envs/env_0/Robot/waist_roll_link
+│   ├── /World/envs/env_0/Robot/waist_roll_link/visuals
+└── /World/envs/env_0/Robot/waist_roll_link/collisions
+├── /World/envs/env_0/Robot/waist_yaw_link
+│   ├── /World/envs/env_0/Robot/waist_yaw_link/visuals
+└── /World/envs/env_0/Robot/waist_yaw_link/collisions
+├── /World/envs/env_0/Robot/head_pitch_link
+│   ├── /World/envs/env_0/Robot/head_pitch_link/visuals
+└── /World/envs/env_0/Robot/head_pitch_link/collisions
+├── /World/envs/env_0/Robot/head_yaw_link
+│   ├── /World/envs/env_0/Robot/head_yaw_link/visuals
+└── /World/envs/env_0/Robot/head_yaw_link/collisions
+├── /World/envs/env_0/Robot/left_shoulder_pitch_link
+│   ├── /World/envs/env_0/Robot/left_shoulder_pitch_link/visuals
+└── /World/envs/env_0/Robot/left_shoulder_pitch_link/collisions
+├── /World/envs/env_0/Robot/left_shoulder_roll_link
+│   ├── /World/envs/env_0/Robot/left_shoulder_roll_link/visuals
+└── /World/envs/env_0/Robot/left_shoulder_roll_link/collisions
+├── /World/envs/env_0/Robot/left_shoulder_yaw_link
+│   ├── /World/envs/env_0/Robot/left_shoulder_yaw_link/visuals
+└── /World/envs/env_0/Robot/left_shoulder_yaw_link/collisions
+├── /World/envs/env_0/Robot/left_elbow_link
+│   ├── /World/envs/env_0/Robot/left_elbow_link/visuals
+└── /World/envs/env_0/Robot/left_elbow_link/collisions
+├── /World/envs/env_0/Robot/left_wrist_roll_link
+│   ├── /World/envs/env_0/Robot/left_wrist_roll_link/visuals
+└── /World/envs/env_0/Robot/left_wrist_roll_link/collisions
+├── /World/envs/env_0/Robot/right_shoulder_pitch_link
+│   ├── /World/envs/env_0/Robot/right_shoulder_pitch_link/visuals
+└── /World/envs/env_0/Robot/right_shoulder_pitch_link/collisions
+├── /World/envs/env_0/Robot/right_shoulder_roll_link
+│   ├── /World/envs/env_0/Robot/right_shoulder_roll_link/visuals
+└── /World/envs/env_0/Robot/right_shoulder_roll_link/collisions
+├── /World/envs/env_0/Robot/right_shoulder_yaw_link
+│   ├── /World/envs/env_0/Robot/right_shoulder_yaw_link/visuals
+└── /World/envs/env_0/Robot/right_shoulder_yaw_link/collisions
+├── /World/envs/env_0/Robot/right_elbow_link
+│   ├── /World/envs/env_0/Robot/right_elbow_link/visuals
+└── /World/envs/env_0/Robot/right_elbow_link/collisions
+├── /World/envs/env_0/Robot/right_wrist_roll_link
+│   ├── /World/envs/env_0/Robot/right_wrist_roll_link/visuals
+└── /World/envs/env_0/Robot/right_wrist_roll_link/collisions
+├── /World/envs/env_0/Robot/Looks
+│   ├── /World/envs/env_0/Robot/Looks/material_dark
+│   └── /World/envs/env_0/Robot/Looks/material_dark/Shader
+│   ├── /World/envs/env_0/Robot/Looks/material_light_grey
+│   └── /World/envs/env_0/Robot/Looks/material_light_grey/Shader
+└── /World/envs/env_0/Robot/Looks/material_white
+[32m2026-06-22 17:09:49.604[0m | [1mINFO    [0m | [36mholosoma.simulator.isaacsim.isaacsim[0m:[36m_setup_scene[0m:[36m420[0m - [1mIsaacSim: robot depth camera creation disabled by simulator config.[0m
+[32m2026-06-22 17:10:03.564[0m | [1mINFO    [0m | [36mholosoma.simulator.isaacsim.isaacsim[0m:[36m_setup_scene[0m:[36m498[0m - [1mLoaded 5 object URDFs for multi-object motion training[0m
+[INFO]: Time taken for scene creation : 15.888550 seconds
+[INFO]: Scene manager:  <class InteractiveScene>
+	Number of environments: 2048
+	Environment spacing   : 5.0
+	Source prim name      : /World/envs/env_0
+	Global prim paths     : ['/World/ground']
+	Replicate physics     : True
+[32m2026-06-22 17:10:03.579[0m | [1mINFO    [0m | [36mholosoma.simulator.isaacsim.isaacsim[0m:[36m__init__[0m:[36m171[0m - [1mStarting the simulation. This may take a few seconds. Please wait...[0m
+[INFO]: Time taken for simulation start : 12.823621 seconds
+[INFO] Event Manager:  <EventManager> contains 0 active terms.
+
+[32m2026-06-22 17:10:16.409[0m | [1mINFO    [0m | [36mholosoma.simulator.isaacsim.video_recorder[0m:[36m__init__[0m:[36m72[0m - [1mIsaacSim video recorder initialized - synchronous mode[0m
+[32m2026-06-22 17:10:16.409[0m | [1mINFO    [0m | [36mholosoma.simulator.isaacsim.video_recorder[0m:[36m__init__[0m:[36m75[0m - [1mCamera config: cartesian[0m
+[32m2026-06-22 17:10:16.410[0m | [1mINFO    [0m | [36mholosoma.simulator.isaacsim.video_recorder[0m:[36m__init__[0m:[36m76[0m - [1mVideo dimensions: 640x360[0m
+[32m2026-06-22 17:10:16.410[0m | [1mINFO    [0m | [36mholosoma.simulator.isaacsim.isaacsim[0m:[36m__init__[0m:[36m222[0m - [1mCompleted setting up the environment...[0m
+[32m2026-06-22 17:10:16.413[0m | [33m[1mWARNING [0m | [36mholosoma.simulator.isaacsim.isaacsim[0m:[36mload_assets[0m:[36m801[0m - [33m[1mThe order of the joint_names in the robot_config does not match the order of the joint_ids in IsaacSim.[0m
+[32m2026-06-22 17:10:19.128[0m | [1mINFO    [0m | [36mholosoma.simulator.isaacsim.registry_utils[0m:[36mregister_scene_objects[0m:[36m134[0m - [1mNo USD scene objects found[0m
+[32m2026-06-22 17:10:19.200[0m | [1mINFO    [0m | [36mholosoma.simulator.isaacsim.registry_utils[0m:[36mregister_objects[0m:[36m76[0m - [1mIsaacSim: Object registry populated with 6 objects[0m
+[32m2026-06-22 17:10:19.207[0m | [1mINFO    [0m | [36mholosoma.simulator.shared.virtual_gantry[0m:[36mcreate_virtual_gantry[0m:[36m519[0m - [1m=== Setting up virtual gantry system ===[0m
+[32m2026-06-22 17:10:19.208[0m | [1mINFO    [0m | [36mholosoma.simulator.shared.virtual_gantry[0m:[36mcreate_virtual_gantry[0m:[36m526[0m - [1mVirtual gantry attached to body 'pelvis_link' (ID: 0)[0m
+[32m2026-06-22 17:10:19.208[0m | [33m[1mWARNING [0m | [36mholosoma.simulator.shared.virtual_gantry[0m:[36m_setup_force_application[0m:[36m131[0m - [33m[1mVirtual Gantry untested in IsaacSim[0m
+[32m2026-06-22 17:10:19.208[0m | [1mINFO    [0m | [36mholosoma.simulator.shared.virtual_gantry[0m:[36mcreate_virtual_gantry[0m:[36m528[0m - [1m=== Virtual gantry system setup completed ===[0m
+[32m2026-06-22 17:10:19.208[0m | [1mINFO    [0m | [36mholosoma.simulator.base_simulator.base_simulator[0m:[36m_init_bridge[0m:[36m475[0m - [1mRobot bridge disabled[0m
+[32m2026-06-22 17:10:19.208[0m | [1mINFO    [0m | [36mholosoma.simulator.shared.video_recorder[0m:[36msetup_recording[0m:[36m132[0m - [1mVideo recording enabled, saving videos to logs/teacher/20260622_080947-r1_teacher-wholebodytrackingmanager/renderings_training[0m
+[32m2026-06-22 17:10:19.531[0m | [1mINFO    [0m | [36mholosoma.managers.randomization.terms.locomotion[0m:[36m__init__[0m:[36m636[0m - [1m[Randomization] PushRandomizerState initialized (enabled=True,                 max_push_vel=[0.5, 0.5, 0.20000000298023224, 0.5199999809265137, 0.5199999809265137, 0.7799999713897705],                 interval_s=[1.0, 3.0])[0m
+[32m2026-06-22 17:10:19.730[0m | [1mINFO    [0m | [36mholosoma.managers.randomization.terms.locomotion[0m:[36mrandomize_base_com_startup[0m:[36m1093[0m - [1m[Randomization] Base CoM: x=[-0.025, 0.025], y=[-0.05, 0.05], z=[-0.05, 0.05] (operation=add)[0m
+[32m2026-06-22 17:10:19.756[0m | [1mINFO    [0m | [36mholosoma.managers.randomization.terms.locomotion[0m:[36m_load_object_parm_config[0m:[36m98[0m - [1mLoaded object parameter YAML: /home/rllab/haechan/holosoma/train_r1/objects/objects_parm.yaml[0m
+[32m2026-06-22 17:10:19.851[0m | [1mINFO    [0m | [36mholosoma.managers.command.terms.wbt[0m:[36m__init__[0m:[36m81[0m - [1mLoading motion files from folder: /home/rllab/haechan/holosoma/train_r1/rl[0m
+[32m2026-06-22 17:10:19.853[0m | [1mINFO    [0m | [36mholosoma.managers.command.terms.wbt[0m:[36m_load_and_concat_motions_from_folder[0m:[36m165[0m - [1mFound 13 motion files in /home/rllab/haechan/holosoma/train_r1/rl[0m
+[32m2026-06-22 17:10:19.854[0m | [1mINFO    [0m | [36mholosoma.managers.command.terms.wbt[0m:[36m_load_and_concat_motions_from_folder[0m:[36m198[0m - [1mLoading motion file: /home/rllab/haechan/holosoma/train_r1/rl/largebox/sub3_largebox_001.npz[0m
+[32m2026-06-22 17:10:19.858[0m | [1mINFO    [0m | [36mholosoma.managers.command.terms.wbt[0m:[36m_load_and_concat_motions_from_folder[0m:[36m198[0m - [1mLoading motion file: /home/rllab/haechan/holosoma/train_r1/rl/largebox/sub3_largebox_020.npz[0m
+[32m2026-06-22 17:10:19.863[0m | [1mINFO    [0m | [36mholosoma.managers.command.terms.wbt[0m:[36m_load_and_concat_motions_from_folder[0m:[36m198[0m - [1mLoading motion file: /home/rllab/haechan/holosoma/train_r1/rl/largebox/sub7_largebox_000.npz[0m
+[32m2026-06-22 17:10:19.867[0m | [1mINFO    [0m | [36mholosoma.managers.command.terms.wbt[0m:[36m_load_and_concat_motions_from_folder[0m:[36m198[0m - [1mLoading motion file: /home/rllab/haechan/holosoma/train_r1/rl/plasticbox/sub5_plasticbox_000.npz[0m
+[32m2026-06-22 17:10:19.871[0m | [1mINFO    [0m | [36mholosoma.managers.command.terms.wbt[0m:[36m_load_and_concat_motions_from_folder[0m:[36m198[0m - [1mLoading motion file: /home/rllab/haechan/holosoma/train_r1/rl/plasticbox/sub5_plasticbox_030.npz[0m
+[32m2026-06-22 17:10:19.876[0m | [1mINFO    [0m | [36mholosoma.managers.command.terms.wbt[0m:[36m_load_and_concat_motions_from_folder[0m:[36m198[0m - [1mLoading motion file: /home/rllab/haechan/holosoma/train_r1/rl/smalltable/sub17_smalltable_010.npz[0m
+[32m2026-06-22 17:10:19.882[0m | [1mINFO    [0m | [36mholosoma.managers.command.terms.wbt[0m:[36m_load_and_concat_motions_from_folder[0m:[36m198[0m - [1mLoading motion file: /home/rllab/haechan/holosoma/train_r1/rl/smalltable/sub17_smalltable_014.npz[0m
+[32m2026-06-22 17:10:19.887[0m | [1mINFO    [0m | [36mholosoma.managers.command.terms.wbt[0m:[36m_load_and_concat_motions_from_folder[0m:[36m198[0m - [1mLoading motion file: /home/rllab/haechan/holosoma/train_r1/rl/smalltable/sub6_smalltable_030.npz[0m
+[32m2026-06-22 17:10:19.893[0m | [1mINFO    [0m | [36mholosoma.managers.command.terms.wbt[0m:[36m_load_and_concat_motions_from_folder[0m:[36m198[0m - [1mLoading motion file: /home/rllab/haechan/holosoma/train_r1/rl/suitcase/sub1_suitcase_001.npz[0m
+[32m2026-06-22 17:10:19.897[0m | [1mINFO    [0m | [36mholosoma.managers.command.terms.wbt[0m:[36m_load_and_concat_motions_from_folder[0m:[36m198[0m - [1mLoading motion file: /home/rllab/haechan/holosoma/train_r1/rl/suitcase/sub1_suitcase_050.npz[0m
+[32m2026-06-22 17:10:19.903[0m | [1mINFO    [0m | [36mholosoma.managers.command.terms.wbt[0m:[36m_load_and_concat_motions_from_folder[0m:[36m198[0m - [1mLoading motion file: /home/rllab/haechan/holosoma/train_r1/rl/suitcase/sub1_suitcase_070.npz[0m
+[32m2026-06-22 17:10:19.908[0m | [1mINFO    [0m | [36mholosoma.managers.command.terms.wbt[0m:[36m_load_and_concat_motions_from_folder[0m:[36m198[0m - [1mLoading motion file: /home/rllab/haechan/holosoma/train_r1/rl/whitechair/sub4_whitechair_029.npz[0m
+[32m2026-06-22 17:10:19.914[0m | [1mINFO    [0m | [36mholosoma.managers.command.terms.wbt[0m:[36m_load_and_concat_motions_from_folder[0m:[36m198[0m - [1mLoading motion file: /home/rllab/haechan/holosoma/train_r1/rl/whitechair/sub4_whitechair_030.npz[0m
+[32m2026-06-22 17:10:19.919[0m | [1mINFO    [0m | [36mholosoma.managers.command.terms.wbt[0m:[36m_load_and_concat_motions_from_folder[0m:[36m271[0m - [1mConcatenated 13 motion files. Total timesteps: 4197[0m
+[32m2026-06-22 17:10:20.272[0m | [1mINFO    [0m | [36mholosoma.managers.command.terms.wbt[0m:[36m_maybe_add_default_pose_transition[0m:[36m1349[0m - [1mprepend 100 interpolated frames (2.0s) from default pose to motion[0m
+[32m2026-06-22 17:10:20.298[0m | [1mINFO    [0m | [36mholosoma.managers.command.terms.wbt[0m:[36m_maybe_add_default_pose_transition[0m:[36m1349[0m - [1mappend 100 interpolated frames (2.0s) from default pose to motion[0m
+/home/rllab/.holosoma_deps/miniconda3/envs/hssim/lib/python3.11/site-packages/torch/functional.py:554: UserWarning: torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument. (Triggered internally at /pytorch/aten/src/ATen/native/TensorShape.cpp:4314.)
+  return _VF.meshgrid(tensors, **kwargs)  # type: ignore[attr-defined]
+[32m2026-06-22 17:10:20.355[0m | [1mINFO    [0m | [36m__main__[0m:[36mtrain[0m:[36m357[0m - [1mSaving config file to logs/teacher/20260622_080945-r1_teacher-locomotion[0m
+wandb: WARNING Symlinked 1 file into the W&B run directory; call wandb.save again to sync new files.
+[32m2026-06-22 17:10:20.798[0m | [1mINFO    [0m | [36mholosoma.managers.randomization.terms.locomotion[0m:[36m_setup_object_scale_reference_bounds[0m:[36m534[0m - [1m[Randomization] Object bounds for 'object_largebox': min=[-0.23408277332782745, -0.23008044064044952, -0.19819214940071106], max=[0.2370714396238327, 0.22864969074726105, 0.20970332622528076], height=0.4079[0m
+[32m2026-06-22 17:10:20.990[0m | [1mINFO    [0m | [36mholosoma.managers.randomization.terms.locomotion[0m:[36m_setup_object_scale_reference_bounds[0m:[36m534[0m - [1m[Randomization] Object bounds for 'object_plasticbox': min=[-0.27612143754959106, -0.13247434794902802, -0.1954120397567749], max=[0.2788790762424469, 0.1455271691083908, 0.1898033618927002], height=0.3852[0m
+[32m2026-06-22 17:10:21.065[0m | [1mINFO    [0m | [36mholosoma.managers.randomization.terms.locomotion[0m:[36m_setup_object_scale_reference_bounds[0m:[36m534[0m - [1m[Randomization] Object bounds for 'object_smalltable': min=[-0.17446258664131165, -0.26312553882598877, -0.1823955625295639], max=[0.17803755402565002, 0.08483199775218964, 0.18301406502723694], height=0.3654[0m
+[32m2026-06-22 17:10:21.318[0m | [1mINFO    [0m | [36mholosoma.managers.randomization.terms.locomotion[0m:[36m_setup_object_scale_reference_bounds[0m:[36m534[0m - [1m[Randomization] Object bounds for 'object_suitcase': min=[-0.2057124674320221, -0.320000022649765, -0.20950855314731598], max=[0.20421767234802246, 0.2490645945072174, 0.20378242433071136], height=0.4133[0m
+[32m2026-06-22 17:10:21.434[0m | [1mINFO    [0m | [36mholosoma.managers.randomization.terms.locomotion[0m:[36m_setup_object_scale_reference_bounds[0m:[36m534[0m - [1m[Randomization] Object bounds for 'object_whitechair': min=[-0.5366836786270142, -0.29607245326042175, -0.5294357538223267], max=[0.3860533833503723, 0.38605761528015137, 0.2846890091896057], height=0.8141[0m
+[32m2026-06-22 17:10:21.441[0m | [1mINFO    [0m | [36mholosoma.managers.command.terms.wbt[0m:[36m_ensure_object_grounding_offsets_initialized[0m:[36m1411[0m - [1mInitialized per-clip object grounding offsets: min=0.0019, max=0.0095[0m
+[32m2026-06-22 17:10:22.390[0m | [1mINFO    [0m | [36mholosoma.agents.ppo.ppo[0m:[36msetup[0m:[36m165[0m - [1mSetting up PPO[0m
+Actor Module: Sequential(
+  (0): Linear(in_features=864, out_features=1024, bias=True)
+  (1): ELU(alpha=1.0)
+  (2): Linear(in_features=1024, out_features=512, bias=True)
+  (3): ELU(alpha=1.0)
+  (4): Linear(in_features=512, out_features=256, bias=True)
+  (5): ELU(alpha=1.0)
+  (6): Linear(in_features=256, out_features=128, bias=True)
+  (7): ELU(alpha=1.0)
+  (8): Linear(in_features=128, out_features=26, bias=True)
+)
+Critic Module: Sequential(
+  (0): Linear(in_features=864, out_features=1024, bias=True)
+  (1): ELU(alpha=1.0)
+  (2): Linear(in_features=1024, out_features=512, bias=True)
+  (3): ELU(alpha=1.0)
+  (4): Linear(in_features=512, out_features=256, bias=True)
+  (5): ELU(alpha=1.0)
+  (6): Linear(in_features=256, out_features=128, bias=True)
+  (7): ELU(alpha=1.0)
+  (8): Linear(in_features=128, out_features=1, bias=True)
+)
+[32m2026-06-22 17:10:22.402[0m | [1mINFO    [0m | [36mholosoma.agents.ppo.ppo[0m:[36msetup[0m:[36m167[0m - [1mSetting up Storage[0m
+Registering key: actor_obs with shape: 864
+Registering key: critic_obs with shape: 864
+[32m2026-06-22 17:10:22.537[0m | [1mINFO    [0m | [36mholosoma.managers.randomization.terms.locomotion[0m:[36m_setup_object_scale_reference_bounds[0m:[36m534[0m - [1m[Randomization] Object bounds for 'object_largebox': min=[-0.23408277332782745, -0.23008044064044952, -0.19819214940071106], max=[0.2370714396238327, 0.22864969074726105, 0.20970332622528076], height=0.4079[0m
+[32m2026-06-22 17:10:22.728[0m | [1mINFO    [0m | [36mholosoma.managers.randomization.terms.locomotion[0m:[36m_setup_object_scale_reference_bounds[0m:[36m534[0m - [1m[Randomization] Object bounds for 'object_plasticbox': min=[-0.27612143754959106, -0.13247434794902802, -0.1954120397567749], max=[0.2788790762424469, 0.1455271691083908, 0.1898033618927002], height=0.3852[0m
+[32m2026-06-22 17:10:22.801[0m | [1mINFO    [0m | [36mholosoma.managers.randomization.terms.locomotion[0m:[36m_setup_object_scale_reference_bounds[0m:[36m534[0m - [1m[Randomization] Object bounds for 'object_smalltable': min=[-0.17446258664131165, -0.26312553882598877, -0.1823955625295639], max=[0.17803755402565002, 0.08483199775218964, 0.18301406502723694], height=0.3654[0m
+[32m2026-06-22 17:10:23.050[0m | [1mINFO    [0m | [36mholosoma.managers.randomization.terms.locomotion[0m:[36m_setup_object_scale_reference_bounds[0m:[36m534[0m - [1m[Randomization] Object bounds for 'object_suitcase': min=[-0.2057124674320221, -0.320000022649765, -0.20950855314731598], max=[0.20421767234802246, 0.2490645945072174, 0.20378242433071136], height=0.4133[0m
+[32m2026-06-22 17:10:23.160[0m | [1mINFO    [0m | [36mholosoma.managers.randomization.terms.locomotion[0m:[36m_setup_object_scale_reference_bounds[0m:[36m534[0m - [1m[Randomization] Object bounds for 'object_whitechair': min=[-0.5366836786270142, -0.29607245326042175, -0.5294357538223267], max=[0.3860533833503723, 0.38605761528015137, 0.2846890091896057], height=0.8141[0m
+[32m2026-06-22 17:10:23.164[0m | [1mINFO    [0m | [36mholosoma.managers.command.terms.wbt[0m:[36m_ensure_object_grounding_offsets_initialized[0m:[36m1411[0m - [1mInitialized per-clip object grounding offsets: min=0.0019, max=0.0095[0m
+╭──────────────────────────────── Training Log ────────────────────────────────╮
+│                       [1m Learning iteration 0/40000 [0m                     │
+│                                                                              │
+│                        Computation: 4176 steps/s (Collection: 11.203s,       │
+│ Learning 0.566s)                                                             │
+│                        Mean reward: -0.66                                    │
+│                Mean episode length: 12.00                                    │
+│                              Value: 0.2116                                   │
+│                          Surrogate: -0.0241                                  │
+│                            Entropy: 36.8861                                  │
+│                                 KL: 0.0105                                   │
+│                         actor_loss: -0.2085                                  │
+│                        critic_loss: 0.2116                                   │
+│                symmetry_actor_loss: 0.0000                                   │
+│               symmetry_critic_loss: 0.0000                                   │
+│                actor_learning_rate: 0.0000                                   │
+│               critic_learning_rate: 0.0000                                   │
+│               Env/action_clip_frac: 0.0000                                   │
+│         Env/average_episode_length: 6.3815                                   │
+│           Env/motion/error_ref_pos: 0.0653                                   │
+│           Env/motion/error_ref_rot: 0.3218                                   │
+│       Env/motion/error_ref_lin_vel: 0.5614                                   │
+│       Env/motion/error_ref_ang_vel: 3.6193                                   │
+│          Env/motion/error_body_pos: 0.0725                                   │
+│          Env/motion/error_body_rot: 0.3677                                   │
+│      Env/motion/error_body_lin_vel: 0.9896                                   │
+│      Env/motion/error_body_ang_vel: 13.7731                                  │
+│         Env/motion/error_joint_pos: 1.2497                                   │
+│         Env/motion/error_joint_vel: 68.7686                                  │
+│ Motion/plasticbox/sub5_plasticbox_000/completion_percent_start0: 1.3016      │
+│ Motion/suitcase/sub1_suitcase_050/completion_percent_start0: 4.3347          │
+│ Motion/largebox/sub3_largebox_020/completion_percent_start0: 4.8600          │
+│ Motion/largebox/sub7_largebox_000/completion_percent_start0: 5.1819          │
+│ Motion/smalltable/sub17_smalltable_010/completion_percent_start0: 2.4840     │
+│ Motion/whitechair/sub4_whitechair_029/completion_percent_start0: 3.1808      │
+│ Motion/suitcase/sub1_suitcase_001/completion_percent_start0: 6.0571          │
+│ Motion/whitechair/sub4_whitechair_030/completion_percent_start0: 4.6265      │
+│ Motion/plasticbox/sub5_plasticbox_030/completion_percent_start0: 3.2297      │
+│ Motion/smalltable/sub17_smalltable_014/completion_percent_start0: 4.3518     │
+│ Motion/smalltable/sub6_smalltable_030/completion_percent_start0: 4.1957      │
+│ Motion/suitcase/sub1_suitcase_070/completion_percent_start0: 5.0605          │
+│ Motion/largebox/sub3_largebox_001/completion_percent_start0: 4.5081          │
+│              Policy/mean_noise_std: 0.9995                                   │
+│ Mean episode rew_motion_global_ref_position_error_exp: 0.0024                │
+│ Mean episode rew_motion_global_ref_orientation_error_exp: 0.0014             │
+│ Mean episode rew_motion_relative_body_position_error_exp: 0.0046             │
+│ Mean episode rew_motion_relative_body_orientation_error_exp: 0.0020          │
+│ Mean episode rew_motion_global_body_lin_vel: 0.0015                          │
+│ Mean episode rew_motion_global_body_ang_vel: 0.0000                          │
+│    Mean episode rew_action_rate_l2: -0.0471                                  │
+│    Mean episode rew_limits_dof_pos: -0.0241                                  │
+│ Mean episode rew_undesired_contacts: -0.0030                                 │
+│ Mean episode rew_object_global_ref_position_error_exp: 0.0198                │
+│ Mean episode rew_object_global_ref_orientation_error_exp: 0.0187             │
+│ Mean raw episode raw_rew_motion_global_ref_position_error_exp: 0.4736        │
+│ Mean raw episode raw_rew_motion_global_ref_orientation_error_exp: 0.2892     │
+│ Mean raw episode raw_rew_motion_relative_body_position_error_exp: 0.4592     │
+│ Mean raw episode raw_rew_motion_relative_body_orientation_error_exp: 0.2014  │
+│ Mean raw episode raw_rew_motion_global_body_lin_vel: 0.1505                  │
+│ Mean raw episode raw_rew_motion_global_body_ang_vel: 0.0000                  │
+│ Mean raw episode raw_rew_action_rate_l2: 23.5439                             │
+│ Mean raw episode raw_rew_limits_dof_pos: 0.0120                              │
+│ Mean raw episode raw_rew_undesired_contacts: 0.3038                          │
+│ Mean raw episode raw_rew_object_global_ref_position_error_exp: 0.4953        │
+│ Mean raw episode raw_rew_object_global_ref_orientation_error_exp: 0.4672     │
+│ ---------------------------------------------------------------------------- │
+│ ----                                                                         │
+│                    Total timesteps: 49152                                    │
+│                     Iteration time: 11.77s                                   │
+│                         Total time: 11.77s                                   │
+│                                ETA: 470763.7s                                │
+│ Logging Directory: logs/teacher/20260622_080945-r1_teacher-locomotion        │
+╰──────────────────────────────────────────────────────────────────────────────╯[32m2026-06-22 17:10:35.849[0m | [1mINFO    [0m | [36mholosoma.agents.modules.logging_utils[0m:[36msave_checkpoint_artifact[0m:[36m440[0m - [1mSaving checkpoint to logs/teacher/20260622_080945-r1_teacher-locomotion/model_00000.pt[0m
+wandb: WARNING Symlinked 1 file into the W&B run directory; call wandb.save again to sync new files.
+wandb: WARNING Symlinked 1 file into the W&B run directory; call wandb.save again to sync new files.
+╭──────────────────────────────── Training Log ────────────────────────────────╮
+│                       [1m Learning iteration 1/40000 [0m                     │
+│                                                                              │
+│                        Computation: 4707 steps/s (Collection: 9.933s,        │
+│ Learning 0.507s)                                                             │
+│                        Mean reward: -0.65                                    │
+│                Mean episode length: 13.68                                    │
+│                              Value: 0.1730                                   │
+│                          Surrogate: -0.0207                                  │
+│                            Entropy: 36.8721                                  │
+│                                 KL: 0.0106                                   │
+│                         actor_loss: -0.2051                                  │
+│                        critic_loss: 0.1730                                   │
+│                symmetry_actor_loss: 0.0000                                   │
+│               symmetry_critic_loss: 0.0000                                   │
+│                actor_learning_rate: 0.0000                                   │
+│               critic_learning_rate: 0.0000                                   │
+│               Env/action_clip_frac: 0.0000                                   │
+│         Env/average_episode_length: 12.4169                                  │
+│           Env/motion/error_ref_pos: 0.0713                                   │
+│           Env/motion/error_ref_rot: 0.3595                                   │
+│       Env/motion/error_ref_lin_vel: 0.5645                                   │
+│       Env/motion/error_ref_ang_vel: 3.6611                                   │
+│          Env/motion/error_body_pos: 0.0770                                   │
+│          Env/motion/error_body_rot: 0.3936                                   │
+│      Env/motion/error_body_lin_vel: 0.9912                                   │
+│      Env/motion/error_body_ang_vel: 13.7175                                  │
+│         Env/motion/error_joint_pos: 1.3023                                   │
+│         Env/motion/error_joint_vel: 68.4798                                  │
+│ Motion/largebox/sub3_largebox_001/completion_percent_start0: 5.6522          │
+│ Motion/largebox/sub3_largebox_020/completion_percent_start0: 5.4907          │
+│ Motion/largebox/sub7_largebox_000/completion_percent_start0: 5.5149          │
+│ Motion/plasticbox/sub5_plasticbox_000/completion_percent_start0: 1.2872      │
+│ Motion/plasticbox/sub5_plasticbox_030/completion_percent_start0: 3.4361      │
+│ Motion/smalltable/sub17_smalltable_010/completion_percent_start0: 2.3776     │
+│ Motion/smalltable/sub17_smalltable_014/completion_percent_start0: 4.8825     │
+│ Motion/smalltable/sub6_smalltable_030/completion_percent_start0: 4.6238      │
+│ Motion/suitcase/sub1_suitcase_001/completion_percent_start0: 6.9924          │
+│ Motion/suitcase/sub1_suitcase_050/completion_percent_start0: 5.5125          │
+│ Motion/suitcase/sub1_suitcase_070/completion_percent_start0: 6.6100          │
+│ Motion/whitechair/sub4_whitechair_029/completion_percent_start0: 3.6138      │
+│ Motion/whitechair/sub4_whitechair_030/completion_percent_start0: 5.9098      │
+│              Policy/mean_noise_std: 0.9990                                   │
+│ Mean episode rew_motion_global_ref_position_error_exp: 0.0030                │
+│ Mean episode rew_motion_global_ref_orientation_error_exp: 0.0017             │
+│ Mean episode rew_motion_relative_body_position_error_exp: 0.0058             │
+│ Mean episode rew_motion_relative_body_orientation_error_exp: 0.0023          │
+│ Mean episode rew_motion_global_body_lin_vel: 0.0019                          │
+│ Mean episode rew_motion_global_body_ang_vel: 0.0000                          │
+│    Mean episode rew_action_rate_l2: -0.0636                                  │
+│    Mean episode rew_limits_dof_pos: -0.0315                                  │
+│ Mean episode rew_undesired_contacts: -0.0033                                 │
+│ Mean episode rew_object_global_ref_position_error_exp: 0.0249                │
+│ Mean episode rew_object_global_ref_orientation_error_exp: 0.0238             │
+│ Mean raw episode raw_rew_motion_global_ref_position_error_exp: 0.5930        │
+│ Mean raw episode raw_rew_motion_global_ref_orientation_error_exp: 0.3319     │
+│ Mean raw episode raw_rew_motion_relative_body_position_error_exp: 0.5777     │
+│ Mean raw episode raw_rew_motion_relative_body_orientation_error_exp: 0.2273  │
+│ Mean raw episode raw_rew_motion_global_body_lin_vel: 0.1940                  │
+│ Mean raw episode raw_rew_motion_global_body_ang_vel: 0.0000                  │
+│ Mean raw episode raw_rew_action_rate_l2: 31.7986                             │
+│ Mean raw episode raw_rew_limits_dof_pos: 0.0157                              │
+│ Mean raw episode raw_rew_undesired_contacts: 0.3269                          │
+│ Mean raw episode raw_rew_object_global_ref_position_error_exp: 0.6236        │
+│ Mean raw episode raw_rew_object_global_ref_orientation_error_exp: 0.5938     │
+│ ---------------------------------------------------------------------------- │
+│ ----                                                                         │
+│                    Total timesteps: 98304                                    │
+│                     Iteration time: 10.44s                                   │
+│                         Total time: 22.21s                                   │
+│                                ETA: 444184.6s                                │
+│ Logging Directory: logs/teacher/20260622_080945-r1_teacher-locomotion        │
+╰──────────────────────────────────────────────────────────────────────────────╯╭──────────────────────────────── Training Log ────────────────────────────────╮
+│                       [1m Learning iteration 2/40000 [0m                     │
+│                                                                              │
+│                        Computation: 4829 steps/s (Collection: 9.621s,        │
+│ Learning 0.556s)                                                             │
+│                        Mean reward: -0.52                                    │
+│                Mean episode length: 12.27                                    │
+│                              Value: 0.1328                                   │
+│                          Surrogate: -0.0179                                  │
+│                            Entropy: 36.8616                                  │
+│                                 KL: 0.0104                                   │
+│                         actor_loss: -0.2022                                  │
+│                        critic_loss: 0.1328                                   │
+│                symmetry_actor_loss: 0.0000                                   │
+│               symmetry_critic_loss: 0.0000                                   │
+│                actor_learning_rate: 0.0000                                   │
+│               critic_learning_rate: 0.0000                                   │
+│               Env/action_clip_frac: 0.0000                                   │
+│         Env/average_episode_length: 12.4430                                  │
+│           Env/motion/error_ref_pos: 0.0700                                   │
+│           Env/motion/error_ref_rot: 0.3490                                   │
+│       Env/motion/error_ref_lin_vel: 0.5609                                   │
+│       Env/motion/error_ref_ang_vel: 3.6663                                   │
+│          Env/motion/error_body_pos: 0.0761                                   │
+│          Env/motion/error_body_rot: 0.3912                                   │
+│      Env/motion/error_body_lin_vel: 0.9934                                   │
+│      Env/motion/error_body_ang_vel: 13.7561                                  │
+│         Env/motion/error_joint_pos: 1.2973                                   │
+│         Env/motion/error_joint_vel: 68.6475                                  │
+│ Motion/largebox/sub3_largebox_001/completion_percent_start0: 5.8156          │
+│ Motion/largebox/sub3_largebox_020/completion_percent_start0: 5.4990          │
+│ Motion/largebox/sub7_largebox_000/completion_percent_start0: 5.6677          │
+│ Motion/plasticbox/sub5_plasticbox_000/completion_percent_start0: 1.3193      │
+│ Motion/plasticbox/sub5_plasticbox_030/completion_percent_start0: 3.4605      │
+│ Motion/smalltable/sub17_smalltable_010/completion_percent_start0: 2.2977     │
+│ Motion/smalltable/sub17_smalltable_014/completion_percent_start0: 5.0682     │
+│ Motion/smalltable/sub6_smalltable_030/completion_percent_start0: 4.2844      │
+│ Motion/suitcase/sub1_suitcase_001/completion_percent_start0: 6.1179          │
+│ Motion/suitcase/sub1_suitcase_050/completion_percent_start0: 5.4551          │
+│ Motion/suitcase/sub1_suitcase_070/completion_percent_start0: 6.1420          │
+│ Motion/whitechair/sub4_whitechair_029/completion_percent_start0: 3.4500      │
+│ Motion/whitechair/sub4_whitechair_030/completion_percent_start0: 5.9261      │
+│              Policy/mean_noise_std: 0.9987                                   │
+│ Mean episode rew_motion_global_ref_position_error_exp: 0.0029                │
+│ Mean episode rew_motion_global_ref_orientation_error_exp: 0.0016             │
+│ Mean episode rew_motion_relative_body_position_error_exp: 0.0056             │
+│ Mean episode rew_motion_relative_body_orientation_error_exp: 0.0022          │
+│ Mean episode rew_motion_global_body_lin_vel: 0.0019                          │
+│ Mean episode rew_motion_global_body_ang_vel: 0.0000                          │
+│    Mean episode rew_action_rate_l2: -0.0617                                  │
+│    Mean episode rew_limits_dof_pos: -0.0263                                  │
+│ Mean episode rew_undesired_contacts: -0.0030                                 │
+│ Mean episode rew_object_global_ref_position_error_exp: 0.0242                │
+│ Mean episode rew_object_global_ref_orientation_error_exp: 0.0230             │
+│ Mean raw episode raw_rew_motion_global_ref_position_error_exp: 0.5764        │
+│ Mean raw episode raw_rew_motion_global_ref_orientation_error_exp: 0.3277     │
+│ Mean raw episode raw_rew_motion_relative_body_position_error_exp: 0.5610     │
+│ Mean raw episode raw_rew_motion_relative_body_orientation_error_exp: 0.2206  │
+│ Mean raw episode raw_rew_motion_global_body_lin_vel: 0.1861                  │
+│ Mean raw episode raw_rew_motion_global_body_ang_vel: 0.0000                  │
+│ Mean raw episode raw_rew_action_rate_l2: 30.8503                             │
+│ Mean raw episode raw_rew_limits_dof_pos: 0.0131                              │
+│ Mean raw episode raw_rew_undesired_contacts: 0.2960                          │
+│ Mean raw episode raw_rew_object_global_ref_position_error_exp: 0.6061        │
+│ Mean raw episode raw_rew_object_global_ref_orientation_error_exp: 0.5758     │
+│ ---------------------------------------------------------------------------- │
+│ ----                                                                         │
+│                    Total timesteps: 147456                                   │
+│                     Iteration time: 10.18s                                   │
+│                         Total time: 32.39s                                   │
+│                                ETA: 431803.7s                                │
+│ Logging Directory: logs/teacher/20260622_080945-r1_teacher-locomotion        │
+╰──────────────────────────────────────────────────────────────────────────────╯╭──────────────────────────────── Training Log ────────────────────────────────╮
+│                       [1m Learning iteration 3/40000 [0m                     │
+│                                                                              │
+│                        Computation: 2315 steps/s (Collection: 20.712s,       │
+│ Learning 0.518s)                                                             │
+│                        Mean reward: -0.51                                    │
+│                Mean episode length: 12.76                                    │
+│                              Value: 0.1213                                   │
+│                          Surrogate: -0.0160                                  │
+│                            Entropy: 36.8525                                  │
+│                                 KL: 0.0107                                   │
+│                         actor_loss: -0.2003                                  │
+│                        critic_loss: 0.1213                                   │
+│                symmetry_actor_loss: 0.0000                                   │
+│               symmetry_critic_loss: 0.0000                                   │
+│                actor_learning_rate: 0.0000                                   │
+│               critic_learning_rate: 0.0000                                   │
+│               Env/action_clip_frac: 0.0000                                   │
+│         Env/average_episode_length: 12.4437                                  │
+│           Env/motion/error_ref_pos: 0.0695                                   │
+│           Env/motion/error_ref_rot: 0.3503                                   │
+│       Env/motion/error_ref_lin_vel: 0.5557                                   │
+│       Env/motion/error_ref_ang_vel: 3.6634                                   │
+│          Env/motion/error_body_pos: 0.0762                                   │
+│          Env/motion/error_body_rot: 0.3939                                   │
+│      Env/motion/error_body_lin_vel: 0.9974                                   │
+│      Env/motion/error_body_ang_vel: 13.7799                                  │
+│         Env/motion/error_joint_pos: 1.2999                                   │
+│         Env/motion/error_joint_vel: 68.7246                                  │
+│ Motion/largebox/sub3_largebox_001/completion_percent_start0: 5.7855          │
+│ Motion/largebox/sub3_largebox_020/completion_percent_start0: 5.5322          │
+│ Motion/largebox/sub7_largebox_000/completion_percent_start0: 5.5394          │
+│ Motion/plasticbox/sub5_plasticbox_000/completion_percent_start0: 1.2578      │
+│ Motion/plasticbox/sub5_plasticbox_030/completion_percent_start0: 3.5546      │
+│ Motion/smalltable/sub17_smalltable_010/completion_percent_start0: 2.1930     │
+│ Motion/smalltable/sub17_smalltable_014/completion_percent_start0: 4.8048     │
+│ Motion/smalltable/sub6_smalltable_030/completion_percent_start0: 4.3205      │
+│ Motion/suitcase/sub1_suitcase_001/completion_percent_start0: 6.3395          │
+│ Motion/suitcase/sub1_suitcase_050/completion_percent_start0: 5.1871          │
+│ Motion/suitcase/sub1_suitcase_070/completion_percent_start0: 6.4303          │
+│ Motion/whitechair/sub4_whitechair_029/completion_percent_start0: 3.5409      │
+│ Motion/whitechair/sub4_whitechair_030/completion_percent_start0: 5.5569      │
+│              Policy/mean_noise_std: 0.9983                                   │
+│ Mean episode rew_motion_global_ref_position_error_exp: 0.0029                │
+│ Mean episode rew_motion_global_ref_orientation_error_exp: 0.0017             │
+│ Mean episode rew_motion_relative_body_position_error_exp: 0.0057             │
+│ Mean episode rew_motion_relative_body_orientation_error_exp: 0.0022          │
+│ Mean episode rew_motion_global_body_lin_vel: 0.0019                          │
+│ Mean episode rew_motion_global_body_ang_vel: 0.0000                          │
+│    Mean episode rew_action_rate_l2: -0.0622                                  │
+│    Mean episode rew_limits_dof_pos: -0.0224                                  │
+│ Mean episode rew_undesired_contacts: -0.0028                                 │
+│ Mean episode rew_object_global_ref_position_error_exp: 0.0244                │
+│ Mean episode rew_object_global_ref_orientation_error_exp: 0.0233             │
+│ Mean raw episode raw_rew_motion_global_ref_position_error_exp: 0.5814        │
+│ Mean raw episode raw_rew_motion_global_ref_orientation_error_exp: 0.3302     │
+│ Mean raw episode raw_rew_motion_relative_body_position_error_exp: 0.5651     │
+│ Mean raw episode raw_rew_motion_relative_body_orientation_error_exp: 0.2189  │
+│ Mean raw episode raw_rew_motion_global_body_lin_vel: 0.1855                  │
+│ Mean raw episode raw_rew_motion_global_body_ang_vel: 0.0000                  │
+│ Mean raw episode raw_rew_action_rate_l2: 31.0832                             │
+│ Mean raw episode raw_rew_limits_dof_pos: 0.0112                              │
+│ Mean raw episode raw_rew_undesired_contacts: 0.2773                          │
+│ Mean raw episode raw_rew_object_global_ref_position_error_exp: 0.6108        │
+│ Mean raw episode raw_rew_object_global_ref_orientation_error_exp: 0.5822     │
+│ ---------------------------------------------------------------------------- │
+│ ----                                                                         │
+│                    Total timesteps: 196608                                   │
+│                     Iteration time: 21.23s                                   │
+│                         Total time: 53.62s                                   │
+│                                ETA: 536131.0s                                │
+│ Logging Directory: logs/teacher/20260622_080945-r1_teacher-locomotion        │
+╰──────────────────────────────────────────────────────────────────────────────╯[32m2026-06-22 17:11:19.430[0m | [1mINFO    [0m | [36mholosoma.utils.video_utils[0m:[36mcreate_video[0m:[36m207[0m - [1mSuccessfully saved video file: logs/teacher/20260622_080947-r1_teacher-wholebodytrackingmanager/renderings_training/temp_h264_1782115879_2b7c99b4.mp4[0m
+╭──────────────────────────────── Training Log ────────────────────────────────╮
+│                       [1m Learning iteration 4/40000 [0m                     │
+│                                                                              │
+│                        Computation: 4840 steps/s (Collection: 9.624s,        │
+│ Learning 0.530s)                                                             │
+│                        Mean reward: -0.35                                    │
+│                Mean episode length: 11.90                                    │
+│                              Value: 0.0930                                   │
+│                          Surrogate: -0.0148                                  │
+│                            Entropy: 36.8424                                  │
+│                                 KL: 0.0102                                   │
+│                         actor_loss: -0.1990                                  │
+│                        critic_loss: 0.0930                                   │
+│                symmetry_actor_loss: 0.0000                                   │
+│               symmetry_critic_loss: 0.0000                                   │
+│                actor_learning_rate: 0.0000                                   │
+│               critic_learning_rate: 0.0000                                   │
+│               Env/action_clip_frac: 0.0000                                   │
+│         Env/average_episode_length: 12.1207                                  │
+│           Env/motion/error_ref_pos: 0.0686                                   │
+│           Env/motion/error_ref_rot: 0.3381                                   │
+│       Env/motion/error_ref_lin_vel: 0.5575                                   │
+│       Env/motion/error_ref_ang_vel: 3.6937                                   │
+│          Env/motion/error_body_pos: 0.0757                                   │
+│          Env/motion/error_body_rot: 0.3926                                   │
+│      Env/motion/error_body_lin_vel: 0.9995                                   │
+│      Env/motion/error_body_ang_vel: 13.7801                                  │
+│         Env/motion/error_joint_pos: 1.2998                                   │
+│         Env/motion/error_joint_vel: 68.7396                                  │
+│ Motion/largebox/sub3_largebox_001/completion_percent_start0: 5.8725          │
+│ Motion/largebox/sub3_largebox_020/completion_percent_start0: 5.1861          │
+│ Motion/largebox/sub7_largebox_000/completion_percent_start0: 5.1022          │
+│ Motion/plasticbox/sub5_plasticbox_000/completion_percent_start0: 1.2694      │
+│ Motion/plasticbox/sub5_plasticbox_030/completion_percent_start0: 3.5068      │
+│ Motion/smalltable/sub17_smalltable_010/completion_percent_start0: 2.1497     │
+│ Motion/smalltable/sub17_smalltable_014/completion_percent_start0: 4.8304     │
+│ Motion/smalltable/sub6_smalltable_030/completion_percent_start0: 4.2427      │
+│ Motion/suitcase/sub1_suitcase_001/completion_percent_start0: 5.8799          │
+│ Motion/suitcase/sub1_suitcase_050/completion_percent_start0: 5.0453          │
+│ Motion/suitcase/sub1_suitcase_070/completion_percent_start0: 5.8433          │
+│ Motion/whitechair/sub4_whitechair_029/completion_percent_start0: 3.1534      │
+│ Motion/whitechair/sub4_whitechair_030/completion_percent_start0: 5.7124      │
+│              Policy/mean_noise_std: 0.9979                                   │
+│ Mean episode rew_motion_global_ref_position_error_exp: 0.0028                │
+│ Mean episode rew_motion_global_ref_orientation_error_exp: 0.0016             │
+│ Mean episode rew_motion_relative_body_position_error_exp: 0.0055             │
+│ Mean episode rew_motion_relative_body_orientation_error_exp: 0.0021          │
+│ Mean episode rew_motion_global_body_lin_vel: 0.0018                          │
+│ Mean episode rew_motion_global_body_ang_vel: 0.0000                          │
+│    Mean episode rew_action_rate_l2: -0.0598                                  │
+│    Mean episode rew_limits_dof_pos: -0.0187                                  │
+│ Mean episode rew_undesired_contacts: -0.0025                                 │
+│ Mean episode rew_object_global_ref_position_error_exp: 0.0236                │
+│ Mean episode rew_object_global_ref_orientation_error_exp: 0.0225             │
+│ Mean raw episode raw_rew_motion_global_ref_position_error_exp: 0.5623        │
+│ Mean raw episode raw_rew_motion_global_ref_orientation_error_exp: 0.3287     │
+│ Mean raw episode raw_rew_motion_relative_body_position_error_exp: 0.5462     │
+│ Mean raw episode raw_rew_motion_relative_body_orientation_error_exp: 0.2122  │
+│ Mean raw episode raw_rew_motion_global_body_lin_vel: 0.1802                  │
+│ Mean raw episode raw_rew_motion_global_body_ang_vel: 0.0000                  │
+│ Mean raw episode raw_rew_action_rate_l2: 29.8874                             │
+│ Mean raw episode raw_rew_limits_dof_pos: 0.0094                              │
+│ Mean raw episode raw_rew_undesired_contacts: 0.2528                          │
+│ Mean raw episode raw_rew_object_global_ref_position_error_exp: 0.5901        │
+│ Mean raw episode raw_rew_object_global_ref_orientation_error_exp: 0.5620     │
+│ ---------------------------------------------------------------------------- │
+│ ----                                                                         │
+│                    Total timesteps: 245760                                   │
+│                     Iteration time: 10.15s                                   │
+│                         Total time: 63.77s                                   │
+│                                ETA: 510116.4s                                │
+│ Logging Directory: logs/teacher/20260622_080945-r1_teacher-locomotion        │
+╰──────────────────────────────────────────────────────────────────────────────╯2026-06-22T08:08:47Z [7,114ms] [Warning] [omni.fabric.plugin] Warning: attribute viewportHandle not found for bucket id 7
+
+2026-06-22T08:09:58Z [77,913ms] [Warning] [isaacsim.asset.importer.urdf] The path largebox.urdf is not a valid usd path, modifying to largebox_urdf
+2026-06-22T08:09:59Z [78,368ms] [Warning] [isaaclab.sim.utils] Could not perform 'modify_articulation_root_properties' on any prims under: '/World/envs/env_0/object_largebox'. This might be because of the following reasons:
+	(1) The desired attribute does not exist on any of the prims.
+	(2) The desired attribute exists on an instanced prim.
+		Discovered list of instanced prim paths: ['/World/envs/env_0/object_largebox/baseLink/visuals', '/World/envs/env_0/object_largebox/baseLink/collisions']
+2026-06-22T08:09:59Z [78,784ms] [Warning] [isaacsim.asset.importer.urdf] The path plasticbox.urdf is not a valid usd path, modifying to plasticbox_urdf
+2026-06-22T08:09:59Z [78,797ms] [Warning] [isaacsim.asset.importer.urdf] No mass specified for link plasticbox_link
+2026-06-22T08:10:00Z [79,322ms] [Warning] [isaaclab.sim.utils] Could not perform 'modify_articulation_root_properties' on any prims under: '/World/envs/env_0/object_plasticbox'. This might be because of the following reasons:
+	(1) The desired attribute does not exist on any of the prims.
+	(2) The desired attribute exists on an instanced prim.
+		Discovered list of instanced prim paths: ['/World/envs/env_0/object_plasticbox/plasticbox_link/visuals', '/World/envs/env_0/object_plasticbox/plasticbox_link/collisions']
+2026-06-22T08:10:00Z [79,704ms] [Warning] [isaacsim.asset.importer.urdf] The path smalltable.urdf is not a valid usd path, modifying to smalltable_urdf
+2026-06-22T08:10:01Z [80,435ms] [Warning] [isaaclab.sim.utils] Could not perform 'modify_articulation_root_properties' on any prims under: '/World/envs/env_0/object_smalltable'. This might be because of the following reasons:
+	(1) The desired attribute does not exist on any of the prims.
+	(2) The desired attribute exists on an instanced prim.
+		Discovered list of instanced prim paths: ['/World/envs/env_0/object_smalltable/baseLink/visuals', '/World/envs/env_0/object_smalltable/baseLink/collisions']
+2026-06-22T08:10:02Z [81,470ms] [Warning] [isaaclab.sim.utils] Could not perform 'modify_articulation_root_properties' on any prims under: '/World/envs/env_0/object_suitcase'. This might be because of the following reasons:
+	(1) The desired attribute does not exist on any of the prims.
+	(2) The desired attribute exists on an instanced prim.
+		Discovered list of instanced prim paths: ['/World/envs/env_0/object_suitcase/suitcase_link/visuals', '/World/envs/env_0/object_suitcase/suitcase_link/collisions']
+2026-06-22T08:10:02Z [81,908ms] [Warning] [isaacsim.asset.importer.urdf] The path whitechair.urdf is not a valid usd path, modifying to whitechair_urdf
+2026-06-22T08:10:03Z [82,426ms] [Warning] [isaaclab.sim.utils] Could not perform 'modify_articulation_root_properties' on any prims under: '/World/envs/env_0/object_whitechair'. This might be because of the following reasons:
+	(1) The desired attribute does not exist on any of the prims.
+	(2) The desired attribute exists on an instanced prim.
+		Discovered list of instanced prim paths: ['/World/envs/env_0/object_whitechair/baseLink/visuals', '/World/envs/env_0/object_whitechair/baseLink/collisions']
+2026-06-22T08:11:05Z [144,605ms] [Warning] [omni.fabric.plugin] getAttributeCount called on non-existent path /World/envs/env_999/object_suitcase/suitcase_link/visuals/mesh_4
+2026-06-22T08:11:05Z [144,605ms] [Warning] [omni.fabric.plugin] getTypes called on non-existent path /World/envs/env_999/object_suitcase/suitcase_link/visuals/mesh_4
+2026-06-22T08:11:14Z [153,859ms] [Warning] [rtx.postprocessing.plugin] DLSS increasing input dimensions: Render resolution of (371, 209) is below minimal input resolution of 300.
+2026-06-24 12:24:10.559 | INFO     | __main__:_resolve_multi_object_urdf_config:221 - Resolved object URDFs from folder: {'largebox': '/home/rllab/haechan/holosoma/train_r1/objects/largebox/largebox.urdf', 'plasticbox': '/home/rllab/haechan/holosoma/train_r1/objects/plasticbox/plasticbox.urdf', 'smalltable': '/home/rllab/haechan/holosoma/train_r1/objects/smalltable/smalltable.urdf', 'suitcase': '/home/rllab/haechan/holosoma/train_r1/objects/suitcase/suitcase.urdf', 'whitechair': '/home/rllab/haechan/holosoma/train_r1/objects/whitechair/whitechair.urdf'}
+2026-06-24 12:24:10.559 | INFO     | holosoma.utils.sim_utils:setup_isaaclab_launcher:119 - Cleared display environment variables before IsaacSim AppLauncher to avoid GLX in headless camera rendering: ['DISPLAY', 'XAUTHORITY']
+Loading user config located at: '/home/rllab/.holosoma_deps/miniconda3/envs/hssim/lib/python3.11/site-packages/isaacsim/kit/data/Kit/Isaac-Sim/5.1/user.config.json'
+[Info] [carb] Logging to file: /home/rllab/.holosoma_deps/miniconda3/envs/hssim/lib/python3.11/site-packages/isaacsim/kit/logs/Kit/Isaac-Sim/5.1/kit_20260624_122410.log
+2026-06-24T03:24:10Z [79ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-06-24T03:24:10Z [79ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-06-24T03:24:10Z [99ms] [Warning] [omni.platforminfo.plugin] failed to open the default display.  Can't verify X Server version.
+2026-06-24T03:24:10Z [288ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-06-24T03:24:10Z [288ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-06-24T03:24:11Z [456ms] [Warning] [gpu.foundation.plugin] Skipping unsupported non-NVIDIA GPU: Intel(R) Graphics (RPL-S)
+2026-06-24T03:24:11Z [456ms] [Warning] [gpu.foundation.plugin] Skipping unsupported non-NVIDIA GPU: Intel(R) Graphics (RPL-S)
+
+|---------------------------------------------------------------------------------------------|
+| Driver Version: 590.48.01     | Graphics API: Vulkan
+|=============================================================================================|
+| GPU | Name                             | Active | LDA | GPU Memory | Vendor-ID | LUID       |
+|     |                                  |        |     |            | Device-ID | UUID       |
+|     |                                  |        |     |            | Bus-ID    |            |
+|---------------------------------------------------------------------------------------------|
+| 0   | NVIDIA RTX A6000                 | Yes: 0 |     | 49140   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2230      | d3197827.. |
+|     |                                  |        |     |            | 1         |            |
+|---------------------------------------------------------------------------------------------|
+| 1   | Intel(R) Graphics (RPL-S)        |        |     | 96391   MB | 8086      | 0          |
+|     |                                  |        |     |            | a780      | 868080a7.. |
+|     |                                  |        |     |            | 0         |            |
+|=============================================================================================|
+| OS: 22.04.5 LTS (Jammy Jellyfish) ubuntu, Version: 22.04.5, Kernel: 6.8.0-124-generic
+| Processor: 13th Gen Intel(R) Core(TM) i9-13900KS
+| Bare Metal Cores: 24 | Bare Metal Logical Cores: 48
+| Available Cores:  32 
+|---------------------------------------------------------------------------------------------|
+| Total Memory (MB): 128521 | Free Memory: 120219
+| Total Page/Swap (MB): 2047 | Free Page/Swap: 2047
+|---------------------------------------------------------------------------------------------|
+2026-06-24T03:24:11Z [716ms] [Warning] [gpu.foundation.plugin] CPU performance profile is set to powersave. This profile sets the CPU to the lowest frequency reducing performance.
+2026-06-24T03:24:11Z [725ms] [Warning] [gpu.foundation.plugin] IOMMU is enabled.
+2026-06-24T03:24:11Z [725ms] [Warning] [gpu.foundation.plugin] Detected IOMMU is enabled. Running CUDA peer-to-peer bandwidth and latency validation.
+Unidirectional P2P=Enabled Bandwidth (P2P Writes) Matrix (GB/s)
+   D\D     0 
+     0 675.24 
+P2P=Enabled Latency (P2P Writes) Matrix (us)
+   GPU     0 
+     0   1.74 
+
+   CPU     0 
+     0   1.33 
+2026-06-24T03:24:11Z [1,151ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-06-24T03:24:11Z [1,151ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-06-24T03:24:11Z [1,164ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-06-24T03:24:11Z [1,164ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-06-24T03:24:11Z [1,170ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-06-24T03:24:11Z [1,170ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-06-24T03:24:11Z [1,183ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-06-24T03:24:11Z [1,183ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-06-24T03:24:11Z [1,185ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-06-24T03:24:11Z [1,185ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-06-24T03:24:11Z [1,186ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-06-24T03:24:11Z [1,186ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-06-24T03:24:11Z [1,281ms] [Warning] [omni.log] Source: omni.hydra was already registered.
+2026-06-24T03:24:12Z [1,468ms] [Warning] [carb] Acquiring non optional plugin interface which is not listed as dependency: [omni::physx::IPhysxBenchmarks v1.0] (plugin: <default plugin>), by client: omni.physics.physx.plugin. Add it to CARB_PLUGIN_IMPL_DEPS() macro of a client.
+2026-06-24T03:24:12Z [1,479ms] [Warning] [omni.isaac.dynamic_control] omni.isaac.dynamic_control is deprecated as of Isaac Sim 4.5. No action is needed from end-users.
+2026-06-24T03:24:12Z [1,793ms] [Warning] [pxr.Semantics] pxr.Semantics is deprecated - please use Semantics instead
+2026-06-24T03:24:12Z [1,906ms] [Warning] [omni.graph.core.plugin] Found duplicate of category 'Replicator' - was 'Annotators', adding 'Fabric Reader'
+2026-06-24T03:24:12Z [1,906ms] [Warning] [omni.graph.core.plugin] Category 'Replicator' not accepted on node type 'omni.replicator.core.FabricReader' in extension 'omni.replicator.core'
+2026-06-24T03:24:12Z [1,906ms] [Warning] [omni.replicator.core.scripts.extension] No material configuration file, adding configuration to material settings directly.
+2026-06-24 12:24:16.102 | INFO     | holosoma.utils.sim_utils:setup_isaaclab_launcher:158 - IsaacSim args_cli: Namespace(num_envs=4096, seed=42, env_spacing=5.0, output_dir='logs', enable_cameras=True, xr=False, device='cuda:0', cpu=False, verbose=False, info=False, rendering_mode=None, kit_args='', anim_recording_enabled=False, anim_recording_start_time=0, anim_recording_stop_time=10, headless=True, hide_ui=True, create_new_stage=False, physics_gpu=0, active_gpu=0)
+2026-06-24 12:24:16.102 | INFO     | holosoma.utils.sim_utils:setup_isaaclab_launcher:159 - IsaacSim unknown_args: ['exp:r1-teacher', 'logger:wandb', '--training.project', 'teacher', '--command.setup-terms.motion-command.params.motion-config.motion-folder=./train_r1/rl', '--robot.object.object-urdf-asset=./train_r1/objects', '--robot.object.object-parm=./train_r1/objects/objects_parm.yaml', '--training.num-envs', '4096', '--algo.config.save-interval', '1000', '--algo.config.module-dict.actor.layer-config.hidden-dims', '[1024,512,256,128]', '--algo.config.module-dict.critic.layer-config.hidden-dims', '[1024,512,256,128]', '--command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob', '0.5', '--termination.terms.bad-tracking.params.bad-object-pos-threshold', '0.4', '--command.setup-terms.motion-command.params.motion-config.hard-motion-sampling-ratio', '0.4', '--command.setup-terms.motion-command.params.motion-config.hard-motion-sampling-ema-alpha', '0.1', '--simulator.config.scene.env-spacing', '5.0', '--logger.video.enabled', 'True', '--logger.video.camera.offset', '[3.0, -3.0, 1.5]', '--training.checkpoint', './logs/teacher/20260623_110439-r1_teacher-locomotion/model_06000.pt']
+2026-06-24T03:24:15Z [5,211ms] [Warning] [omni.fabric.plugin] Warning: attribute viewportHandle not found for bucket id 7
+

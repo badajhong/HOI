@@ -5,6 +5,7 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from holosoma.agents.modules.logging_utils import LoggingHelper
+from holosoma.utils.average_meters import TensorAverageMeterDict
 
 
 @pytest.fixture
@@ -140,6 +141,58 @@ def test_episode_stats_update(logging_helper):
     # Verify raw episode info was stored
     assert len(logging_helper.raw_ep_infos) == 1
     assert logging_helper.raw_ep_infos[0]["raw_test_metric"].item() == 2.0
+
+
+def test_termination_count_and_fail_rate_aggregation():
+    """Test Termination counts are summed while fail rates remain averaged."""
+    meter_dict = TensorAverageMeterDict()
+    meter_dict.add(
+        {
+            "Termination/smalltable/sub17_smalltable_014/episode": torch.tensor(2.0),
+            "Termination/smalltable/sub17_smalltable_014/bad_tracking": torch.tensor(1.0),
+            "TerminationFailRate/smalltable/sub17_smalltable_014/bad_object_pos": torch.tensor([1.0, 2.0]),
+            "TerminationFailRate/smalltable/sub17_smalltable_014/bad_ref_pos": torch.tensor([0.0, 0.0]),
+        }
+    )
+    meter_dict.add(
+        {
+            "Termination/smalltable/sub17_smalltable_014/episode": torch.tensor(4.0),
+            "Termination/smalltable/sub17_smalltable_014/bad_tracking": torch.tensor(3.0),
+            "TerminationFailRate/smalltable/sub17_smalltable_014/bad_object_pos": torch.tensor([3.0, 3.0]),
+            "TerminationFailRate/smalltable/sub17_smalltable_014/bad_ref_pos": torch.tensor([0.0, 0.0]),
+        }
+    )
+
+    values = meter_dict.mean_and_clear()
+    assert values["Termination/smalltable/sub17_smalltable_014/episode"].item() == 6.0
+    assert values["Termination/smalltable/sub17_smalltable_014/bad_tracking"].item() == 4.0
+    assert values["TerminationFailRate/smalltable/sub17_smalltable_014/bad_object_pos"].item() == pytest.approx(0.8)
+    assert values["TerminationFailRate/smalltable/sub17_smalltable_014/bad_ref_pos"].item() == 0.0
+
+
+def test_termination_metrics_keep_top_level_prefix(logging_helper, mock_writer, mock_wandb):
+    """Test Termination metrics are not nested under Env/."""
+    infos = {
+        "episode": {},
+        "raw_episode": {},
+        "to_log": {
+            "Termination/smalltable/sub17_smalltable_014/episode": torch.tensor(2.0),
+            "TerminationFailRate/smalltable/sub17_smalltable_014/bad_object_pos": torch.tensor([1.0, 2.0]),
+            "env_metric": torch.tensor([1.0]),
+        },
+    }
+    rewards = torch.zeros(2, device=logging_helper.device)
+    dones = torch.zeros(2, device=logging_helper.device)
+    logging_helper.update_episode_stats(rewards, dones, infos)
+
+    logging_helper.post_epoch_logging(it=0, loss_dict={}, extra_log_dicts={})
+
+    actual_calls = [call[0][0] for call in mock_writer.add_scalar.call_args_list]
+    assert "Termination/smalltable/sub17_smalltable_014/episode" in actual_calls
+    assert "TerminationFailRate/smalltable/sub17_smalltable_014/bad_object_pos" in actual_calls
+    assert "Env/Termination/smalltable/sub17_smalltable_014/episode" not in actual_calls
+    assert "Env/TerminationFailRate/smalltable/sub17_smalltable_014/bad_object_pos" not in actual_calls
+    assert "Env/env_metric" in actual_calls
 
 
 def test_wandb_logging(prefixed_logging_helper, mock_wandb):
