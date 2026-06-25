@@ -90,6 +90,13 @@ class PhysxConfig:
     bounce_threshold_velocity: float = 0.5
     """Velocity threshold below which bounce responses are suppressed."""
 
+    gpu_max_rigid_patch_count: int | None = None
+    """Optional IsaacSim GPU rigid patch buffer size.
+
+    Increase this if IsaacSim reports PhysX patch-buffer overflow in large scenes with rich contacts.
+    If None, the IsaacSim backend uses its automatic env-count based default.
+    """
+
 
 @dataclass(frozen=True)
 class MujocoXMLFilterCfg:

@@ -6,9 +6,14 @@ import re
 from typing import TYPE_CHECKING, List
 
 import torch
+from loguru import logger
 
 from holosoma.config_types.reward import RewardTermCfg
 from holosoma.managers.command.terms.wbt import MotionCommand
+from holosoma.managers.object_contact import (
+    get_cached_object_surface_distances,
+    load_sample_points_by_key,
+)
 from holosoma.managers.reward.base import RewardTermBase
 from holosoma.utils.rotations import quat_error_magnitude
 
@@ -132,6 +137,127 @@ def object_global_ref_orientation_error_exp(env: WholeBodyTrackingManager, sigma
     motion_command = _get_motion_command_and_assert_type(env)
     error = quat_error_magnitude(motion_command.object_quat_w, motion_command.simulator_object_quat_w) ** 2
     return torch.exp(-error / sigma**2)
+
+
+# ================================================================================================
+# Labeled Object Contact Rewards
+# ================================================================================================
+
+
+class ObjectContactLabelDistance(RewardTermBase):
+    """Reward expected contact bodies for being near object surface sample points.
+
+    Contact labels are expected to come from SMPLH/object annotations loaded by
+    ``MotionCommand``. The live robot body positions are compared against object
+    sample points in the active object's local frame.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+        self.env = env
+        self.initialized = False
+        self.warned_missing_labels = False
+        self.sample_points_by_key: dict[str | None, torch.Tensor] = {}
+        self.contact_label_columns = torch.zeros(0, dtype=torch.long, device=env.device)
+        self.contact_body_names: list[str] = []
+        self.contact_body_indices = torch.zeros(0, dtype=torch.long, device=env.device)
+
+    def __call__(
+        self,
+        env: WholeBodyTrackingManager,
+        *,
+        sample_points_root: str | None = None,
+        threshold: float = 0.08,
+        contact_body_names_regex: str = ".*",
+        fail_on_missing_labels: bool = True,
+        **kwargs,
+    ) -> torch.Tensor:
+        motion_command = _get_motion_command_and_assert_type(env)
+        if not self.initialized:
+            self._initialize(
+                motion_command,
+                sample_points_root=sample_points_root,
+                contact_body_names_regex=contact_body_names_regex,
+                fail_on_missing_labels=fail_on_missing_labels,
+            )
+
+        if not motion_command.has_contact_labels or self.contact_label_columns.numel() == 0:
+            return torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
+
+        expected = motion_command.contact_object_label[:, self.contact_label_columns]
+        has_expected = expected.any(dim=1)
+        if not torch.any(has_expected):
+            return torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
+
+        distances = get_cached_object_surface_distances(
+            env=env,
+            motion_command=motion_command,
+            body_names=self.contact_body_names,
+            body_indices=self.contact_body_indices,
+            sample_points_by_key=self.sample_points_by_key,
+        )
+
+        threshold_tensor = torch.tensor(max(float(threshold), 1e-6), dtype=torch.float32, device=env.device)
+        per_body_reward = torch.clamp(1.0 - distances / threshold_tensor, min=0.0, max=1.0)
+        per_body_reward = per_body_reward * expected.float()
+        denom = expected.float().sum(dim=1).clamp(min=1.0)
+        reward = per_body_reward.sum(dim=1) / denom
+        return torch.where(has_expected, reward, torch.zeros_like(reward))
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        pass
+
+    def _initialize(
+        self,
+        motion_command: MotionCommand,
+        *,
+        sample_points_root: str | None,
+        contact_body_names_regex: str,
+        fail_on_missing_labels: bool,
+    ) -> None:
+        if not motion_command.has_contact_labels:
+            message = (
+                "ObjectContactLabelDistance is enabled but motion_command has no contact labels. "
+                "Generate contact-labeled motion files or set motion_config.contact_file/contact_folder."
+            )
+            if fail_on_missing_labels:
+                raise RuntimeError(message)
+            if not self.warned_missing_labels:
+                logger.warning(message)
+                self.warned_missing_labels = True
+            self.initialized = True
+            return
+
+        body_regex = re.compile(contact_body_names_regex)
+        selected_cols = [
+            idx for idx, name in enumerate(motion_command.motion.contact_body_names) if body_regex.search(name)
+        ]
+        if not selected_cols:
+            raise RuntimeError(
+                f"No contact label body names matched regex '{contact_body_names_regex}'. "
+                f"Available: {motion_command.motion.contact_body_names}"
+            )
+        self.contact_label_columns = torch.tensor(selected_cols, dtype=torch.long, device=self.env.device)
+        self.contact_body_names = [motion_command.motion.contact_body_names[i] for i in selected_cols]
+        contact_body_indices = torch.as_tensor(
+            motion_command.motion.contact_body_indices,
+            dtype=torch.long,
+            device=self.env.device,
+        )
+        self.contact_body_indices = contact_body_indices[self.contact_label_columns]
+
+        root, self.sample_points_by_key = load_sample_points_by_key(
+            env=self.env,
+            motion_command=motion_command,
+            sample_points_root=sample_points_root,
+        )
+
+        logger.info(
+            "Initialized ObjectContactLabelDistance: "
+            f"bodies={[motion_command.motion.contact_body_names[i] for i in selected_cols]}, "
+            f"objects={list(self.sample_points_by_key.keys())}, sample_points_root={root}"
+        )
+        self.initialized = True
 
 
 # ================================================================================================

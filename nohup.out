@@ -872,3 +872,354 @@ P2P=Enabled Latency (P2P Writes) Matrix (us)
 2026-06-24 12:24:16.102 | INFO     | holosoma.utils.sim_utils:setup_isaaclab_launcher:159 - IsaacSim unknown_args: ['exp:r1-teacher', 'logger:wandb', '--training.project', 'teacher', '--command.setup-terms.motion-command.params.motion-config.motion-folder=./train_r1/rl', '--robot.object.object-urdf-asset=./train_r1/objects', '--robot.object.object-parm=./train_r1/objects/objects_parm.yaml', '--training.num-envs', '4096', '--algo.config.save-interval', '1000', '--algo.config.module-dict.actor.layer-config.hidden-dims', '[1024,512,256,128]', '--algo.config.module-dict.critic.layer-config.hidden-dims', '[1024,512,256,128]', '--command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob', '0.5', '--termination.terms.bad-tracking.params.bad-object-pos-threshold', '0.4', '--command.setup-terms.motion-command.params.motion-config.hard-motion-sampling-ratio', '0.4', '--command.setup-terms.motion-command.params.motion-config.hard-motion-sampling-ema-alpha', '0.1', '--simulator.config.scene.env-spacing', '5.0', '--logger.video.enabled', 'True', '--logger.video.camera.offset', '[3.0, -3.0, 1.5]', '--training.checkpoint', './logs/teacher/20260623_110439-r1_teacher-locomotion/model_06000.pt']
 2026-06-24T03:24:15Z [5,211ms] [Warning] [omni.fabric.plugin] Warning: attribute viewportHandle not found for bucket id 7
 
+2026-06-24 13:30:44.502 | INFO     | __main__:_resolve_multi_object_urdf_config:221 - Resolved object URDFs from folder: {'largebox': '/home/rllab/haechan/holosoma/train_r1/objects/largebox/largebox.urdf', 'plasticbox': '/home/rllab/haechan/holosoma/train_r1/objects/plasticbox/plasticbox.urdf', 'smalltable': '/home/rllab/haechan/holosoma/train_r1/objects/smalltable/smalltable.urdf', 'suitcase': '/home/rllab/haechan/holosoma/train_r1/objects/suitcase/suitcase.urdf', 'whitechair': '/home/rllab/haechan/holosoma/train_r1/objects/whitechair/whitechair.urdf'}
+2026-06-24 13:30:44.502 | INFO     | holosoma.utils.sim_utils:setup_isaaclab_launcher:119 - Cleared display environment variables before IsaacSim AppLauncher to avoid GLX in headless camera rendering: ['DISPLAY', 'XAUTHORITY']
+Loading user config located at: '/home/rllab/.holosoma_deps/miniconda3/envs/hssim/lib/python3.11/site-packages/isaacsim/kit/data/Kit/Isaac-Sim/5.1/user.config.json'
+[Info] [carb] Logging to file: /home/rllab/.holosoma_deps/miniconda3/envs/hssim/lib/python3.11/site-packages/isaacsim/kit/logs/Kit/Isaac-Sim/5.1/kit_20260624_133044.log
+2026-06-24T04:30:44Z [92ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-06-24T04:30:44Z [92ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-06-24T04:30:44Z [115ms] [Warning] [omni.platforminfo.plugin] failed to open the default display.  Can't verify X Server version.
+2026-06-24T04:30:44Z [315ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-06-24T04:30:44Z [315ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-06-24T04:30:45Z [471ms] [Warning] [gpu.foundation.plugin] Skipping unsupported non-NVIDIA GPU: Intel(R) Graphics (RPL-S)
+2026-06-24T04:30:45Z [471ms] [Warning] [gpu.foundation.plugin] Skipping unsupported non-NVIDIA GPU: Intel(R) Graphics (RPL-S)
+
+|---------------------------------------------------------------------------------------------|
+| Driver Version: 590.48.01     | Graphics API: Vulkan
+|=============================================================================================|
+| GPU | Name                             | Active | LDA | GPU Memory | Vendor-ID | LUID       |
+|     |                                  |        |     |            | Device-ID | UUID       |
+|     |                                  |        |     |            | Bus-ID    |            |
+|---------------------------------------------------------------------------------------------|
+| 0   | NVIDIA RTX A6000                 | Yes: 0 |     | 49140   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2230      | d3197827.. |
+|     |                                  |        |     |            | 1         |            |
+|---------------------------------------------------------------------------------------------|
+| 1   | Intel(R) Graphics (RPL-S)        |        |     | 96391   MB | 8086      | 0          |
+|     |                                  |        |     |            | a780      | 868080a7.. |
+|     |                                  |        |     |            | 0         |            |
+|=============================================================================================|
+| OS: 22.04.5 LTS (Jammy Jellyfish) ubuntu, Version: 22.04.5, Kernel: 6.8.0-124-generic
+| Processor: 13th Gen Intel(R) Core(TM) i9-13900KS
+| Bare Metal Cores: 24 | Bare Metal Logical Cores: 48
+| Available Cores:  32 
+|---------------------------------------------------------------------------------------------|
+| Total Memory (MB): 128521 | Free Memory: 119837
+| Total Page/Swap (MB): 2047 | Free Page/Swap: 2047
+|---------------------------------------------------------------------------------------------|
+2026-06-24T04:30:45Z [721ms] [Warning] [gpu.foundation.plugin] CPU performance profile is set to powersave. This profile sets the CPU to the lowest frequency reducing performance.
+2026-06-24T04:30:45Z [730ms] [Warning] [gpu.foundation.plugin] IOMMU is enabled.
+2026-06-24T04:30:45Z [730ms] [Warning] [gpu.foundation.plugin] Detected IOMMU is enabled. Running CUDA peer-to-peer bandwidth and latency validation.
+Unidirectional P2P=Enabled Bandwidth (P2P Writes) Matrix (GB/s)
+   D\D     0 
+     0 674.95 
+P2P=Enabled Latency (P2P Writes) Matrix (us)
+   GPU     0 
+     0   1.73 
+
+   CPU     0 
+     0   1.32 
+2026-06-24T04:30:45Z [1,212ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-06-24T04:30:45Z [1,212ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-06-24T04:30:45Z [1,227ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-06-24T04:30:45Z [1,227ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-06-24T04:30:45Z [1,235ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-06-24T04:30:45Z [1,235ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-06-24T04:30:45Z [1,250ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-06-24T04:30:45Z [1,251ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-06-24T04:30:45Z [1,252ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-06-24T04:30:45Z [1,252ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-06-24T04:30:45Z [1,253ms] [Warning] [carb.windowing-glfw.plugin] GLFW initialization failed.
+2026-06-24T04:30:45Z [1,253ms] [Warning] [carb] Failed to startup plugin carb.windowing-glfw.plugin (interfaces: [carb::windowing::IGLContext v1.0],[carb::windowing::IWindowing v1.5]) (impl: carb.windowing-glfw.plugin)
+2026-06-24T04:30:45Z [1,347ms] [Warning] [omni.log] Source: omni.hydra was already registered.
+2026-06-24T04:30:46Z [1,542ms] [Warning] [carb] Acquiring non optional plugin interface which is not listed as dependency: [omni::physx::IPhysxBenchmarks v1.0] (plugin: <default plugin>), by client: omni.physics.physx.plugin. Add it to CARB_PLUGIN_IMPL_DEPS() macro of a client.
+2026-06-24T04:30:46Z [1,553ms] [Warning] [omni.isaac.dynamic_control] omni.isaac.dynamic_control is deprecated as of Isaac Sim 4.5. No action is needed from end-users.
+2026-06-24T04:30:46Z [1,862ms] [Warning] [pxr.Semantics] pxr.Semantics is deprecated - please use Semantics instead
+2026-06-24T04:30:46Z [1,958ms] [Warning] [omni.graph.core.plugin] Found duplicate of category 'Replicator' - was 'Annotators', adding 'Fabric Reader'
+2026-06-24T04:30:46Z [1,958ms] [Warning] [omni.graph.core.plugin] Category 'Replicator' not accepted on node type 'omni.replicator.core.FabricReader' in extension 'omni.replicator.core'
+2026-06-24T04:30:46Z [1,959ms] [Warning] [omni.replicator.core.scripts.extension] No material configuration file, adding configuration to material settings directly.
+2026-06-24T04:30:47Z [2,558ms] [Error] [carb.scripting-python.plugin] KeyboardInterrupt: <EMPTY MESSAGE>
+
+At:
+  <frozen importlib._bootstrap_external>(1131): get_data
+  <frozen importlib._bootstrap_external>(1033): get_code
+  <frozen importlib._bootstrap_external>(936): exec_module
+  <frozen importlib._bootstrap>(705): _load_unlocked
+  <frozen importlib._bootstrap>(1150): _find_and_load_unlocked
+  <frozen importlib._bootstrap>(1176): _find_and_load
+  /home/rllab/.holosoma_deps/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_env_cfg.py(15): <module>
+  <frozen importlib._bootstrap>(241): _call_with_frames_removed
+  <frozen importlib._bootstrap_external>(940): exec_module
+  <frozen importlib._bootstrap>(705): _load_unlocked
+  <frozen importlib._bootstrap>(1150): _find_and_load_unlocked
+  <frozen importlib._bootstrap>(1176): _find_and_load
+  /home/rllab/.holosoma_deps/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/factory/factory_env.py(20): <module>
+  <frozen importlib._bootstrap>(241): _call_with_frames_removed
+  <frozen importlib._bootstrap_external>(940): exec_module
+  <frozen importlib._bootstrap>(705): _load_unlocked
+  <frozen importlib._bootstrap>(1150): _find_and_load_unlocked
+  <frozen importlib._bootstrap>(1176): _find_and_load
+  /home/rllab/.holosoma_deps/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/factory/__init__.py(9): <module>
+  <frozen importlib._bootstrap>(241): _call_with_frames_removed
+  <frozen importlib._bootstrap_external>(940): exec_module
+  <frozen importlib._bootstrap>(705): _load_unlocked
+  <frozen importlib._bootstrap>(1150): _find_and_load_unlocked
+  <frozen importlib._bootstrap>(1176): _find_and_load
+  /home/rllab/.holosoma_deps/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/utils/importer.py(82): _walk_packages
+
+2026-06-24T04:30:47Z [2,558ms] [Error] [omni.ext.plugin] [ext: isaaclab_tasks-0.11.6] Failed to startup python extension.
+2026-06-24 13:30:49.204 | INFO     | holosoma.utils.sim_utils:setup_isaaclab_launcher:158 - IsaacSim args_cli: Namespace(num_envs=16384, seed=42, env_spacing=0.0, output_dir='logs', enable_cameras=True, xr=False, device='cuda:0', cpu=False, verbose=False, info=False, rendering_mode=None, kit_args='', anim_recording_enabled=False, anim_recording_start_time=0, anim_recording_stop_time=10, headless=True, hide_ui=True, create_new_stage=False, physics_gpu=0, active_gpu=0)
+2026-06-24 13:30:49.204 | INFO     | holosoma.utils.sim_utils:setup_isaaclab_launcher:159 - IsaacSim unknown_args: ['exp:r1-teacher', 'logger:wandb', '--training.project', 'teacher', '--command.setup-terms.motion-command.params.motion-config.motion-folder=./train_r1/rl', '--robot.object.object-urdf-asset=./train_r1/objects', '--robot.object.object-parm=./train_r1/objects/objects_parm.yaml', '--robot.control.action-scale', '0.5']
+/home/rllab/.holosoma_deps/miniconda3/envs/hssim/lib/python3.11/site-packages/requests/__init__.py:113: RequestsDependencyWarning: urllib3 (2.6.3) or chardet (6.0.0.post1)/charset_normalizer (3.3.2) doesn't match a supported version!
+  warnings.warn(
+CurriculumManagerCfg(params={'num_compute_average_epl': 1000}, setup_terms={'average_episode_tracker': CurriculumTermCfg(func='holosoma.managers.curriculum.terms.locomotion:AverageEpisodeLengthTracker', params={})}, reset_terms={}, step_terms={})
+
+
+
+simulator type:  SimulatorConfig(_target_='holosoma.simulator.isaacsim.isaacsim.IsaacSim', _recursive_=False, config=SimulatorInitConfig(name='isaacsim', sim=SimEngineConfig(fps=200, control_decimation=4, substeps=1, physx=PhysxConfig(solver_type=1, num_position_iterations=8, num_velocity_iterations=4, num_threads=4, enable_dof_force_sensors=False, bounce_threshold_velocity=0.5), render_mode='human', render_interval=4, max_episode_length_s=20.0), debug_viz=True, viewer=ViewerConfig(enable_tracking=False, camera=None), scene=SceneConfig(replicate_physics=True, asset_root=None, scene_files=None, rigid_objects=None, env_spacing=0.0), reset_manager=ResetManagerConfig(events=[]), contact_sensor_history_length=3, enable_robot_depth_camera=False, robot_mjcf_filter=MujocoXMLFilterCfg(enable=False, remove_lights=True, remove_ground=True, ground_names=['floor', 'ground', 'plane']), mujoco_backend=<MujocoBackend.CLASSIC: 'classic'>, mujoco_warp=MujocoWarpConfig(nconmax_per_env=96, njmax_per_env=None), bridge=BridgeConfig(enabled=False, use_joystick=False, joystick_device=0, joystick_type='xbox', domain_id=0, interface=None, rate_limit_dt=None, use_ros=False, publish_depth=False, depth_port=5556, depth_env_id=0, depth_publish_rate_hz=50.0), virtual_gantry=VirtualGantryCfg(enabled=False, attachment_body_names=['Trunk', 'torso_link', 'torso', 'base_link', 'pelvis_link', 'pelvis', 'base'], stiffness=200.0, damping=100.0, height=3.0, point=None, length=0.0, apply_force=0.0, apply_force_sign=-1)))
+[INFO][AppLauncher]: Using device: cuda:0
+[INFO][AppLauncher]: Loading experience file: /home/rllab/.holosoma_deps/IsaacLab/apps/isaaclab.python.headless.rendering.kit
+[32m2026-06-24 13:30:50.341[0m | [1mINFO    [0m | [36mlogging[0m:[36mcallHandlers[0m:[36m1706[0m - [1mSetting seed: 42[0m
+[32m2026-06-24 13:30:50.342[0m | [1mINFO    [0m | [36m__main__[0m:[36mtrain[0m:[36m302[0m - [1mSaving wandb logs to logs/teacher/20260624_043050-r1_teacher-locomotion/.wandb[0m
+wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from /home/rllab/.netrc.
+wandb: Currently logged in as: badajhong95 (badajhong95-unist) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: setting up run zccnoqyo
+wandb: Tracking run with wandb version 0.25.0
+wandb: Run data is saved locally in logs/teacher/20260624_043050-r1_teacher-locomotion/.wandb/wandb/run-20260624_133050-zccnoqyo
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run 20260624_043050_r1_teacher_default_r1_26dof
+wandb: ⭐️ View project at https://wandb.ai/badajhong95-unist/teacher
+wandb: 🚀 View run at https://wandb.ai/badajhong95-unist/teacher/runs/zccnoqyo
+generating randomized terrains 0 / 200     generating randomized terrains 1 / 200     generating randomized terrains 2 / 200     generating randomized terrains 3 / 200     generating randomized terrains 4 / 200     generating randomized terrains 5 / 200     generating randomized terrains 6 / 200     generating randomized terrains 7 / 200     generating randomized terrains 8 / 200     generating randomized terrains 9 / 200     generating randomized terrains 10 / 200     generating randomized terrains 11 / 200     generating randomized terrains 12 / 200     generating randomized terrains 13 / 200     generating randomized terrains 14 / 200     generating randomized terrains 15 / 200     generating randomized terrains 16 / 200     generating randomized terrains 17 / 200     generating randomized terrains 18 / 200     generating randomized terrains 19 / 200     generating randomized terrains 20 / 200     generating randomized terrains 21 / 200     generating randomized terrains 22 / 200     generating randomized terrains 23 / 200     generating randomized terrains 24 / 200     generating randomized terrains 25 / 200     generating randomized terrains 26 / 200     generating randomized terrains 27 / 200     generating randomized terrains 28 / 200     generating randomized terrains 29 / 200     generating randomized terrains 30 / 200     generating randomized terrains 31 / 200     generating randomized terrains 32 / 200     generating randomized terrains 33 / 200     generating randomized terrains 34 / 200     generating randomized terrains 35 / 200     generating randomized terrains 36 / 200     generating randomized terrains 37 / 200     generating randomized terrains 38 / 200     generating randomized terrains 39 / 200     generating randomized terrains 40 / 200     generating randomized terrains 41 / 200     generating randomized terrains 42 / 200     generating randomized terrains 43 / 200     generating randomized terrains 44 / 200     generating randomized terrains 45 / 200     generating randomized terrains 46 / 200     generating randomized terrains 47 / 200     generating randomized terrains 48 / 200     generating randomized terrains 49 / 200     generating randomized terrains 50 / 200     generating randomized terrains 51 / 200     generating randomized terrains 52 / 200     generating randomized terrains 53 / 200     generating randomized terrains 54 / 200     generating randomized terrains 55 / 200     generating randomized terrains 56 / 200     generating randomized terrains 57 / 200     generating randomized terrains 58 / 200     generating randomized terrains 59 / 200     generating randomized terrains 60 / 200     generating randomized terrains 61 / 200     generating randomized terrains 62 / 200     generating randomized terrains 63 / 200     generating randomized terrains 64 / 200     generating randomized terrains 65 / 200     generating randomized terrains 66 / 200     generating randomized terrains 67 / 200     generating randomized terrains 68 / 200     generating randomized terrains 69 / 200     generating randomized terrains 70 / 200     generating randomized terrains 71 / 200     generating randomized terrains 72 / 200     generating randomized terrains 73 / 200     generating randomized terrains 74 / 200     generating randomized terrains 75 / 200     generating randomized terrains 76 / 200     generating randomized terrains 77 / 200     generating randomized terrains 78 / 200     generating randomized terrains 79 / 200     generating randomized terrains 80 / 200     generating randomized terrains 81 / 200     generating randomized terrains 82 / 200     generating randomized terrains 83 / 200     generating randomized terrains 84 / 200     generating randomized terrains 85 / 200     generating randomized terrains 86 / 200     generating randomized terrains 87 / 200     generating randomized terrains 88 / 200     generating randomized terrains 89 / 200     generating randomized terrains 90 / 200     generating randomized terrains 91 / 200     generating randomized terrains 92 / 200     generating randomized terrains 93 / 200     generating randomized terrains 94 / 200     generating randomized terrains 95 / 200     generating randomized terrains 96 / 200     generating randomized terrains 97 / 200     generating randomized terrains 98 / 200     generating randomized terrains 99 / 200     generating randomized terrains 100 / 200     generating randomized terrains 101 / 200     generating randomized terrains 102 / 200     generating randomized terrains 103 / 200     generating randomized terrains 104 / 200     generating randomized terrains 105 / 200     generating randomized terrains 106 / 200     generating randomized terrains 107 / 200     generating randomized terrains 108 / 200     generating randomized terrains 109 / 200     generating randomized terrains 110 / 200     generating randomized terrains 111 / 200     generating randomized terrains 112 / 200     generating randomized terrains 113 / 200     generating randomized terrains 114 / 200     generating randomized terrains 115 / 200     generating randomized terrains 116 / 200     generating randomized terrains 117 / 200     generating randomized terrains 118 / 200     generating randomized terrains 119 / 200     generating randomized terrains 120 / 200     generating randomized terrains 121 / 200     generating randomized terrains 122 / 200     generating randomized terrains 123 / 200     generating randomized terrains 124 / 200     generating randomized terrains 125 / 200     generating randomized terrains 126 / 200     generating randomized terrains 127 / 200     generating randomized terrains 128 / 200     generating randomized terrains 129 / 200     generating randomized terrains 130 / 200     generating randomized terrains 131 / 200     generating randomized terrains 132 / 200     generating randomized terrains 133 / 200     generating randomized terrains 134 / 200     generating randomized terrains 135 / 200     generating randomized terrains 136 / 200     generating randomized terrains 137 / 200     generating randomized terrains 138 / 200     generating randomized terrains 139 / 200     generating randomized terrains 140 / 200     generating randomized terrains 141 / 200     generating randomized terrains 142 / 200     generating randomized terrains 143 / 200     generating randomized terrains 144 / 200     generating randomized terrains 145 / 200     generating randomized terrains 146 / 200     generating randomized terrains 147 / 200     generating randomized terrains 148 / 200     generating randomized terrains 149 / 200     generating randomized terrains 150 / 200     generating randomized terrains 151 / 200     generating randomized terrains 152 / 200     generating randomized terrains 153 / 200     generating randomized terrains 154 / 200     generating randomized terrains 155 / 200     generating randomized terrains 156 / 200     generating randomized terrains 157 / 200     generating randomized terrains 158 / 200     generating randomized terrains 159 / 200     generating randomized terrains 160 / 200     generating randomized terrains 161 / 200     generating randomized terrains 162 / 200     generating randomized terrains 163 / 200     generating randomized terrains 164 / 200     generating randomized terrains 165 / 200     generating randomized terrains 166 / 200     generating randomized terrains 167 / 200     generating randomized terrains 168 / 200     generating randomized terrains 169 / 200     generating randomized terrains 170 / 200     generating randomized terrains 171 / 200     generating randomized terrains 172 / 200     generating randomized terrains 173 / 200     generating randomized terrains 174 / 200     generating randomized terrains 175 / 200     generating randomized terrains 176 / 200     generating randomized terrains 177 / 200     generating randomized terrains 178 / 200     generating randomized terrains 179 / 200     generating randomized terrains 180 / 200     generating randomized terrains 181 / 200     generating randomized terrains 182 / 200     generating randomized terrains 183 / 200     generating randomized terrains 184 / 200     generating randomized terrains 185 / 200     generating randomized terrains 186 / 200     generating randomized terrains 187 / 200     generating randomized terrains 188 / 200     generating randomized terrains 189 / 200     generating randomized terrains 190 / 200     generating randomized terrains 191 / 200     generating randomized terrains 192 / 200     generating randomized terrains 193 / 200     generating randomized terrains 194 / 200     generating randomized terrains 195 / 200     generating randomized terrains 196 / 200     generating randomized terrains 197 / 200     generating randomized terrains 198 / 200     generating randomized terrains 199 / 200     
+ generated all randomized terrains!
+[32m2026-06-24 13:30:52.233[0m | [1mINFO    [0m | [36mholosoma.simulator.isaacsim.isaacsim[0m:[36m__init__[0m:[36m127[0m - [1mIsaacSim initialized.[0m
+[32m2026-06-24 13:30:52.233[0m | [1mINFO    [0m | [36mholosoma.simulator.isaacsim.isaacsim[0m:[36m__init__[0m:[36m129[0m - [1m[INFO]: Base environment:[0m
+[32m2026-06-24 13:30:52.234[0m | [1mINFO    [0m | [36mholosoma.simulator.isaacsim.isaacsim[0m:[36m__init__[0m:[36m130[0m - [1m	Environment device    : cuda:0[0m
+[32m2026-06-24 13:30:52.234[0m | [1mINFO    [0m | [36mholosoma.simulator.isaacsim.isaacsim[0m:[36m__init__[0m:[36m131[0m - [1m	Physics step-size     : 0.005[0m
+[32m2026-06-24 13:30:52.234[0m | [1mINFO    [0m | [36mholosoma.simulator.isaacsim.isaacsim[0m:[36m__init__[0m:[36m132[0m - [1m	Rendering step-size   : 0.005[0m
+key: hip_pitch, kp: 40.179238471, kd: 2.557889765
+key: hip_roll, kp: 99.098427777, kd: 6.308801854
+key: hip_yaw, kp: 40.179238471, kd: 2.557889765
+key: knee, kp: 99.098427777, kd: 6.308801854
+key: ankle_pitch, kp: 28.501246196, kd: 1.814445687
+key: ankle_roll, kp: 28.501246196, kd: 1.814445687
+key: hip_pitch, kp: 40.179238471, kd: 2.557889765
+key: hip_roll, kp: 99.098427777, kd: 6.308801854
+key: hip_yaw, kp: 40.179238471, kd: 2.557889765
+key: knee, kp: 99.098427777, kd: 6.308801854
+key: ankle_pitch, kp: 28.501246196, kd: 1.814445687
+key: ankle_roll, kp: 28.501246196, kd: 1.814445687
+key: waist_roll, kp: 28.501246196, kd: 1.814445687
+key: waist_yaw, kp: 40.179238471, kd: 2.557889765
+key: shoulder_pitch, kp: 14.250623098, kd: 0.907222843
+key: shoulder_roll, kp: 14.250623098, kd: 0.907222843
+key: shoulder_yaw, kp: 14.250623098, kd: 0.907222843
+key: elbow, kp: 14.250623098, kd: 0.907222843
+key: wrist_roll, kp: 14.250623098, kd: 0.907222843
+key: shoulder_pitch, kp: 14.250623098, kd: 0.907222843
+key: shoulder_roll, kp: 14.250623098, kd: 0.907222843
+key: shoulder_yaw, kp: 14.250623098, kd: 0.907222843
+key: elbow, kp: 14.250623098, kd: 0.907222843
+key: wrist_roll, kp: 14.250623098, kd: 0.907222843
+key: head_pitch, kp: 14.250623098, kd: 0.907222843
+key: head_yaw, kp: 14.250623098, kd: 0.907222843
+/World/envs/env_0/Robot
+├── /World/envs/env_0/Robot/pelvis_link
+│   ├── /World/envs/env_0/Robot/pelvis_link/visuals
+└── /World/envs/env_0/Robot/pelvis_link/collisions
+├── /World/envs/env_0/Robot/imu_in_pelvis_link
+│   ├── /World/envs/env_0/Robot/imu_in_pelvis_link/visuals
+└── /World/envs/env_0/Robot/imu_in_pelvis_link/collisions
+├── /World/envs/env_0/Robot/joints
+│   ├── /World/envs/env_0/Robot/joints/imu_in_pelvis_joint
+│   ├── /World/envs/env_0/Robot/joints/left_hip_pitch_joint
+│   ├── /World/envs/env_0/Robot/joints/left_hip_roll_joint
+│   ├── /World/envs/env_0/Robot/joints/left_hip_yaw_joint
+│   ├── /World/envs/env_0/Robot/joints/left_knee_joint
+│   ├── /World/envs/env_0/Robot/joints/left_ankle_A_joint
+│   ├── /World/envs/env_0/Robot/joints/left_ankle_A_rod_joint
+│   ├── /World/envs/env_0/Robot/joints/left_ankle_B_joint
+│   ├── /World/envs/env_0/Robot/joints/left_ankle_B_rod_joint
+│   ├── /World/envs/env_0/Robot/joints/left_ankle_pitch_joint
+│   ├── /World/envs/env_0/Robot/joints/left_ankle_roll_joint
+│   ├── /World/envs/env_0/Robot/joints/left_ankle_constraint_A_joint
+│   ├── /World/envs/env_0/Robot/joints/left_ankle_constraint_B_joint
+│   ├── /World/envs/env_0/Robot/joints/left_foot_front_inner_joint
+│   ├── /World/envs/env_0/Robot/joints/left_foot_front_outer_joint
+│   ├── /World/envs/env_0/Robot/joints/left_foot_rear_inner_joint
+│   ├── /World/envs/env_0/Robot/joints/left_foot_rear_outer_joint
+│   ├── /World/envs/env_0/Robot/joints/right_hip_pitch_joint
+│   ├── /World/envs/env_0/Robot/joints/right_hip_roll_joint
+│   ├── /World/envs/env_0/Robot/joints/right_hip_yaw_joint
+│   ├── /World/envs/env_0/Robot/joints/right_knee_joint
+│   ├── /World/envs/env_0/Robot/joints/right_ankle_A_joint
+│   ├── /World/envs/env_0/Robot/joints/right_ankle_A_rod_joint
+│   ├── /World/envs/env_0/Robot/joints/right_ankle_B_joint
+│   ├── /World/envs/env_0/Robot/joints/right_ankle_B_rod_joint
+│   ├── /World/envs/env_0/Robot/joints/right_ankle_pitch_joint
+│   ├── /World/envs/env_0/Robot/joints/right_ankle_roll_joint
+│   ├── /World/envs/env_0/Robot/joints/right_ankle_constraint_A_joint
+│   ├── /World/envs/env_0/Robot/joints/right_ankle_constraint_B_joint
+│   ├── /World/envs/env_0/Robot/joints/right_foot_front_inner_joint
+│   ├── /World/envs/env_0/Robot/joints/right_foot_front_outer_joint
+│   ├── /World/envs/env_0/Robot/joints/right_foot_rear_inner_joint
+│   ├── /World/envs/env_0/Robot/joints/right_foot_rear_outer_joint
+│   ├── /World/envs/env_0/Robot/joints/waist_roll_joint
+│   ├── /World/envs/env_0/Robot/joints/waist_yaw_joint
+│   ├── /World/envs/env_0/Robot/joints/head_pitch_joint
+│   ├── /World/envs/env_0/Robot/joints/head_yaw_joint
+│   ├── /World/envs/env_0/Robot/joints/left_shoulder_pitch_joint
+│   ├── /World/envs/env_0/Robot/joints/left_shoulder_roll_joint
+│   ├── /World/envs/env_0/Robot/joints/left_shoulder_yaw_joint
+│   ├── /World/envs/env_0/Robot/joints/left_elbow_joint
+│   ├── /World/envs/env_0/Robot/joints/left_wrist_roll_joint
+│   ├── /World/envs/env_0/Robot/joints/right_shoulder_pitch_joint
+│   ├── /World/envs/env_0/Robot/joints/right_shoulder_roll_joint
+│   ├── /World/envs/env_0/Robot/joints/right_shoulder_yaw_joint
+│   ├── /World/envs/env_0/Robot/joints/right_elbow_joint
+└── /World/envs/env_0/Robot/joints/right_wrist_roll_joint
+├── /World/envs/env_0/Robot/left_hip_pitch_link
+│   ├── /World/envs/env_0/Robot/left_hip_pitch_link/visuals
+└── /World/envs/env_0/Robot/left_hip_pitch_link/collisions
+├── /World/envs/env_0/Robot/left_hip_roll_link
+│   ├── /World/envs/env_0/Robot/left_hip_roll_link/visuals
+└── /World/envs/env_0/Robot/left_hip_roll_link/collisions
+├── /World/envs/env_0/Robot/left_hip_yaw_link
+│   ├── /World/envs/env_0/Robot/left_hip_yaw_link/visuals
+└── /World/envs/env_0/Robot/left_hip_yaw_link/collisions
+├── /World/envs/env_0/Robot/left_knee_link
+│   ├── /World/envs/env_0/Robot/left_knee_link/visuals
+└── /World/envs/env_0/Robot/left_knee_link/collisions
+├── /World/envs/env_0/Robot/left_ankle_A_link
+│   ├── /World/envs/env_0/Robot/left_ankle_A_link/visuals
+└── /World/envs/env_0/Robot/left_ankle_A_link/collisions
+├── /World/envs/env_0/Robot/left_ankle_A_rod_link
+│   ├── /World/envs/env_0/Robot/left_ankle_A_rod_link/visuals
+└── /World/envs/env_0/Robot/left_ankle_A_rod_link/collisions
+├── /World/envs/env_0/Robot/left_ankle_B_link
+│   ├── /World/envs/env_0/Robot/left_ankle_B_link/visuals
+└── /World/envs/env_0/Robot/left_ankle_B_link/collisions
+├── /World/envs/env_0/Robot/left_ankle_B_rod_link
+│   ├── /World/envs/env_0/Robot/left_ankle_B_rod_link/visuals
+└── /World/envs/env_0/Robot/left_ankle_B_rod_link/collisions
+├── /World/envs/env_0/Robot/left_ankle_pitch_link
+│   ├── /World/envs/env_0/Robot/left_ankle_pitch_link/visuals
+└── /World/envs/env_0/Robot/left_ankle_pitch_link/collisions
+├── /World/envs/env_0/Robot/left_ankle_roll_link
+│   ├── /World/envs/env_0/Robot/left_ankle_roll_link/visuals
+└── /World/envs/env_0/Robot/left_ankle_roll_link/collisions
+├── /World/envs/env_0/Robot/left_ankle_constraint_A_link
+│   ├── /World/envs/env_0/Robot/left_ankle_constraint_A_link/visuals
+└── /World/envs/env_0/Robot/left_ankle_constraint_A_link/collisions
+├── /World/envs/env_0/Robot/left_ankle_constraint_B_link
+│   ├── /World/envs/env_0/Robot/left_ankle_constraint_B_link/visuals
+└── /World/envs/env_0/Robot/left_ankle_constraint_B_link/collisions
+├── /World/envs/env_0/Robot/left_foot_front_inner_link
+│   ├── /World/envs/env_0/Robot/left_foot_front_inner_link/visuals
+└── /World/envs/env_0/Robot/left_foot_front_inner_link/collisions
+├── /World/envs/env_0/Robot/left_foot_front_outer_link
+│   ├── /World/envs/env_0/Robot/left_foot_front_outer_link/visuals
+└── /World/envs/env_0/Robot/left_foot_front_outer_link/collisions
+├── /World/envs/env_0/Robot/left_foot_rear_inner_link
+│   ├── /World/envs/env_0/Robot/left_foot_rear_inner_link/visuals
+└── /World/envs/env_0/Robot/left_foot_rear_inner_link/collisions
+├── /World/envs/env_0/Robot/left_foot_rear_outer_link
+│   ├── /World/envs/env_0/Robot/left_foot_rear_outer_link/visuals
+└── /World/envs/env_0/Robot/left_foot_rear_outer_link/collisions
+├── /World/envs/env_0/Robot/right_hip_pitch_link
+│   ├── /World/envs/env_0/Robot/right_hip_pitch_link/visuals
+└── /World/envs/env_0/Robot/right_hip_pitch_link/collisions
+├── /World/envs/env_0/Robot/right_hip_roll_link
+│   ├── /World/envs/env_0/Robot/right_hip_roll_link/visuals
+└── /World/envs/env_0/Robot/right_hip_roll_link/collisions
+├── /World/envs/env_0/Robot/right_hip_yaw_link
+│   ├── /World/envs/env_0/Robot/right_hip_yaw_link/visuals
+└── /World/envs/env_0/Robot/right_hip_yaw_link/collisions
+├── /World/envs/env_0/Robot/right_knee_link
+│   ├── /World/envs/env_0/Robot/right_knee_link/visuals
+└── /World/envs/env_0/Robot/right_knee_link/collisions
+├── /World/envs/env_0/Robot/right_ankle_A_link
+│   ├── /World/envs/env_0/Robot/right_ankle_A_link/visuals
+└── /World/envs/env_0/Robot/right_ankle_A_link/collisions
+├── /World/envs/env_0/Robot/right_ankle_A_rod_link
+│   ├── /World/envs/env_0/Robot/right_ankle_A_rod_link/visuals
+└── /World/envs/env_0/Robot/right_ankle_A_rod_link/collisions
+├── /World/envs/env_0/Robot/right_ankle_B_link
+│   ├── /World/envs/env_0/Robot/right_ankle_B_link/visuals
+└── /World/envs/env_0/Robot/right_ankle_B_link/collisions
+├── /World/envs/env_0/Robot/right_ankle_B_rod_link
+│   ├── /World/envs/env_0/Robot/right_ankle_B_rod_link/visuals
+└── /World/envs/env_0/Robot/right_ankle_B_rod_link/collisions
+├── /World/envs/env_0/Robot/right_ankle_pitch_link
+│   ├── /World/envs/env_0/Robot/right_ankle_pitch_link/visuals
+└── /World/envs/env_0/Robot/right_ankle_pitch_link/collisions
+├── /World/envs/env_0/Robot/right_ankle_roll_link
+│   ├── /World/envs/env_0/Robot/right_ankle_roll_link/visuals
+└── /World/envs/env_0/Robot/right_ankle_roll_link/collisions
+├── /World/envs/env_0/Robot/right_ankle_constraint_A_link
+│   ├── /World/envs/env_0/Robot/right_ankle_constraint_A_link/visuals
+└── /World/envs/env_0/Robot/right_ankle_constraint_A_link/collisions
+├── /World/envs/env_0/Robot/right_ankle_constraint_B_link
+│   ├── /World/envs/env_0/Robot/right_ankle_constraint_B_link/visuals
+└── /World/envs/env_0/Robot/right_ankle_constraint_B_link/collisions
+├── /World/envs/env_0/Robot/right_foot_front_inner_link
+│   ├── /World/envs/env_0/Robot/right_foot_front_inner_link/visuals
+└── /World/envs/env_0/Robot/right_foot_front_inner_link/collisions
+├── /World/envs/env_0/Robot/right_foot_front_outer_link
+│   ├── /World/envs/env_0/Robot/right_foot_front_outer_link/visuals
+└── /World/envs/env_0/Robot/right_foot_front_outer_link/collisions
+├── /World/envs/env_0/Robot/right_foot_rear_inner_link
+│   ├── /World/envs/env_0/Robot/right_foot_rear_inner_link/visuals
+└── /World/envs/env_0/Robot/right_foot_rear_inner_link/collisions
+├── /World/envs/env_0/Robot/right_foot_rear_outer_link
+│   ├── /World/envs/env_0/Robot/right_foot_rear_outer_link/visuals
+└── /World/envs/env_0/Robot/right_foot_rear_outer_link/collisions
+├── /World/envs/env_0/Robot/waist_roll_link
+│   ├── /World/envs/env_0/Robot/waist_roll_link/visuals
+└── /World/envs/env_0/Robot/waist_roll_link/collisions
+├── /World/envs/env_0/Robot/waist_yaw_link
+│   ├── /World/envs/env_0/Robot/waist_yaw_link/visuals
+└── /World/envs/env_0/Robot/waist_yaw_link/collisions
+├── /World/envs/env_0/Robot/head_pitch_link
+│   ├── /World/envs/env_0/Robot/head_pitch_link/visuals
+└── /World/envs/env_0/Robot/head_pitch_link/collisions
+├── /World/envs/env_0/Robot/head_yaw_link
+│   ├── /World/envs/env_0/Robot/head_yaw_link/visuals
+└── /World/envs/env_0/Robot/head_yaw_link/collisions
+├── /World/envs/env_0/Robot/left_shoulder_pitch_link
+│   ├── /World/envs/env_0/Robot/left_shoulder_pitch_link/visuals
+└── /World/envs/env_0/Robot/left_shoulder_pitch_link/collisions
+├── /World/envs/env_0/Robot/left_shoulder_roll_link
+│   ├── /World/envs/env_0/Robot/left_shoulder_roll_link/visuals
+└── /World/envs/env_0/Robot/left_shoulder_roll_link/collisions
+├── /World/envs/env_0/Robot/left_shoulder_yaw_link
+│   ├── /World/envs/env_0/Robot/left_shoulder_yaw_link/visuals
+└── /World/envs/env_0/Robot/left_shoulder_yaw_link/collisions
+├── /World/envs/env_0/Robot/left_elbow_link
+│   ├── /World/envs/env_0/Robot/left_elbow_link/visuals
+└── /World/envs/env_0/Robot/left_elbow_link/collisions
+├── /World/envs/env_0/Robot/left_wrist_roll_link
+│   ├── /World/envs/env_0/Robot/left_wrist_roll_link/visuals
+└── /World/envs/env_0/Robot/left_wrist_roll_link/collisions
+├── /World/envs/env_0/Robot/right_shoulder_pitch_link
+│   ├── /World/envs/env_0/Robot/right_shoulder_pitch_link/visuals
+└── /World/envs/env_0/Robot/right_shoulder_pitch_link/collisions
+├── /World/envs/env_0/Robot/right_shoulder_roll_link
+│   ├── /World/envs/env_0/Robot/right_shoulder_roll_link/visuals
+└── /World/envs/env_0/Robot/right_shoulder_roll_link/collisions
+├── /World/envs/env_0/Robot/right_shoulder_yaw_link
+│   ├── /World/envs/env_0/Robot/right_shoulder_yaw_link/visuals
+└── /World/envs/env_0/Robot/right_shoulder_yaw_link/collisions
+├── /World/envs/env_0/Robot/right_elbow_link
+│   ├── /World/envs/env_0/Robot/right_elbow_link/visuals
+└── /World/envs/env_0/Robot/right_elbow_link/collisions
+├── /World/envs/env_0/Robot/right_wrist_roll_link
+│   ├── /World/envs/env_0/Robot/right_wrist_roll_link/visuals
+└── /World/envs/env_0/Robot/right_wrist_roll_link/collisions
+├── /World/envs/env_0/Robot/Looks
+│   ├── /World/envs/env_0/Robot/Looks/material_dark
+│   └── /World/envs/env_0/Robot/Looks/material_dark/Shader
+│   ├── /World/envs/env_0/Robot/Looks/material_light_grey
+│   └── /World/envs/env_0/Robot/Looks/material_light_grey/Shader
+└── /World/envs/env_0/Robot/Looks/material_white
+[32m2026-06-24 13:30:54.091[0m | [1mINFO    [0m | [36mholosoma.simulator.isaacsim.isaacsim[0m:[36m_setup_scene[0m:[36m420[0m - [1mIsaacSim: robot depth camera creation disabled by simulator config.[0m

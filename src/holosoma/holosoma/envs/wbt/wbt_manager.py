@@ -43,6 +43,11 @@ class WholeBodyTrackingManager(BaseTask):
         self.base_quat[:] = self.simulator.base_quat[:]
 
     def _reset_buffers_callback(self, env_ids, target_buf=None):
+        contact_cache = getattr(self, "_object_contact_surface_cache", None)
+        if contact_cache is not None:
+            contact_cache.clear()
+        self._object_contact_surface_cache_generation = getattr(self, "_object_contact_surface_cache_generation", 0) + 1
+
         self.need_to_refresh_envs[env_ids] = True
         self.episode_length_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
@@ -226,13 +231,13 @@ class WholeBodyTrackingManager(BaseTask):
     def _get_termination_metric_prefix(self, motion_command, clip_id: int) -> str:
         motion_prefix = self._get_motion_metric_prefix(motion_command, clip_id)
         if motion_prefix.startswith("Motion/"):
-            return f"Termination/{motion_prefix[len('Motion/'):]}"
+            return f"Termination/{motion_prefix[len('Motion/') :]}"
         return f"Termination/{motion_prefix}"
 
     def _get_termination_fail_rate_metric_prefix(self, motion_command, clip_id: int) -> str:
         motion_prefix = self._get_motion_metric_prefix(motion_command, clip_id)
         if motion_prefix.startswith("Motion/"):
-            return f"TerminationFailRate/{motion_prefix[len('Motion/'):]}"
+            return f"TerminationFailRate/{motion_prefix[len('Motion/') :]}"
         return f"TerminationFailRate/{motion_prefix}"
 
     def reset_all(self):

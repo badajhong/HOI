@@ -97,6 +97,54 @@ def _replace_observation_term_params(
     return dataclasses.replace(observation_cfg, groups=new_groups)
 
 
+def _replace_reward_term_params(
+    reward_cfg: RewardManagerCfg | None,
+    *,
+    term_name: str,
+    updates: dict[str, object | None],
+) -> RewardManagerCfg | None:
+    """Return reward config with selected term params updated."""
+    if reward_cfg is None:
+        return reward_cfg
+
+    term_cfg = reward_cfg.terms.get(term_name)
+    if term_cfg is None:
+        return reward_cfg
+
+    new_params = dict(term_cfg.params)
+    changed = False
+    for key, value in updates.items():
+        if value is None or value == "":
+            continue
+        if new_params.get(key) == value:
+            continue
+        new_params[key] = value
+        changed = True
+
+    if not changed:
+        return reward_cfg
+
+    new_terms = dict(reward_cfg.terms)
+    new_terms[term_name] = dataclasses.replace(term_cfg, params=new_params)
+    return dataclasses.replace(reward_cfg, terms=new_terms)
+
+
+def _get_motion_object_contact_threshold(command_cfg: CommandManagerCfg | None) -> float | None:
+    """Read the shared object-contact threshold from the motion command config."""
+    if command_cfg is None:
+        return None
+
+    motion_term = command_cfg.setup_terms.get("motion_command")
+    if motion_term is None:
+        return None
+
+    motion_config = motion_term.params.get("motion_config")
+    if motion_config is None:
+        return None
+
+    return getattr(motion_config, "object_contact_threshold", None)
+
+
 def _ensure_di_ae_latent_group(observation_cfg: ObservationManagerCfg | None) -> ObservationManagerCfg | None:
     """Ensure residual observation configs expose a shared di_ae_latent group."""
     if observation_cfg is None:
@@ -354,9 +402,31 @@ def resolve_observation_term_overrides(tyro_config: ExperimentConfig) -> Experim
         },
     )
 
+    reward_cfg = tyro_config.reward
+    object_contact_threshold = _get_motion_object_contact_threshold(tyro_config.command)
+    if object_contact_threshold is not None:
+        threshold = float(object_contact_threshold)
+        observation_cfg = _replace_observation_term_params(
+            observation_cfg,
+            group_name="actor_obs",
+            term_name="object_contact_current",
+            updates={"threshold": threshold},
+        )
+        observation_cfg = _replace_observation_term_params(
+            observation_cfg,
+            group_name="critic_obs",
+            term_name="object_contact_current",
+            updates={"threshold": threshold},
+        )
+        reward_cfg = _replace_reward_term_params(
+            reward_cfg,
+            term_name="object_contact_label_distance",
+            updates={"threshold": threshold},
+        )
+
     resolved_config = tyro_config
-    if observation_cfg is not tyro_config.observation:
-        resolved_config = dataclasses.replace(tyro_config, observation=observation_cfg)
+    if observation_cfg is not tyro_config.observation or reward_cfg is not tyro_config.reward:
+        resolved_config = dataclasses.replace(tyro_config, observation=observation_cfg, reward=reward_cfg)
     return _resolve_depth_camera_robot_asset(resolved_config, observation_cfg)
 
 

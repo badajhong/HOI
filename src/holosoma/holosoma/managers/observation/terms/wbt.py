@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -13,6 +14,11 @@ from holosoma.ae_joint_train import CLIPTextFeatureExtractor, load_joint_model
 from holosoma.ae_pro_joint_train import load_joint_model as load_pro_joint_model
 from holosoma.agents.modules.module_utils import setup_ppo_actor_module
 from holosoma.managers.command.terms.wbt import MotionCommand
+from holosoma.managers.object_contact import (
+    get_cached_object_surface_distances,
+    load_sample_points_by_key,
+    resolve_body_indices,
+)
 from holosoma.managers.observation.base import ObservationTermBase
 from holosoma.utils.eval_utils import CheckpointConfig, load_saved_experiment_config
 from holosoma.utils.rotations import quat_rotate_inverse, quaternion_to_matrix, subtract_frame_transforms
@@ -199,9 +205,11 @@ def motion_command(env: WholeBodyTrackingManager) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     return motion_command.command
 
+
 def motion_command_joint_pos(env: WholeBodyTrackingManager) -> torch.Tensor:
     motion_command_joint_pos = _get_motion_command_and_assert_type(env)
     return motion_command_joint_pos.joint_pos
+
 
 def motion_ref_pos_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
@@ -315,6 +323,111 @@ def object_randomization_privileged(env: WholeBodyTrackingManager) -> torch.Tens
         output[:, 10:13] = object_spawn_offset.to(device=env.device, dtype=torch.float32)
 
     return output
+
+
+class ObjectContactCurrent(ObservationTermBase):
+    """Current robot-object contact features shared with contact reward distance cache."""
+
+    def __init__(self, cfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+        self.initialized = False
+        self.body_names: list[str] = []
+        self.body_indices = torch.zeros(0, dtype=torch.long, device=env.device)
+        self.sample_points_by_key: dict[str | None, torch.Tensor] = {}
+
+    def __call__(
+        self,
+        env: WholeBodyTrackingManager,
+        *,
+        sample_points_root: str | None = None,
+        threshold: float = 0.08,
+        distance_clip: float = 0.5,
+        body_names: tuple[str, ...] | list[str] | str | None = None,
+        body_names_regex: str = ".*",
+        include_soft_contact: bool = True,
+        include_distance: bool = True,
+        **kwargs,
+    ) -> torch.Tensor:
+        motion_command = _get_motion_command_and_assert_type(env)
+        if not self.initialized:
+            self._initialize(
+                motion_command,
+                sample_points_root=sample_points_root,
+                body_names=body_names,
+                body_names_regex=body_names_regex,
+            )
+
+        if not include_soft_contact and not include_distance:
+            raise ValueError("ObjectContactCurrent must include at least one of soft contact or distance.")
+
+        distances = get_cached_object_surface_distances(
+            env=env,
+            motion_command=motion_command,
+            body_names=self.body_names,
+            body_indices=self.body_indices,
+            sample_points_by_key=self.sample_points_by_key,
+        )
+
+        outputs: list[torch.Tensor] = []
+        if include_soft_contact:
+            threshold_tensor = torch.tensor(max(float(threshold), 1e-6), dtype=torch.float32, device=env.device)
+            outputs.append(torch.clamp(1.0 - distances / threshold_tensor, min=0.0, max=1.0))
+        if include_distance:
+            clip_tensor = torch.tensor(max(float(distance_clip), 1e-6), dtype=torch.float32, device=env.device)
+            outputs.append(torch.clamp(distances / clip_tensor, min=0.0, max=1.0))
+        return torch.cat(outputs, dim=-1)
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        pass
+
+    def _initialize(
+        self,
+        motion_command: MotionCommand,
+        *,
+        sample_points_root: str | None,
+        body_names: tuple[str, ...] | list[str] | str | None,
+        body_names_regex: str,
+    ) -> None:
+        selected_body_names = self._resolve_body_names(motion_command, body_names, body_names_regex)
+        self.body_names = selected_body_names
+        self.body_indices = resolve_body_indices(self.env, selected_body_names)
+        root, self.sample_points_by_key = load_sample_points_by_key(
+            env=self.env,
+            motion_command=motion_command,
+            sample_points_root=sample_points_root,
+        )
+        logger.info(
+            "Initialized ObjectContactCurrent observation: "
+            f"bodies={self.body_names}, objects={list(self.sample_points_by_key.keys())}, sample_points_root={root}"
+        )
+        self.initialized = True
+
+    def _resolve_body_names(
+        self,
+        motion_command: MotionCommand,
+        body_names: tuple[str, ...] | list[str] | str | None,
+        body_names_regex: str,
+    ) -> list[str]:
+        if body_names is not None:
+            if isinstance(body_names, str):
+                selected = [body_names]
+            else:
+                selected = [str(name) for name in body_names]
+        else:
+            if not motion_command.motion.contact_body_names:
+                raise RuntimeError(
+                    "ObjectContactCurrent needs body_names or contact-labeled motion files "
+                    "to infer the contact body set."
+                )
+            body_regex = re.compile(body_names_regex)
+            selected = [name for name in motion_command.motion.contact_body_names if body_regex.search(name)]
+
+        if not selected:
+            raise RuntimeError(
+                f"No object-contact observation body names selected. body_names={body_names}, "
+                f"body_names_regex={body_names_regex!r}"
+            )
+        return selected
 
 
 def _normalize_ir_surface_feature_body_source(body_source: str) -> str:
@@ -469,10 +582,7 @@ class IRAELatent(ObservationTermBase):
         self.latent_dim = int(payload["config"]["latent_dim"])
 
         # --- body source resolution -------------------------------------------
-        explicit_body_source = (
-            cfg.params.get("body_source")
-            or getattr(env, "ir_ae_body_source", None)
-        )
+        explicit_body_source = cfg.params.get("body_source") or getattr(env, "ir_ae_body_source", None)
         if explicit_body_source:
             self.body_source = _normalize_ir_surface_feature_body_source(explicit_body_source)
         else:
@@ -508,10 +618,12 @@ class IRAELatent(ObservationTermBase):
                     label="right hand",
                 )
                 self._body_labels.extend(["left_hand", "right_hand"])
-                self._body_indices.extend([
-                    env.body_names.index(left_name),
-                    env.body_names.index(right_name),
-                ])
+                self._body_indices.extend(
+                    [
+                        env.body_names.index(left_name),
+                        env.body_names.index(right_name),
+                    ]
+                )
 
         # Validate expected ir_t dim vs body source
         expected_ir_t_dim = 13 * len(self._body_labels)
@@ -728,6 +840,7 @@ class AELatent(ObservationTermBase):
 class StudentLatent(AELatent):
     """Backward-compatible alias for older student_latent observation configs."""
 
+
 def _get_observation_compute_token(env: WholeBodyTrackingManager) -> int:
     observation_manager = getattr(env, "observation_manager", None)
     if observation_manager is None:
@@ -906,6 +1019,7 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
                 f"Depth debug image saving enabled: dir={self.debug_depth_dir}, "
                 f"interval={self.debug_depth_save_interval}, targets={debug_targets}"
             )
+
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
         if env_ids is None:
             self.depth_window_history.zero_()
@@ -1436,10 +1550,7 @@ class ObjectScaleBinInput(ObservationTermBase):
             return "soft"
         if output_mode in {"one_hot", "onehot", "hard", "hard_one_hot"}:
             return "one_hot"
-        raise ValueError(
-            "ObjectScaleBinInput output_mode must be one of 'soft' or 'one_hot', "
-            f"got {raw_value!r}."
-        )
+        raise ValueError(f"ObjectScaleBinInput output_mode must be one of 'soft' or 'one_hot', got {raw_value!r}.")
 
     @staticmethod
     def _is_auto(value) -> bool:
@@ -1788,9 +1899,7 @@ class ObjectScaleBinInput(ObservationTermBase):
                 )
             probe_input = get_fused_sequence(env, modify_history=modify_history)
         if not isinstance(probe_input, torch.Tensor):
-            raise ValueError(
-                f"ObjectScaleBinInput feature_source={self.feature_source!r} produced a non-tensor input."
-            )
+            raise ValueError(f"ObjectScaleBinInput feature_source={self.feature_source!r} produced a non-tensor input.")
         return probe_input
 
     def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:

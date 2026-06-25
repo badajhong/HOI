@@ -216,6 +216,80 @@ python data_conversion/convert_data_format_mj.py --input_file ./demo_results/g1/
 python data_conversion/convert_data_format_mj.py --input_file ./demo_results/g1/object_interaction/omomo/sub3_largebox_003_original.npz --output_fps 50 --output_name converted_res/object_interaction/sub3_largebox_003_mj_w_obj.npz --data_format smplh --object_name "largebox" --has_dynamic_object --once
 ```
 
+### Object Contact Labeling for RL Rewards
+
+You can add frame-level object contact labels after converting object-interaction motions for RL training. The default labeling mode uses the original SMPLH human motion, not the retargeted robot motion. This makes the label an intended-contact target:
+
+```text
+SMPLH human_joints + object pose + object sample_points
+-> human/object contact
+-> aggregate contact to existing robot body links
+```
+
+The output `.npz` keeps all original arrays and adds contact keys:
+
+```text
+contact_object_label
+contact_object_distance
+contact_object_names
+contact_object_indices
+contact_object_source
+contact_object_target
+```
+
+For a single converted RL motion, pass the matching original retargeting result with `--human-reference`:
+
+```bash
+python data_utils/label_object_contacts.py \
+  --input converted_res/object_interaction/sub3_largebox_003_mj_w_obj.npz \
+  --output converted_res/object_interaction/sub3_largebox_003_mj_w_obj_contact.npz \
+  --human-reference demo_results/g1/object_interaction/omomo/sub3_largebox_003_original.npz \
+  --object-root models/objects \
+  --object-name largebox \
+  --robot-type g1 \
+  --threshold 0.05 \
+  --overwrite
+```
+
+For batch labeling, keep converted RL filenames aligned with the original motion stem, then pass a root containing the original SMPLH `.npz` files:
+
+```bash
+python data_utils/label_object_contacts.py \
+  --input converted_res/object_interaction \
+  --output converted_res/object_interaction_contact_labeled \
+  --human-reference-root demo_results/g1/object_interaction/omomo \
+  --object-root models/objects \
+  --robot-type g1 \
+  --threshold 0.05 \
+  --overwrite
+```
+
+For the R1 training folders in the main Holosoma workspace, run from the repository root:
+
+```bash
+R1_CONTACT_JOINT_REGEX='^(Pelvis|L_Hip|R_Hip|L_Knee|R_Knee|L_Shoulder|R_Shoulder|L_Elbow|R_Elbow|L_Ankle|R_Ankle|L_Toe|R_Toe|L_Wrist|R_Wrist|L_Index[123]|L_Middle[123]|L_Pinky[123]|L_Ring[123]|L_Thumb[123]|R_Index[123]|R_Middle[123]|R_Pinky[123]|R_Ring[123]|R_Thumb[123])$'
+
+python src/holosoma_retargeting/holosoma_retargeting/data_utils/label_object_contacts.py \
+  --input train_r1/rl \
+  --output train_r1/rl_contact_labeled \
+  --human-reference-root train_r1/motions \
+  --object-root train_r1/objects \
+  --robot-type r1 \
+  --human-joint-regex "$R1_CONTACT_JOINT_REGEX" \
+  --threshold 0.05 \
+  --overwrite
+```
+
+This R1 regex selects the full SMPLH-to-R1 mapped major body set from `config_types/data_type.py`, plus SMPLH fingers that are aggregated to the mapped wrist links. For example, with `--robot-type r1`, left hand/finger contacts aggregate to `left_wrist_roll_link`; with `--robot-type g1`, they aggregate to `left_rubber_hand_link`. No new robot joints or bodies are created.
+
+When training the R1 teacher with these contact labels, keep the runtime threshold in the motion command config so the same value is shared by the object-contact reward and actor/critic current-contact observations:
+
+```bash
+--command.setup-terms.motion-command.params.motion-config.object-contact-threshold 0.05
+```
+
+Use `--source robot` only for diagnostics when you want to measure contact from the retargeted robot trajectory itself.
+
 ### OmniRetarget Data
 
 For OmniRetarget data downloaded from HuggingFace, please add `--use_omniretarget_data` for data conversion.

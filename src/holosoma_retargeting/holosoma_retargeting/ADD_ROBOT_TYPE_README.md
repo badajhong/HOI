@@ -180,9 +180,9 @@ python examples/robot_retarget.py \
 python examples/robot_retarget.py \
   --data_path demo_data/OMOMO_new \
   --task-type object_interaction \
-  --task-name sub17_smalltable_010 \
+  --task-name sub4_whitechair_030 \
   --data_format smplh \
-  --task-config.object-name smalltable \
+  --task-config.object-name whitechair \
   --retargeter.debug \
   --retargeter.visualize \
   --robot r1 \

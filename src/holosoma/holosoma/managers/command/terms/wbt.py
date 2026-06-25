@@ -45,6 +45,23 @@ def discover_motion_npz_files(motion_folder: str) -> list[str]:
     return sorted(str(path) for path in Path(motion_folder).rglob("*.npz"))
 
 
+CONTACT_LABEL_KEYS = (
+    "contact_object_label",
+    "contact_robot_body_label_from_human",
+    "contact_robot_object_label",
+)
+CONTACT_DISTANCE_KEYS = (
+    "contact_object_distance",
+    "contact_robot_body_distance_from_human",
+    "contact_robot_object_distance",
+)
+CONTACT_NAME_KEYS = (
+    "contact_object_names",
+    "contact_robot_body_names_from_human",
+    "contact_robot_body_names",
+)
+
+
 def _unique_preserve_order(names: list[str]) -> list[str]:
     unique_names: list[str] = []
     seen: set[str] = set()
@@ -63,6 +80,71 @@ def _get_name_indexes(required_names: list[str], available_names: list[str], sou
     return [available_names.index(name) for name in required_names]
 
 
+def _first_existing_key(data: np.lib.npyio.NpzFile, keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        if key in data:
+            return key
+    return None
+
+
+def _npz_str_list(values: np.ndarray) -> list[str]:
+    return [str(value) for value in np.asarray(values).tolist()]
+
+
+def _build_contact_file_lookup(contact_folder: str) -> dict[str, str]:
+    contact_files = discover_motion_npz_files(contact_folder)
+    lookup: dict[str, str] = {}
+    for contact_file in contact_files:
+        path = Path(contact_file)
+        lookup[path.name] = contact_file
+        lookup[path.stem] = contact_file
+    return lookup
+
+
+def _resolve_contact_file_for_motion(
+    motion_file: str,
+    *,
+    motion_folder: str,
+    contact_file: str = "",
+    contact_folder: str = "",
+    contact_lookup: dict[str, str] | None = None,
+) -> str:
+    """Resolve a contact label file for a motion clip.
+
+    When no explicit contact path is configured, labels are read from the motion
+    npz itself if present.
+    """
+    if contact_file:
+        return resolve_data_file_path(contact_file)
+
+    if not contact_folder:
+        return motion_file
+
+    contact_folder = resolve_data_file_path(contact_folder)
+    motion_path = Path(motion_file)
+    if motion_folder:
+        try:
+            relative_path = motion_path.relative_to(Path(motion_folder))
+            candidate = Path(contact_folder) / relative_path
+            if candidate.exists():
+                return str(candidate)
+        except ValueError:
+            pass
+
+    if contact_lookup is None:
+        contact_lookup = _build_contact_file_lookup(contact_folder)
+
+    if motion_path.name in contact_lookup:
+        return contact_lookup[motion_path.name]
+    if motion_path.stem in contact_lookup:
+        return contact_lookup[motion_path.stem]
+
+    raise FileNotFoundError(
+        f"Could not find contact label file for motion '{motion_file}' in contact_folder='{contact_folder}'. "
+        "Expected the same relative path, filename, or stem."
+    )
+
+
 #########################################################################################################
 ## MotionLoader and AdaptiveTimestepsSampler
 #########################################################################################################
@@ -74,20 +156,34 @@ class MotionLoader:
         robot_joint_names: list[str],
         device: str = "cpu",
         motion_folder: str = "",
+        contact_file: str = "",
+        contact_folder: str = "",
     ):
+        self.has_contact_labels = False
+        self._contact_object_label = torch.zeros(0, 0, dtype=torch.bool, device=device)
+        self._contact_object_distance = torch.zeros(0, 0, dtype=torch.float32, device=device)
+        self.contact_body_names: list[str] = []
+        self.contact_body_indices = torch.zeros(0, dtype=torch.long, device=device)
+        self.contact_source = ""
+        self.contact_target = ""
+
         # Resolve motion file or folder
         if motion_folder:
             motion_folder = resolve_data_file_path(motion_folder)
+            contact_folder = resolve_data_file_path(contact_folder) if contact_folder else ""
             logger.info(f"Loading motion files from folder: {motion_folder}")
             # Load and concatenate all NPZ files from the folder
             body_names_in_motion_data, joint_names_in_motion_data = self._load_and_concat_motions_from_folder(
-                motion_folder, device, robot_body_names, robot_joint_names
+                motion_folder, device, robot_body_names, robot_joint_names, contact_folder=contact_folder
             )
         elif motion_file:
             # Resolve the motion file path using importlib.resources
             motion_file = resolve_data_file_path(motion_file)
+            contact_file = resolve_data_file_path(contact_file) if contact_file else ""
             logger.info(f"Loading motion file: {motion_file}")
-            body_names_in_motion_data, joint_names_in_motion_data = self._load_data_from_motion_npz(motion_file, device)
+            body_names_in_motion_data, joint_names_in_motion_data = self._load_data_from_motion_npz(
+                motion_file, device, robot_body_names, contact_file=contact_file
+            )
         else:
             raise ValueError("Either motion_file or motion_folder must be provided!")
 
@@ -105,7 +201,111 @@ class MotionLoader:
             indexes.append(b_names.index(name))
         return torch.tensor(indexes, dtype=torch.long, device=device)
 
-    def _load_data_from_motion_npz(self, motion_file: str, device: str) -> tuple[list[str], list[str]]:
+    def _load_contact_arrays_from_npz(
+        self,
+        contact_file: str,
+        *,
+        expected_len: int,
+        robot_body_names: list[str],
+        device: str,
+        required: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor, list[str], torch.Tensor, str, str] | None:
+        with cached_open(contact_file, "rb") as f, np.load(f, allow_pickle=True) as data:
+            label_key = _first_existing_key(data, CONTACT_LABEL_KEYS)
+            if label_key is None:
+                if required:
+                    raise ValueError(
+                        f"Contact label file '{contact_file}' does not contain any supported contact label keys: "
+                        f"{CONTACT_LABEL_KEYS}"
+                    )
+                return None
+
+            name_key = _first_existing_key(data, CONTACT_NAME_KEYS)
+            if name_key is None:
+                raise ValueError(
+                    f"Contact label file '{contact_file}' has '{label_key}' but no supported contact name key: "
+                    f"{CONTACT_NAME_KEYS}"
+                )
+
+            labels_np = np.asarray(data[label_key]).astype(bool)
+            if labels_np.ndim == 1:
+                labels_np = labels_np[:, None]
+            if labels_np.shape[0] != expected_len:
+                raise ValueError(
+                    f"Contact label file '{contact_file}' has {labels_np.shape[0]} frames but motion has "
+                    f"{expected_len}. Generate labels from the converted RL motion, or pass matching contact files."
+                )
+
+            contact_names = _npz_str_list(data[name_key])
+            if labels_np.shape[1] != len(contact_names):
+                raise ValueError(
+                    f"Contact label file '{contact_file}' has label shape {labels_np.shape} but "
+                    f"{len(contact_names)} contact names."
+                )
+
+            selected_cols = [i for i, name in enumerate(contact_names) if name in robot_body_names]
+            if not selected_cols:
+                raise ValueError(
+                    f"Contact label file '{contact_file}' has contact names {contact_names}, but none match robot "
+                    f"body names. Regenerate labels with the correct --robot-type or check the robot body names."
+                )
+
+            selected_names = [contact_names[i] for i in selected_cols]
+            body_indices = torch.tensor(
+                [robot_body_names.index(name) for name in selected_names], dtype=torch.long, device=device
+            )
+
+            labels = torch.tensor(labels_np[:, selected_cols], dtype=torch.bool, device=device)
+
+            distance_key = _first_existing_key(data, CONTACT_DISTANCE_KEYS)
+            if distance_key is not None:
+                distances_np = np.asarray(data[distance_key], dtype=np.float32)
+                if distances_np.ndim == 1:
+                    distances_np = distances_np[:, None]
+                if distances_np.shape[:2] != labels_np.shape[:2]:
+                    raise ValueError(
+                        f"Contact distance key '{distance_key}' in '{contact_file}' has shape {distances_np.shape}, "
+                        f"expected {labels_np.shape}."
+                    )
+                distances = torch.tensor(distances_np[:, selected_cols], dtype=torch.float32, device=device)
+            else:
+                distances = torch.full(labels.shape, float("inf"), dtype=torch.float32, device=device)
+
+            source = str(np.asarray(data["contact_object_source"]).item()) if "contact_object_source" in data else ""
+            target = str(np.asarray(data["contact_object_target"]).item()) if "contact_object_target" in data else ""
+
+        logger.info(
+            f"Loaded contact labels from {contact_file}: frames={labels.shape[0]}, bodies={selected_names}, "
+            f"source={source or 'unknown'}, target={target or 'unknown'}"
+        )
+        return labels, distances, selected_names, body_indices, source, target
+
+    def _set_contact_arrays(
+        self,
+        labels: torch.Tensor,
+        distances: torch.Tensor,
+        names: list[str],
+        body_indices: torch.Tensor,
+        source: str,
+        target: str,
+        *,
+        device: str,
+    ) -> None:
+        self.has_contact_labels = labels.numel() > 0 and labels.shape[1] > 0
+        self._contact_object_label = labels.to(device=device, dtype=torch.bool)
+        self._contact_object_distance = distances.to(device=device, dtype=torch.float32)
+        self.contact_body_names = list(names)
+        self.contact_body_indices = body_indices.to(device=device, dtype=torch.long)
+        self.contact_source = source
+        self.contact_target = target
+
+    def _load_data_from_motion_npz(
+        self,
+        motion_file: str,
+        device: str,
+        robot_body_names: list[str],
+        contact_file: str = "",
+    ) -> tuple[list[str], list[str]]:
         with cached_open(motion_file, "rb") as f, np.load(f) as data:
             self.fps = data["fps"]
 
@@ -137,16 +337,39 @@ class MotionLoader:
                 object_quat_w = torch.tensor(data["object_quat_w"], dtype=torch.float32, device=device)
                 self._object_quat_w = object_quat_w[:, [1, 2, 3, 0]]  # Change to xyzw
                 self._object_lin_vel_w = torch.tensor(data["object_lin_vel_w"], dtype=torch.float32, device=device)
+                object_ang_vel_w = (
+                    data["object_ang_vel_w"] if "object_ang_vel_w" in data else np.zeros_like(data["object_lin_vel_w"])
+                )
+                self._object_ang_vel_w = torch.tensor(
+                    object_ang_vel_w,
+                    dtype=torch.float32,
+                    device=device,
+                )
             else:
                 self._object_pos_w = torch.zeros(0, 3, device=device)
                 self._object_quat_w = torch.zeros(0, 4, device=device)
                 self._object_lin_vel_w = torch.zeros(0, 3, device=device)
+                self._object_ang_vel_w = torch.zeros(0, 3, device=device)
         self.clip_ranges = [(0, int(self._joint_pos.shape[0]))]
         self.clip_files = [motion_file]
         if self.has_object:
             self.clip_object_keys = [extract_object_key_from_motion_filename(motion_file)]
         else:
             self.clip_object_keys = [None]
+
+        resolved_contact_file = _resolve_contact_file_for_motion(
+            motion_file, motion_folder="", contact_file=contact_file
+        )
+        contact_arrays = self._load_contact_arrays_from_npz(
+            resolved_contact_file,
+            expected_len=int(self._joint_pos.shape[0]),
+            robot_body_names=robot_body_names,
+            device=device,
+            required=bool(contact_file),
+        )
+        if contact_arrays is not None:
+            self._set_contact_arrays(*contact_arrays, device=device)
+
         return body_names, joint_names
 
     def _load_and_concat_motions_from_folder(
@@ -155,6 +378,7 @@ class MotionLoader:
         device: str,
         robot_body_names: list[str],
         robot_joint_names: list[str],
+        contact_folder: str = "",
     ) -> tuple[list[str], list[str]]:
         """Load all .npz files from a folder and concatenate them into a single motion sequence."""
         npz_files = discover_motion_npz_files(motion_folder)
@@ -188,6 +412,14 @@ class MotionLoader:
         object_pos_w_list = []
         object_quat_w_list = []
         object_lin_vel_w_list = []
+        object_ang_vel_w_list = []
+        contact_label_list = []
+        contact_distance_list = []
+        contact_body_names: list[str] | None = None
+        contact_body_indices: torch.Tensor | None = None
+        contact_source = ""
+        contact_target = ""
+        contact_lookup = _build_contact_file_lookup(contact_folder) if contact_folder else None
         self.clip_ranges = []
         self.clip_files = []
         self.clip_object_keys = []
@@ -250,6 +482,58 @@ class MotionLoader:
                     object_lin_vel_w_list.append(
                         torch.tensor(data["object_lin_vel_w"], dtype=torch.float32, device=device)
                     )
+                    object_ang_vel_w = (
+                        data["object_ang_vel_w"]
+                        if "object_ang_vel_w" in data
+                        else np.zeros_like(data["object_lin_vel_w"])
+                    )
+                    object_ang_vel_w_list.append(
+                        torch.tensor(
+                            object_ang_vel_w,
+                            dtype=torch.float32,
+                            device=device,
+                        )
+                    )
+
+                resolved_contact_file = _resolve_contact_file_for_motion(
+                    npz_file,
+                    motion_folder=motion_folder,
+                    contact_folder=contact_folder,
+                    contact_lookup=contact_lookup,
+                )
+                contact_arrays = self._load_contact_arrays_from_npz(
+                    resolved_contact_file,
+                    expected_len=clip_len,
+                    robot_body_names=robot_body_names,
+                    device=device,
+                    required=bool(contact_folder),
+                )
+                if contact_arrays is not None:
+                    labels, distances, names, body_indices, source, target = contact_arrays
+                    if contact_body_names is None:
+                        contact_body_names = names
+                        contact_body_indices = body_indices
+                        contact_source = source
+                        contact_target = target
+                    elif names != contact_body_names:
+                        raise ValueError(
+                            f"Contact labels in '{resolved_contact_file}' have body names {names}, but previous "
+                            f"clips use {contact_body_names}. Regenerate labels with a consistent --robot-type."
+                        )
+                    contact_label_list.append(labels)
+                    contact_distance_list.append(distances)
+                elif contact_body_names is not None:
+                    contact_label_list.append(
+                        torch.zeros(clip_len, len(contact_body_names), dtype=torch.bool, device=device)
+                    )
+                    contact_distance_list.append(
+                        torch.full(
+                            (clip_len, len(contact_body_names)),
+                            float("inf"),
+                            dtype=torch.float32,
+                            device=device,
+                        )
+                    )
 
         # Concatenate all data
         self._joint_pos = torch.cat(joint_pos_list, dim=0)
@@ -263,10 +547,35 @@ class MotionLoader:
             self._object_pos_w = torch.cat(object_pos_w_list, dim=0)
             self._object_quat_w = torch.cat(object_quat_w_list, dim=0)
             self._object_lin_vel_w = torch.cat(object_lin_vel_w_list, dim=0)
+            self._object_ang_vel_w = torch.cat(object_ang_vel_w_list, dim=0)
         else:
             self._object_pos_w = torch.zeros(0, 3, device=device)
             self._object_quat_w = torch.zeros(0, 4, device=device)
             self._object_lin_vel_w = torch.zeros(0, 3, device=device)
+            self._object_ang_vel_w = torch.zeros(0, 3, device=device)
+
+        if contact_body_names is not None and contact_label_list:
+            total_contact_len = sum(int(labels.shape[0]) for labels in contact_label_list)
+            if total_contact_len != int(self._joint_pos.shape[0]):
+                raise ValueError(
+                    "Some motion clips have contact labels while others do not. "
+                    "Use a complete contact_folder, or embed contact labels in every motion file."
+                )
+            self._set_contact_arrays(
+                torch.cat(contact_label_list, dim=0),
+                torch.cat(contact_distance_list, dim=0),
+                contact_body_names,
+                contact_body_indices if contact_body_indices is not None else torch.zeros(0, dtype=torch.long),
+                contact_source,
+                contact_target,
+                device=device,
+            )
+        else:
+            self.has_contact_labels = False
+            self._contact_object_label = torch.zeros(self._joint_pos.shape[0], 0, dtype=torch.bool, device=device)
+            self._contact_object_distance = torch.zeros(self._joint_pos.shape[0], 0, dtype=torch.float32, device=device)
+            self.contact_body_names = []
+            self.contact_body_indices = torch.zeros(0, dtype=torch.long, device=device)
 
         logger.info(f"Concatenated {len(npz_files)} motion files. Total timesteps: {self._joint_pos.shape[0]}")
 
@@ -312,6 +621,18 @@ class MotionLoader:
     def object_lin_vel_w(self) -> torch.Tensor:
         return self._object_lin_vel_w[:]
 
+    @property
+    def object_ang_vel_w(self) -> torch.Tensor:
+        return self._object_ang_vel_w[:]
+
+    @property
+    def contact_object_label(self) -> torch.Tensor:
+        return self._contact_object_label[:]
+
+    @property
+    def contact_object_distance(self) -> torch.Tensor:
+        return self._contact_object_distance[:]
+
     def extend_with_segments(self, segments: dict[str, torch.Tensor], prepend: bool) -> MotionLoader:
         """Merge interpolated segments with motion data, mutating this MotionLoader."""
         concat_targets = [
@@ -328,6 +649,7 @@ class MotionLoader:
                     ("object_pos", "_object_pos_w"),
                     ("object_quat", "_object_quat_w"),
                     ("object_lin_vel", "_object_lin_vel_w"),
+                    ("object_ang_vel", "_object_ang_vel_w"),
                 ]
             )
 
@@ -335,6 +657,39 @@ class MotionLoader:
             existing = getattr(self, attr_name)
             tensors = (segments[seg_key], existing) if prepend else (existing, segments[seg_key])
             setattr(self, attr_name, torch.cat(tensors, dim=0))
+
+        if self.has_contact_labels:
+            seg_len = int(segments["joint_pos"].shape[0])
+            contact_label = torch.zeros(
+                seg_len,
+                len(self.contact_body_names),
+                dtype=torch.bool,
+                device=self._contact_object_label.device,
+            )
+            contact_distance = torch.full(
+                (seg_len, len(self.contact_body_names)),
+                float("inf"),
+                dtype=self._contact_object_distance.dtype,
+                device=self._contact_object_distance.device,
+            )
+            label_tensors = (
+                (contact_label, self._contact_object_label)
+                if prepend
+                else (
+                    self._contact_object_label,
+                    contact_label,
+                )
+            )
+            distance_tensors = (
+                (contact_distance, self._contact_object_distance)
+                if prepend
+                else (
+                    self._contact_object_distance,
+                    contact_distance,
+                )
+            )
+            self._contact_object_label = torch.cat(label_tensors, dim=0)
+            self._contact_object_distance = torch.cat(distance_tensors, dim=0)
 
         seg_len = int(segments["joint_pos"].shape[0])
         if prepend:
@@ -598,8 +953,7 @@ class MotionCommand(CommandTermBase):
 
         if not 0.0 <= self.hard_motion_sampling_ratio <= 1.0:
             raise ValueError(
-                "motion_config.hard_motion_sampling_ratio must be in [0, 1], "
-                f"got {self.hard_motion_sampling_ratio}."
+                f"motion_config.hard_motion_sampling_ratio must be in [0, 1], got {self.hard_motion_sampling_ratio}."
             )
         if not 0.0 < self.hard_motion_sampling_ema_alpha <= 1.0:
             raise ValueError(
@@ -623,6 +977,8 @@ class MotionCommand(CommandTermBase):
             robot_joint_names,
             device=self.device,
             motion_folder=self.motion_cfg.motion_folder,
+            contact_file=self.motion_cfg.contact_file,
+            contact_folder=self.motion_cfg.contact_folder,
         )
 
         # Store body and joint indexes for interpolation
@@ -852,6 +1208,7 @@ class MotionCommand(CommandTermBase):
             obj_pos = self.object_pos_w[env_ids]
             obj_ori = self.object_quat_w[env_ids]
             obj_lin_vel = self.object_lin_vel_w[env_ids]
+            obj_ang_vel = self.object_ang_vel_w[env_ids]
             selected_keys: list[str | None] | None = None
             all_keys: list[str] | None = None
             if self.object_name_to_indices:
@@ -946,7 +1303,7 @@ class MotionCommand(CommandTermBase):
             if hasattr(self, "object_pos_reward_offset"):
                 self.object_pos_reward_offset[env_ids] = target_obj_pos - obj_pos
 
-            object_states = torch.cat([target_obj_pos, obj_ori, obj_lin_vel, torch.zeros_like(obj_lin_vel)], dim=-1)
+            object_states = torch.cat([target_obj_pos, obj_ori, obj_lin_vel, obj_ang_vel], dim=-1)
             # 4.3 set object states in simulator (per-clip object selection when available)
             self.set_simulator_object_states(env_ids, object_states)
 
@@ -1162,6 +1519,29 @@ class MotionCommand(CommandTermBase):
     def object_lin_vel_w(self) -> torch.Tensor:
         return self.motion.object_lin_vel_w[self.time_steps]
 
+    @property
+    def object_ang_vel_w(self) -> torch.Tensor:
+        return self.motion.object_ang_vel_w[self.time_steps]
+
+    #########################################################################################
+    ## Object contact labels from motion/contact data
+    #########################################################################################
+    @property
+    def has_contact_labels(self) -> bool:
+        return self.motion.has_contact_labels
+
+    @property
+    def contact_object_label(self) -> torch.Tensor:
+        return self.motion.contact_object_label[self.time_steps]
+
+    @property
+    def contact_object_distance(self) -> torch.Tensor:
+        return self.motion.contact_object_distance[self.time_steps]
+
+    @property
+    def contact_body_pos_w(self) -> torch.Tensor:
+        return self._env.simulator._rigid_body_pos[:, self.motion.contact_body_indices, :]
+
     #########################################################################################
     ## Object from simulator
     #########################################################################################
@@ -1182,8 +1562,8 @@ class MotionCommand(CommandTermBase):
                 states[env_ids] = self._env.simulator.all_root_states[object_indices[env_ids], :13]
             return states
 
-        return self._env.simulator.all_root_states[self.active_object_indices, :13]    
-    
+        return self._env.simulator.all_root_states[self.active_object_indices, :13]
+
     @property
     def simulator_object_pos_w(self) -> torch.Tensor:
         return self._active_object_states_w()[:, :3]
@@ -1239,7 +1619,7 @@ class MotionCommand(CommandTermBase):
         if self.hard_motion_sampling_ratio <= 0.0 or num_clips <= 1:
             return sampled_clip_ids
 
-        num_hard_samples = int(round(num_resets * self.hard_motion_sampling_ratio))
+        num_hard_samples = round(num_resets * self.hard_motion_sampling_ratio)
         num_hard_samples = max(0, min(num_hard_samples, num_resets))
         if num_hard_samples == 0:
             return sampled_clip_ids
@@ -1286,8 +1666,7 @@ class MotionCommand(CommandTermBase):
             else:
                 self.hard_motion_completion_ema[clip_id_int] = (
                     self.hard_motion_sampling_ema_alpha * mean_completion
-                    + (1.0 - self.hard_motion_sampling_ema_alpha)
-                    * self.hard_motion_completion_ema[clip_id_int]
+                    + (1.0 - self.hard_motion_sampling_ema_alpha) * self.hard_motion_completion_ema[clip_id_int]
                 )
             self.hard_motion_completion_update_count[clip_id_int] += 1
 
@@ -1538,10 +1917,12 @@ class MotionCommand(CommandTermBase):
             object_pos = self.motion._object_pos_w[motion_idx].to(self.device)
             object_quat = self.motion._object_quat_w[motion_idx].to(self.device)
             object_lin_vel = self.motion._object_lin_vel_w[motion_idx].to(self.device)
+            object_ang_vel = self.motion._object_ang_vel_w[motion_idx].to(self.device)
         else:
             object_pos = torch.zeros(0, 3, device=self.device, dtype=torch.float32)
             object_quat = torch.zeros(0, 4, device=self.device, dtype=torch.float32)
             object_lin_vel = torch.zeros(0, 3, device=self.device, dtype=torch.float32)
+            object_ang_vel = torch.zeros(0, 3, device=self.device, dtype=torch.float32)
 
         return {
             "joint_pos": joint_pos.clone(),
@@ -1557,6 +1938,7 @@ class MotionCommand(CommandTermBase):
             "object_pos": object_pos,
             "object_quat": object_quat,
             "object_lin_vel": object_lin_vel,
+            "object_ang_vel": object_ang_vel,
         }
 
     def _add_transition_to_motion(self, default_state: dict[str, torch.Tensor], num_steps: int, prepend: bool) -> None:
@@ -1693,6 +2075,7 @@ class MotionCommand(CommandTermBase):
             state["object_pos"] = self.motion._object_pos_w[idx].to(device=device, dtype=dtype)
             state["object_quat"] = self.motion._object_quat_w[idx].to(device=device, dtype=dtype)
             state["object_lin_vel"] = self.motion._object_lin_vel_w[idx].to(device=device, dtype=dtype)
+            state["object_ang_vel"] = self.motion._object_ang_vel_w[idx].to(device=device, dtype=dtype)
         return state
 
     def _default_motion_state(
@@ -1717,6 +2100,7 @@ class MotionCommand(CommandTermBase):
             state["object_pos"] = default_state["object_pos"].to(device=device, dtype=dtype)
             state["object_quat"] = default_state["object_quat"].to(device=device, dtype=dtype)
             state["object_lin_vel"] = default_state["object_lin_vel"].to(device=device, dtype=dtype)
+            state["object_ang_vel"] = default_state["object_ang_vel"].to(device=device, dtype=dtype)
         return state
 
     def _build_transition_segments(
@@ -1744,6 +2128,7 @@ class MotionCommand(CommandTermBase):
         if self.motion.has_object:
             segments["object_pos"] = _lerp(start["object_pos"], target["object_pos"], alphas_joint)
             segments["object_lin_vel"] = _lerp(start["object_lin_vel"], target["object_lin_vel"], alphas_joint)
+            segments["object_ang_vel"] = _lerp(start["object_ang_vel"], target["object_ang_vel"], alphas_joint)
             segments["object_quat"] = self._slerp_quat_sequence(
                 start["object_quat"].unsqueeze(0), target["object_quat"].unsqueeze(0), alphas
             ).squeeze(1)

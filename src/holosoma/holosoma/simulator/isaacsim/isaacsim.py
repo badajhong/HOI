@@ -93,7 +93,9 @@ class IsaacSim(BaseSimulator):
 
         # Scale GPU rigid patch buffer with env count to avoid PhysX patch-buffer overflow
         # in large batched scenes (e.g., 24k+ envs with rich contacts).
-        gpu_max_rigid_patch_count = max(10 * 2**15, int(self.training_config.num_envs) * 32)
+        gpu_max_rigid_patch_count = self.simulator_config.sim.physx.gpu_max_rigid_patch_count
+        if gpu_max_rigid_patch_count is None:
+            gpu_max_rigid_patch_count = max(10 * 2**15, int(self.training_config.num_envs) * 32)
 
         sim_config: SimulationCfg = SimulationCfg(
             dt=1.0 / self.simulator_config.sim.fps,
@@ -515,9 +517,7 @@ class IsaacSim(BaseSimulator):
         from isaacsim.core.utils.prims import is_prim_path_valid
 
         direct_optical_frame_prim = f"/World/envs/env_0/Robot/{self.robot_depth_camera_link_name}"
-        nested_optical_frame_prim = (
-            f"/World/envs/env_0/Robot/realsense_d435_link/{self.robot_depth_camera_link_name}"
-        )
+        nested_optical_frame_prim = f"/World/envs/env_0/Robot/realsense_d435_link/{self.robot_depth_camera_link_name}"
         fallback_parent_prim = f"/World/envs/env_0/Robot/{self.robot_depth_camera_fallback_parent_link_name}"
         fallback_mount_used = False
         if is_prim_path_valid(direct_optical_frame_prim):
