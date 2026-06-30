@@ -18,6 +18,24 @@ from scipy.spatial import Delaunay  # type: ignore[import-untyped]
 from scipy.spatial.transform import Rotation as R  # type: ignore[import-untyped]  # noqa: N817
 
 
+SMPLH_HAND_CENTER_JOINTS = {
+    "left": (18, 21, 27, 24),  # Index1, Middle1, Ring1, Pinky1
+    "right": (37, 40, 46, 43),  # Index1, Middle1, Ring1, Pinky1
+}
+
+
+def append_smplh_hand_centers(human_joints: np.ndarray) -> np.ndarray:
+    """Append L_HandCenter/R_HandCenter virtual joints to SMPLH joint arrays."""
+    if human_joints.shape[1] >= 54:
+        return human_joints
+    if human_joints.shape[1] != 52:
+        raise ValueError(f"Expected 52 SMPLH joints before hand-center augmentation, got {human_joints.shape[1]}.")
+
+    left_center = human_joints[:, SMPLH_HAND_CENTER_JOINTS["left"]].mean(axis=1, keepdims=True)
+    right_center = human_joints[:, SMPLH_HAND_CENTER_JOINTS["right"]].mean(axis=1, keepdims=True)
+    return np.concatenate([human_joints, left_center, right_center], axis=1)
+
+
 def load_intermimic_data(file_path):
     """
     Load and preprocess InterMimic data.
@@ -30,6 +48,7 @@ def load_intermimic_data(file_path):
     """
     intermimic_data = torch.load(file_path, map_location="cpu").detach().numpy()
     human_joints = intermimic_data[:, 162 : 162 + 52 * 3].reshape(-1, 52, 3)
+    human_joints = append_smplh_hand_centers(human_joints)
     # Reorder quaternion from [qx, qy, qz, qw] to [qw, qx, qy, qz]
     object_poses = intermimic_data[:, 318:325][:, [6, 3, 4, 5, 0, 1, 2]]
     return human_joints, object_poses
@@ -37,7 +56,10 @@ def load_intermimic_data(file_path):
 
 def calculate_scale_factor(task_name, robot_height):
     """Calculate scale factor based on human height."""
-    with open("demo_data/height_dict.pkl", "rb") as f:
+    height_dict_path = Path("demo_data/height_dict.pkl")
+    if not height_dict_path.exists():
+        height_dict_path = Path(__file__).resolve().parents[1] / height_dict_path
+    with open(height_dict_path, "rb") as f:
         height_dict = pickle.load(f)
     sub_name = task_name.split("_")[0]
     human_height = height_dict[sub_name]

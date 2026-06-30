@@ -90,6 +90,8 @@ SMPLH_DEMO_JOINTS = [
     "R_Thumb1",
     "R_Thumb2",
     "R_Thumb3",
+    "L_HandCenter",
+    "R_HandCenter",
 ]
 
 MOCAP_DEMO_JOINTS = [
@@ -276,6 +278,8 @@ JOINTS_MAPPINGS = {
         "R_Toe": "right_ankle_constraint_A_link",
         "L_Wrist": "left_wrist_roll_link",
         "R_Wrist": "right_wrist_roll_link",
+        "L_HandCenter": "left_hand_contact_link",
+        "R_HandCenter": "right_hand_contact_link",
     },
     ("smplx", "g1"): {
         "Pelvis": "pelvis_contour_link",

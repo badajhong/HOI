@@ -279,7 +279,12 @@ class VideoRecorderInterface(ABC):
 
         # Clear recording state - this method now owns the recording flag
         self._is_recording = False
-        self._stop_recording()
+        try:
+            self._stop_recording()
+        except Exception as e:
+            logger.warning(f"Video recording failed; continuing training: {e}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+            self._clear_frame_buffer()
 
     def cleanup(self) -> None:
         """Clean up video recording resources.

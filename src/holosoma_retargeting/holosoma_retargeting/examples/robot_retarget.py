@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
@@ -18,6 +19,7 @@ from typing import Literal
 import numpy as np
 import tyro
 
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 src_root = Path(__file__).resolve().parents[2]
 if str(src_root) not in sys.path:
     sys.path.insert(0, str(src_root))
@@ -59,6 +61,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_DATA_FORMATS = {
     "robot_only": "smplh",
     "object_interaction": "smplh",
+    "object_interaction_contact": "smplh",
     "object_interaction_scaled": "smplh",
     "climbing": "mocap",
 }
@@ -66,6 +69,7 @@ DEFAULT_DATA_FORMATS = {
 DEFAULT_SAVE_DIRS = {
     "robot_only": "demo_results/{robot}/robot_only/omomo",
     "object_interaction": "demo_results/{robot}/object_interaction/omomo",
+    "object_interaction_contact": "demo_results/{robot}/object_interaction_contact/omomo",
     "object_interaction_scaled": "demo_results/{robot}/object_interaction_scaled/omomo",
     "climbing": "demo_results/{robot}/climbing/mocap_climb",
 }
@@ -78,11 +82,22 @@ _AUGMENTATION_TRANSLATION = np.array([0.2, 0.0, 0.0])
 
 
 # Type aliases
-TaskType = Literal["robot_only", "object_interaction", "object_interaction_scaled", "climbing"]
+TaskType = Literal["robot_only", "object_interaction", "object_interaction_contact", "object_interaction_scaled", "climbing"]
 # DataFormat is imported from config_types.data_type
+
+OBJECT_INTERACTION_TASKS = {"object_interaction", "object_interaction_contact", "object_interaction_scaled"}
 
 
 # ----------------------------- Helper Functions -----------------------------
+
+
+def resolve_package_relative_path(path: str | Path) -> Path:
+    """Resolve paths that are written relative to the retargeting package root."""
+    path = Path(path)
+    if path.is_absolute() or path.exists():
+        return path
+    package_path = PACKAGE_ROOT / path
+    return package_path if package_path.exists() else path
 
 
 def create_task_constants(
@@ -113,20 +128,22 @@ def create_task_constants(
     for attr, value in motion_data_config.legacy_constants().items():
         setattr(task_constants, attr, value)
 
+    task_constants.ROBOT_URDF_FILE = str(resolve_package_relative_path(task_constants.ROBOT_URDF_FILE))
+
     # Task-specific object setup
     if task_type == "robot_only":
         obj_name = task_config.object_name or "ground"
         task_constants.OBJECT_NAME = obj_name
         task_constants.OBJECT_URDF_FILE = None
         task_constants.OBJECT_MESH_FILE = None
-    elif task_type in {"object_interaction", "object_interaction_scaled"}:
+    elif task_type in OBJECT_INTERACTION_TASKS:
         obj_name = task_config.object_name or "largebox"
         task_constants.OBJECT_NAME = obj_name
-        task_constants.OBJECT_URDF_FILE = f"models/objects/{obj_name}/{obj_name}.urdf"
-        task_constants.OBJECT_MESH_FILE = f"models/objects/{obj_name}/{obj_name}.obj"
-        task_constants.OBJECT_URDF_TEMPLATE = f"models/templates/{obj_name}.urdf.jinja"
+        task_constants.OBJECT_URDF_FILE = str(resolve_package_relative_path(f"models/objects/{obj_name}/{obj_name}.urdf"))
+        task_constants.OBJECT_MESH_FILE = str(resolve_package_relative_path(f"models/objects/{obj_name}/{obj_name}.obj"))
+        task_constants.OBJECT_URDF_TEMPLATE = str(resolve_package_relative_path(f"models/templates/{obj_name}.urdf.jinja"))
         scene_xml_name = Path(robot_config.ROBOT_URDF_FILE).name.replace(".urdf", f"_w_{obj_name}.xml")
-        task_constants.BASE_SCENE_XML_FILE = str(Path(robot_config.ROBOT_URDF_FILE).parent / scene_xml_name)
+        task_constants.BASE_SCENE_XML_FILE = str(Path(task_constants.ROBOT_URDF_FILE).parent / scene_xml_name)
         task_constants.SCENE_XML_FILE = task_constants.BASE_SCENE_XML_FILE
         task_constants.OBJECT_POSE_Z_OFFSET = 0.0
     elif task_type == "climbing":
@@ -162,7 +179,7 @@ def validate_config(cfg: RetargetingConfig) -> None:
     # Task-specific format requirements
     if cfg.task_type == "climbing" and cfg.data_format not in (None, "mocap"):
         raise ValueError("Climbing task requires 'mocap' data format")
-    if cfg.task_type in {"object_interaction", "object_interaction_scaled"} and cfg.data_format not in (None, "smplh"):
+    if cfg.task_type in OBJECT_INTERACTION_TASKS and cfg.data_format not in (None, "smplh"):
         raise ValueError("Object interaction requires 'smplh' data format")
     # robot_only accepts any format in the registry (already validated above)
 
@@ -262,7 +279,7 @@ def load_motion_data(
         num_frames = human_joints.shape[0]
         object_poses = np.tile(np.array([[1, 0, 0, 0, 0, 0, 0]]), (num_frames, 1))
 
-    elif task_type in {"object_interaction", "object_interaction_scaled"}:
+    elif task_type in OBJECT_INTERACTION_TASKS:
         pt_path = data_path / f"{task_name}.pt"
         if not pt_path.exists():
             raise FileNotFoundError(f"InterMimic data file not found: {pt_path}")
@@ -324,7 +341,7 @@ def setup_object_data(
         ground_pts = create_ground_points(task_config.ground_range, task_config.ground_range, task_config.ground_size)
         return ground_pts, ground_pts, None
 
-    if task_type in {"object_interaction", "object_interaction_scaled"}:
+    if task_type in OBJECT_INTERACTION_TASKS:
         # Load object data
         if constants.OBJECT_MESH_FILE is None:
             raise ValueError("OBJECT_MESH_FILE not set for object_interaction task")
@@ -332,7 +349,7 @@ def setup_object_data(
         object_local_pts, object_local_pts_demo = load_object_data(
             constants.OBJECT_MESH_FILE, smpl_scale=smpl_scale, sample_count=100
         )
-        if task_type == "object_interaction":
+        if task_type in {"object_interaction", "object_interaction_contact"}:
             constants.OBJECT_POSE_Z_OFFSET = 0.0
             return object_local_pts, object_local_pts_demo, constants.OBJECT_URDF_FILE
 
@@ -446,7 +463,7 @@ def _compute_q_init_base(
             )
             # MuJoCo order: pos first, then quat
             q_init_base = np.concatenate([human_joints[0, 0, :3], human_quat_init, np.zeros(constants.ROBOT_DOF)])
-    elif task_type in {"object_interaction", "object_interaction_scaled"}:
+    elif task_type in OBJECT_INTERACTION_TASKS:
         _, human_quat_init = transform_from_human_to_world(
             human_joints[0, 0, :], object_poses[0], np.array([0.0, 0.0, 0.0])
         )
@@ -512,6 +529,10 @@ def build_retargeter_kwargs_from_config(
         "foot_sticking_tolerance": retargeter_config.foot_sticking_tolerance,
         "step_size": retargeter_config.step_size,
         "visualize": retargeter_config.visualize,
+        "contact_visualization": retargeter_config.contact_visualization,
+        "contact_source": retargeter_config.contact_source,
+        "contact_threshold": retargeter_config.contact_threshold,
+        "contact_human_joint_regex": retargeter_config.contact_human_joint_regex,
         "debug": retargeter_config.debug,
         "w_nominal_tracking_init": retargeter_config.w_nominal_tracking_init,
     }
@@ -563,7 +584,7 @@ def initialize_robot_pose(
         object_poses = convert_object_poses_to_mujoco_order(object_poses)
         return q_init, None, object_poses, human_joints, object_poses
 
-    if task_type in {"object_interaction", "object_interaction_scaled"}:
+    if task_type in OBJECT_INTERACTION_TASKS:
         if augmentation:
             object_moving_frame_idx = extract_object_first_moving_frame(object_poses)
             object_poses_augmented = augment_object_poses(
@@ -627,7 +648,7 @@ def determine_output_path(
     """
     if task_type == "robot_only":
         return str(save_dir / f"{task_name}.npz")
-    if task_type in ("object_interaction", "object_interaction_scaled", "climbing"):
+    if task_type in ("object_interaction", "object_interaction_contact", "object_interaction_scaled", "climbing"):
         suffix = "_augmented" if augmentation else "_original"
         return str(save_dir / f"{task_name}{suffix}.npz")
     raise ValueError(f"Unknown task type: {task_type}")
@@ -647,11 +668,13 @@ def main(cfg: RetargetingConfig) -> None:
     robot = cfg.robot
     task_name = cfg.task_name
     task_type = cfg.task_type
+    if task_type == "object_interaction_contact" and not cfg.retargeter.contact_visualization:
+        cfg.retargeter = replace(cfg.retargeter, contact_visualization=True)
 
     # Set defaults based on task type
     data_format: str = cfg.data_format or DEFAULT_DATA_FORMATS[task_type]
     save_dir = cfg.save_dir if cfg.save_dir is not None else Path(DEFAULT_SAVE_DIRS[task_type].format(robot=robot))
-    data_path = cfg.data_path
+    data_path = resolve_package_relative_path(cfg.data_path)
 
     os.makedirs(save_dir, exist_ok=True)
     logger.info("Task: %s, Type: %s, Format: %s", task_name, task_type, data_format)
@@ -666,8 +689,6 @@ def main(cfg: RetargetingConfig) -> None:
 
     # Task-specific object setup: set default object_dir for climbing if not provided
     if task_type == "climbing" and cfg.task_config.object_dir is None:
-        from dataclasses import replace
-
         cfg.task_config = replace(cfg.task_config, object_dir=data_path / task_name)
 
     constants = create_task_constants(
@@ -716,7 +737,7 @@ def main(cfg: RetargetingConfig) -> None:
     # Preprocess motion data
     if task_type == "robot_only":
         human_joints = preprocess_motion_data(human_joints, retargeter, toe_names, smpl_scale)
-    elif task_type in {"object_interaction", "object_interaction_scaled", "climbing"}:
+    elif task_type in {"object_interaction", "object_interaction_contact", "object_interaction_scaled", "climbing"}:
         human_joints, object_poses, object_moving_frame_idx = preprocess_motion_data(
             human_joints,
             retargeter,
@@ -748,7 +769,7 @@ def main(cfg: RetargetingConfig) -> None:
     foot_sticking_sequences = extract_foot_sticking_sequence_velocity(human_joints, retargeter.demo_joints, toe_names)
 
     # Task-specific foot sticking adjustments
-    if task_type in {"object_interaction", "object_interaction_scaled"}:
+    if task_type in OBJECT_INTERACTION_TASKS:
         # Disable initial sticking
         foot_sticking_sequences[0][toe_names[0]] = False
         foot_sticking_sequences[0][toe_names[1]] = False

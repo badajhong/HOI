@@ -163,6 +163,8 @@ def create_video(video_frames, fps, save_dir, output_format="mp4", wandb_logging
         # Step 1: Create intermediate video with OpenCV
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         out = cv2.VideoWriter(str(temp_raw), fourcc, fps, (w, h))
+        if not out.isOpened():
+            raise RuntimeError(f"Could not open video writer for {temp_raw}")
         temp_files_to_cleanup.append(temp_raw)
 
         for frame in video_frames:
@@ -188,19 +190,28 @@ def create_video(video_frames, fps, save_dir, output_format="mp4", wandb_logging
                 "-maxrate",
                 "300k",
                 "-preset",
-                "medium",
+                "veryfast",
+                "-movflags",
+                "+faststart",
                 str(final_video),
             ]
 
-            result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, check=True)
-            if result.returncode != 0:
-                logger.warning(f"[VIDEO] FFmpeg conversion failed: {result.stderr}")
-                logger.info("[VIDEO] Falling back to mp4v format (may have browser compatibility issues)")
-                # Fallback to original video
+            try:
+                result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, check=False, timeout=120)
+            except subprocess.TimeoutExpired:
+                logger.warning("[VIDEO] FFmpeg conversion timed out; falling back to mp4v upload")
                 final_video = temp_raw
+            else:
+                if result.returncode != 0:
+                    logger.warning(f"[VIDEO] FFmpeg conversion failed: {result.stderr}")
+                    logger.info("[VIDEO] Falling back to mp4v format (may have browser compatibility issues)")
+                    final_video = temp_raw
         else:
             # Use mp4v format directly - rename and remove from cleanup list
             temp_raw.rename(final_video)
+            temp_files_to_cleanup.remove(temp_raw)
+
+        if final_video == temp_raw and temp_raw in temp_files_to_cleanup:
             temp_files_to_cleanup.remove(temp_raw)
 
         # Log successful video file creation
@@ -208,7 +219,11 @@ def create_video(video_frames, fps, save_dir, output_format="mp4", wandb_logging
 
         # Step 3: Handle wandb upload if requested
         if wandb_logging and _is_wandb_available():
-            wandb.log({"Training rollout": wandb.Video(str(final_video), format="mp4")})
+            try:
+                wandb.log({"Training rollout": wandb.Video(str(final_video), format="mp4")})
+            except Exception as e:
+                cleanup_files = False
+                logger.warning(f"[VIDEO] wandb video upload failed; kept local video at {final_video}: {e}")
 
         # Step 4: Cleanup temp files if needed
         if cleanup_files:

@@ -223,7 +223,7 @@ You can add frame-level object contact labels after converting object-interactio
 ```text
 SMPLH human_joints + object pose + object sample_points
 -> human/object contact
--> aggregate contact to existing robot body links
+-> aggregate contact to mapped robot body links
 ```
 
 The output `.npz` keeps all original arrays and adds contact keys:
@@ -236,6 +236,30 @@ contact_object_indices
 contact_object_source
 contact_object_target
 ```
+
+To preview intended contacts in Viser, use `object_interaction_contact`. The robot visual mesh is white by default; selected robot links turn red on frames where the corresponding SMPLH joints are within the contact threshold of the object surface. This is the same human-source contact definition used by `data_utils/label_object_contacts.py`.
+
+```bash
+python examples/robot_retarget.py \
+  --data_path demo_data/OMOMO_new \
+  --task-type object_interaction_contact \
+  --task-name sub4_whitechair_030 \
+  --data_format smplh \
+  --task-config.object-name whitechair \
+  --retargeter.debug \
+  --retargeter.visualize \
+  --robot r1 \
+  --retargeter.penetration-tolerance 0.02
+```
+
+Use `--retargeter.contact-source robot` only when you want a diagnostic view of actual retargeted robot geometry proximity to the object.
+
+For R1 SMPLH retargeting, two virtual hand-center joints are appended to the loaded SMPLH motion:
+`L_HandCenter = mean(L_Index1, L_Middle1, L_Ring1, L_Pinky1)` and
+`R_HandCenter = mean(R_Index1, R_Middle1, R_Ring1, R_Pinky1)`.
+These map to fixed R1 proxy links `left_hand_contact_link` and `right_hand_contact_link`, which are children of the wrist roll links.
+The default contact regex includes both these virtual hand-center joints and the SMPLH finger joints, so the code path stays explicit.
+In Viser, R1 foot proxy contacts such as `left_ankle_constraint_A_link` also highlight the corresponding `left_ankle_roll_link` foot mesh so toe contacts are visible on the foot body.
 
 For a single converted RL motion, pass the matching original retargeting result with `--human-reference`:
 
@@ -267,7 +291,7 @@ python data_utils/label_object_contacts.py \
 For the R1 training folders in the main Holosoma workspace, run from the repository root:
 
 ```bash
-R1_CONTACT_JOINT_REGEX='^(Pelvis|L_Hip|R_Hip|L_Knee|R_Knee|L_Shoulder|R_Shoulder|L_Elbow|R_Elbow|L_Ankle|R_Ankle|L_Toe|R_Toe|L_Wrist|R_Wrist|L_Index[123]|L_Middle[123]|L_Pinky[123]|L_Ring[123]|L_Thumb[123]|R_Index[123]|R_Middle[123]|R_Pinky[123]|R_Ring[123]|R_Thumb[123])$'
+R1_CONTACT_JOINT_REGEX='^(Pelvis|L_Hip|R_Hip|L_Knee|R_Knee|L_Shoulder|R_Shoulder|L_Elbow|R_Elbow|L_Ankle|R_Ankle|L_Toe|R_Toe|L_Wrist|R_Wrist|L_HandCenter|R_HandCenter|L_Index[123]|L_Middle[123]|L_Pinky[123]|L_Ring[123]|L_Thumb[123]|R_Index[123]|R_Middle[123]|R_Pinky[123]|R_Ring[123]|R_Thumb[123])$'
 
 python src/holosoma_retargeting/holosoma_retargeting/data_utils/label_object_contacts.py \
   --input train_r1/rl \
@@ -280,7 +304,7 @@ python src/holosoma_retargeting/holosoma_retargeting/data_utils/label_object_con
   --overwrite
 ```
 
-This R1 regex selects the full SMPLH-to-R1 mapped major body set from `config_types/data_type.py`, plus SMPLH fingers that are aggregated to the mapped wrist links. For example, with `--robot-type r1`, left hand/finger contacts aggregate to `left_wrist_roll_link`; with `--robot-type g1`, they aggregate to `left_rubber_hand_link`. No new robot joints or bodies are created.
+This R1 regex selects the full SMPLH-to-R1 mapped major body set from `config_types/data_type.py`, plus SMPLH fingers and the virtual hand centers. With `--robot-type r1`, hand-center contacts map directly to `left_hand_contact_link` / `right_hand_contact_link`; finger contacts also collapse to those hand-contact proxy links when available.
 
 When training the R1 teacher with these contact labels, keep the runtime threshold in the motion command config so the same value is shared by the object-contact reward and actor/critic current-contact observations:
 

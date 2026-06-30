@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Mapping, Sequence
+from typing import Any
 from typing import List, Tuple
 
 import numpy as np
@@ -23,6 +25,12 @@ def create_motion_control_sliders(
     initial_fps: int = 30,
     initial_interp_mult: int = 2,
     loop: bool = True,
+    contact_urdf: ViserUrdf | None = None,
+    robot_mesh_handles_by_link: Mapping[str, Sequence[Any]] | None = None,
+    contact_mesh_handles_by_link: Mapping[str, Sequence[Any]] | None = None,
+    contact_labels: np.ndarray | None = None,
+    contact_body_names: Sequence[str] | None = None,
+    contact_visual_link_aliases: Mapping[str, Sequence[str]] | None = None,
 ) -> Tuple[List[viser.GuiInputHandle[int]], List[float]]:
     """
     Create a slider + play/pause controls and a background player thread with smooth, slerp-based interpolation.
@@ -61,6 +69,20 @@ def create_motion_control_sliders(
         and contains_object_in_qpos
         and qpos.shape[1] >= (7 + robot_dof + 7)
     )
+    has_contact_overlay = (
+        contact_urdf is not None
+        and contact_mesh_handles_by_link is not None
+        and contact_labels is not None
+        and contact_body_names is not None
+    )
+    if has_contact_overlay:
+        contact_labels = np.asarray(contact_labels, dtype=bool)
+        if contact_labels.shape[0] != n_frames:
+            raise ValueError(
+                f"contact_labels frame count {contact_labels.shape[0]} does not match motion_sequence frames {n_frames}."
+            )
+        if contact_labels.ndim != 2 or contact_labels.shape[1] != len(contact_body_names):
+            raise ValueError("contact_labels must have shape (T, len(contact_body_names)).")
 
     # ---------------- GUI ----------------
     with server.gui.add_folder("Playback"):
@@ -127,7 +149,41 @@ def create_motion_control_sliders(
     updating_programmatically = {"flag": False}  # flag to prevent callback from pausing during programmatic updates
 
     # ---------------- draw ----------------
-    def _apply_frame_from_q(q: np.ndarray) -> None:
+    def _apply_contact_overlay(joints: np.ndarray, frame_index: int) -> None:
+        if not has_contact_overlay:
+            return
+        assert contact_urdf is not None
+        assert contact_mesh_handles_by_link is not None
+        assert contact_labels is not None
+        assert contact_body_names is not None
+
+        contact_urdf.update_cfg(joints)
+        robot_visual_enabled = bool(getattr(viser_robot, "show_visual", True))
+        contact_visual_enabled = bool(getattr(contact_urdf, "show_visual", True))
+        frame_index = int(np.clip(frame_index, 0, n_frames - 1))
+        active_links = {
+            str(name)
+            for name, is_active in zip(contact_body_names, contact_labels[frame_index], strict=False)
+            if bool(is_active)
+        }
+        if contact_visual_link_aliases is not None:
+            for link_name in tuple(active_links):
+                active_links.update(contact_visual_link_aliases.get(link_name, ()))
+        for link_name, handles in contact_mesh_handles_by_link.items():
+            visible = link_name in active_links
+            for handle in handles:
+                handle.visible = visible and contact_visual_enabled
+
+        if robot_mesh_handles_by_link is not None:
+            contact_link_names = set(contact_mesh_handles_by_link)
+            for link_name, handles in robot_mesh_handles_by_link.items():
+                if link_name not in contact_link_names:
+                    continue
+                visible = link_name not in active_links
+                for handle in handles:
+                    handle.visible = visible and robot_visual_enabled
+
+    def _apply_frame_from_q(q: np.ndarray, frame_index: int) -> None:
         # joints -> ensure length
         joints = q[7 : 7 + robot_dof]
         if joints.shape[0] != robot_dof:
@@ -135,6 +191,7 @@ def create_motion_control_sliders(
                 joints[:robot_dof] if joints.shape[0] > robot_dof else np.pad(joints, (0, robot_dof - joints.shape[0]))
             )
         viser_robot.update_cfg(joints)
+        _apply_contact_overlay(joints, frame_index)
 
         # robot base (MuJoCo order: pos first, then quat)
         robot_base_frame.position = q[0:3]  # pos (xyz)
@@ -155,7 +212,7 @@ def create_motion_control_sliders(
 
     def _apply_discrete_frame(i: int) -> None:
         i = int(np.clip(i, 0, n_frames - 1))
-        _apply_frame_from_q(qpos[i])
+        _apply_frame_from_q(qpos[i], i)
 
     # ---------------- controls ----------------
     @play_btn.on_click
@@ -213,7 +270,7 @@ def create_motion_control_sliders(
                     u = float(f - k0)
 
                     q_interp = _interp_frame(qpos, k0, k1, u)
-                    _apply_frame_from_q(q_interp)
+                    _apply_frame_from_q(q_interp, k0)
 
                     # Update slider to show current frame number in real-time
                     # Use flag to prevent callback from pausing playback

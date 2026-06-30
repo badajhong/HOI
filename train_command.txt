@@ -194,14 +194,14 @@ python src/holosoma_retargeting/holosoma_retargeting/data_utils/label_object_con
     --threshold 0.05 \
     --overwrite
 
-xvfb-run -a python src/holosoma/holosoma/train_agent.py \
+nohup xvfb-run -a python src/holosoma/holosoma/train_agent.py \
     exp:r1-teacher \
     logger:wandb \
     --training.project teacher \
     --command.setup-terms.motion-command.params.motion-config.motion-folder="./train_r1/rl" \
     --command.setup-terms.motion-command.params.motion-config.contact-folder="./train_r1/rl_contact_labeled" \
     --command.setup-terms.motion-command.params.motion-config.object-contact-threshold 0.05 \
-    --command.setup-terms.motion-command.params.motion-config.hard-motion-sampling-ratio 0.4 \
+    --command.setup-terms.motion-command.params.motion-config.hard-motion-sampling-ratio 0.3 \
     --command.setup-terms.motion-command.params.motion-config.hard-motion-sampling-ema-alpha 0.1 \
     --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob 0.4 \
     --robot.object.object-urdf-asset="./train_r1/objects" \
@@ -216,9 +216,9 @@ xvfb-run -a python src/holosoma/holosoma/train_agent.py \
     --reward.terms.object-global-ref-position-error-exp.weight 3.0 \
     --simulator.config.scene.env-spacing 5.0 \
     --simulator.config.sim.physx.gpu-max-rigid-patch-count 524288 \
-    --logger.video.enabled True \
     --logger.video.interval 100 \
     --logger.video.camera.offset '[3.0, -3.0, 1.5]' \
+    --training.checkpoint ./logs/teacher/20260625_070902-r1_teacher-locomotion/model_12000.pt \
     > train_output.log 2>&1 &
 
-#    --training.checkpoint ./logs/teacher/
+#    --training.checkpoint ./logs/teacher/20260625_031621-r1_teacher-locomotion/model_02000.pt

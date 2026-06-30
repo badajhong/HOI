@@ -188,3 +188,16 @@ python examples/robot_retarget.py \
   --robot r1 \
   --retargeter.penetration-tolerance 0.02
 ```
+```bash
+python examples/robot_retarget.py \
+  --data_path demo_data/OMOMO_new \
+  --task-type object_interaction_contact \
+  --task-name sub1_suitcase_070 \
+  --data_format smplh \
+  --task-config.object-name suitcase \
+  --retargeter.debug \
+  --retargeter.visualize \
+  --robot r1 \
+  --retargeter.penetration-tolerance 0.02 \
+  --retargeter.contact-threshold 0.05
+```

@@ -35,7 +35,25 @@ DEFAULT_OBJECT_ROOTS = (
     Path("src/holosoma_retargeting/holosoma_retargeting/models"),
 )
 
-DEFAULT_HUMAN_JOINT_REGEX = r"^(L|R)_(Wrist|Index[123]|Middle[123]|Pinky[123]|Ring[123]|Thumb[123]|Toe|Ankle)$"
+DEFAULT_HUMAN_JOINT_REGEX = (
+    r"^(L|R)_(Wrist|HandCenter|Index[123]|Middle[123]|Pinky[123]|Ring[123]|Thumb[123]|Toe|Ankle)$"
+)
+
+SMPLH_HAND_CENTER_JOINTS = {
+    "left": (18, 21, 27, 24),  # Index1, Middle1, Ring1, Pinky1
+    "right": (37, 40, 46, 43),  # Index1, Middle1, Ring1, Pinky1
+}
+
+
+def append_smplh_hand_centers_if_needed(human_joints: np.ndarray, data_format: str) -> np.ndarray:
+    if data_format != "smplh" or human_joints.shape[1] >= 54:
+        return human_joints
+    if human_joints.shape[1] != 52:
+        return human_joints
+
+    left_center = human_joints[:, SMPLH_HAND_CENTER_JOINTS["left"]].mean(axis=1, keepdims=True)
+    right_center = human_joints[:, SMPLH_HAND_CENTER_JOINTS["right"]].mean(axis=1, keepdims=True)
+    return np.concatenate([human_joints, left_center, right_center], axis=1)
 
 
 def parse_args() -> argparse.Namespace:
@@ -366,9 +384,9 @@ def human_joint_to_robot_body(joint_name: str, mapping: dict[str, str]) -> str |
     left_hand_tokens = ("L_Index", "L_Middle", "L_Pinky", "L_Ring", "L_Thumb")
     right_hand_tokens = ("R_Index", "R_Middle", "R_Pinky", "R_Ring", "R_Thumb")
     if joint_name.startswith(left_hand_tokens):
-        return mapping.get("L_Wrist")
+        return mapping.get("L_HandCenter", mapping.get("L_Wrist"))
     if joint_name.startswith(right_hand_tokens):
-        return mapping.get("R_Wrist")
+        return mapping.get("R_HandCenter", mapping.get("R_Wrist"))
     return None
 
 
@@ -456,6 +474,12 @@ def make_human_contact_labels(
 
     human_joints = np.asarray(human_arrays["human_joints"], dtype=np.float64)
     human_joints = resample_linear(human_joints, target_len)
+    human_joints = append_smplh_hand_centers_if_needed(human_joints, args.data_format)
+    if len(selected_indices) > 0 and human_joints.shape[1] <= int(np.max(selected_indices)):
+        raise ValueError(
+            f"{human_ref}: selected joint index {int(np.max(selected_indices))} is unavailable "
+            f"for human_joints with {human_joints.shape[1]} joints."
+        )
     query_points = human_joints[:, selected_indices]
 
     distances, nearest_indices = compute_distances_to_object(query_points, object_pos_w, object_quat_w, object_samples)

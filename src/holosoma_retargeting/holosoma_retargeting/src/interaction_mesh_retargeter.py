@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 from pathlib import Path
 from types import ModuleType
+from typing import Literal
 
 import cvxpy as cp  # type: ignore[import-not-found]
 import mujoco  # type: ignore[import-not-found]
@@ -13,11 +15,12 @@ import trimesh
 import viser  # type: ignore[import-not-found]
 import yourdfpy  # type: ignore[import-untyped]
 from scipy import sparse as sp  # type: ignore[import-untyped]
+from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation  # type: ignore[import-untyped]
 from tqdm import tqdm
 from viser.extras import ViserUrdf  # type: ignore[import-not-found]
 
-from holosoma_retargeting.config_types.retargeter import FootLockConfig
+from holosoma_retargeting.config_types.retargeter import DEFAULT_CONTACT_HUMAN_JOINT_REGEX, FootLockConfig
 
 # Add src to path for direct execution
 src_path = Path(__file__).parent.parent / "src"
@@ -44,6 +47,21 @@ class InteractionMeshRetargeter:
     preserving spatial relationships using an interaction mesh.
     """
 
+    FOOT_CONTACT_VISUAL_ALIASES = {
+        "left_ankle_constraint_A_link": ("left_ankle_roll_link",),
+        "left_ankle_constraint_B_link": ("left_ankle_roll_link",),
+        "left_foot_front_outer_link": ("left_ankle_roll_link",),
+        "left_foot_front_inner_link": ("left_ankle_roll_link",),
+        "left_foot_rear_outer_link": ("left_ankle_roll_link",),
+        "left_foot_rear_inner_link": ("left_ankle_roll_link",),
+        "right_ankle_constraint_A_link": ("right_ankle_roll_link",),
+        "right_ankle_constraint_B_link": ("right_ankle_roll_link",),
+        "right_foot_front_outer_link": ("right_ankle_roll_link",),
+        "right_foot_front_inner_link": ("right_ankle_roll_link",),
+        "right_foot_rear_outer_link": ("right_ankle_roll_link",),
+        "right_foot_rear_inner_link": ("right_ankle_roll_link",),
+    }
+
     def __init__(
         self,
         task_constants: ModuleType,
@@ -58,6 +76,10 @@ class InteractionMeshRetargeter:
         foot_sticking_tolerance: float = 1e-3,
         foot_lock: FootLockConfig | None = None,
         visualize: bool = False,
+        contact_visualization: bool = False,
+        contact_source: Literal["robot", "human"] = "human",
+        contact_threshold: float = 0.05,
+        contact_human_joint_regex: str = DEFAULT_CONTACT_HUMAN_JOINT_REGEX,
         debug: bool = False,
         w_nominal_tracking_init: float = 5.0,
         nominal_tracking_tau: float = 10.0,
@@ -95,6 +117,10 @@ class InteractionMeshRetargeter:
         self.penetration_tolerance = penetration_tolerance
         self.step_size = step_size
         self.visualize = visualize
+        self.contact_visualization = contact_visualization
+        self.contact_source = contact_source
+        self.contact_threshold = contact_threshold
+        self.contact_human_joint_regex = contact_human_joint_regex
         self.debug = debug
         self.demo_joints = task_constants.DEMO_JOINTS
         self.laplacian_match_links = task_constants.JOINTS_MAPPING
@@ -198,6 +224,17 @@ class InteractionMeshRetargeter:
                 normalized_windows.append((start, end))
             self._foot_lock_windows[side] = tuple(normalized_windows)
 
+    def _link_name_from_viser_mesh_path(self, mesh_path: str) -> str | None:
+        """Resolve a Viser mesh path back to a URDF link name."""
+        link_names = set(self.robot_urdf.link_map)
+        for part in reversed(mesh_path.split("/")):
+            if part in link_names:
+                return part
+            stem = Path(part).stem
+            if stem in link_names:
+                return stem
+        return None
+
     def _setup_visualization(self):
         """Setup Viser visualization components."""
         self.server = viser.ViserServer()
@@ -227,7 +264,29 @@ class InteractionMeshRetargeter:
             self.server,
             urdf_or_path=self.robot_urdf,
             root_node_name="/world/robot",  # This links to the robot_base frame we created
+            mesh_color_override=(245, 245, 245),
         )
+        self.robot_mesh_handles_by_link: dict[str, list[viser.SceneNodeHandle]] = {}
+        for mesh_handle in self.viser_robot._meshes:  # noqa: SLF001
+            link_name = self._link_name_from_viser_mesh_path(mesh_handle.name)
+            if link_name is not None:
+                self.robot_mesh_handles_by_link.setdefault(link_name, []).append(mesh_handle)
+
+        self.contact_viser_robot = None
+        self.contact_mesh_handles_by_link: dict[str, list[viser.SceneNodeHandle]] = {}
+        if self.contact_visualization:
+            self.server.scene.add_frame("/world/robot/contact_overlay", show_axes=False)
+            self.contact_viser_robot = ViserUrdf(
+                self.server,
+                urdf_or_path=self.robot_urdf,
+                root_node_name="/world/robot/contact_overlay",
+                mesh_color_override=(255, 45, 35),
+            )
+            for mesh_handle in self.contact_viser_robot._meshes:  # noqa: SLF001
+                mesh_handle.visible = False
+                link_name = self._link_name_from_viser_mesh_path(mesh_handle.name)
+                if link_name is not None:
+                    self.contact_mesh_handles_by_link.setdefault(link_name, []).append(mesh_handle)
 
         # Similarly for object
         if self.object_model_path:
@@ -321,6 +380,250 @@ class InteractionMeshRetargeter:
             # your existing helper (rgba expects floats 0..1)
             self.draw_keypoints(q, name=f"{group_name}_q", rgba=(0.0, 1.0, 0.0, 1.0))
             self.draw_keypoints(c, name=f"{group_name}_c", rgba=(1.0, 0.0, 0.0, 1.0))
+
+    def _human_joint_to_robot_body(self, joint_name: str) -> str | None:
+        mapping = self.laplacian_match_links
+        if joint_name in mapping:
+            return mapping[joint_name]
+
+        left_hand_tokens = ("L_Index", "L_Middle", "L_Pinky", "L_Ring", "L_Thumb")
+        right_hand_tokens = ("R_Index", "R_Middle", "R_Pinky", "R_Ring", "R_Thumb")
+        if joint_name.startswith(left_hand_tokens):
+            return mapping.get("L_HandCenter", mapping.get("L_Wrist"))
+        if joint_name.startswith(right_hand_tokens):
+            return mapping.get("R_HandCenter", mapping.get("R_Wrist"))
+        return None
+
+    def _selected_contact_targets(self) -> tuple[list[str], list[int], list[str], list[tuple[int, int]]]:
+        include = re.compile(self.contact_human_joint_regex)
+        human_names: list[str] = []
+        human_indices: list[int] = []
+        robot_names: list[str] = []
+        robot_name_to_idx: dict[str, int] = {}
+        pairs: list[tuple[int, int]] = []
+
+        for human_idx, human_name in enumerate(self.demo_joints):
+            if not include.search(human_name):
+                continue
+            robot_name = self._human_joint_to_robot_body(human_name)
+            if robot_name is None:
+                continue
+            body_id = mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, robot_name)
+            if body_id == -1:
+                continue
+            if robot_name not in robot_name_to_idx:
+                robot_name_to_idx[robot_name] = len(robot_names)
+                robot_names.append(robot_name)
+            human_names.append(human_name)
+            human_indices.append(human_idx)
+            pairs.append((len(human_names) - 1, robot_name_to_idx[robot_name]))
+
+        return human_names, human_indices, robot_names, pairs
+
+    def _contact_sample_points(self, fallback_points: np.ndarray) -> np.ndarray:
+        if self.object_model_path:
+            object_model_path = Path(self.object_model_path)
+            candidate_paths = [object_model_path.with_name("sample_points.npy")]
+            if not object_model_path.is_absolute():
+                package_root = Path(__file__).resolve().parents[1]
+                candidate_paths.append(package_root / object_model_path.with_name("sample_points.npy"))
+                candidate_paths.append(Path.cwd() / object_model_path.with_name("sample_points.npy"))
+            for candidate_path in candidate_paths:
+                if candidate_path.exists():
+                    return np.asarray(np.load(candidate_path), dtype=np.float64)
+        return np.asarray(fallback_points, dtype=np.float64)
+
+    def _distances_to_object_surface(
+        self,
+        query_points_w: np.ndarray,
+        qpos_sequence: np.ndarray,
+        object_points_local: np.ndarray,
+    ) -> np.ndarray:
+        query_points_w = np.asarray(query_points_w, dtype=np.float64)
+        qpos_sequence = np.asarray(qpos_sequence, dtype=np.float64)
+        object_points_local = np.asarray(object_points_local, dtype=np.float64)
+        if query_points_w.ndim != 3 or query_points_w.shape[-1] != 3:
+            raise ValueError(f"query_points_w must have shape (T, N, 3), got {query_points_w.shape}")
+        if query_points_w.shape[0] != qpos_sequence.shape[0]:
+            raise ValueError("query_points_w and qpos_sequence must have the same frame count.")
+
+        tree = cKDTree(object_points_local)
+        distances = np.empty(query_points_w.shape[:2], dtype=np.float32)
+        for frame_idx, q in enumerate(qpos_sequence):
+            if self.has_dynamic_object and q.shape[0] >= 7:
+                object_pos = q[-7:-4]
+                object_quat = q[-4:]
+            else:
+                object_pos = np.zeros(3)
+                object_quat = np.array([1.0, 0.0, 0.0, 0.0])
+            query_local = transform_points_world_to_local(object_quat, object_pos, query_points_w[frame_idx])
+            distances[frame_idx] = tree.query(query_local, k=1)[0].astype(np.float32)
+        return distances
+
+    def _mujoco_geom_names(self) -> list[str]:
+        if not hasattr(self, "_geom_names") or len(self._geom_names) != self.robot_model.ngeom:
+            self._geom_names = [
+                mujoco.mj_id2name(self.robot_model, mujoco.mjtObj.mjOBJ_GEOM, g) or ""
+                for g in range(self.robot_model.ngeom)
+            ]
+        return self._geom_names
+
+    def _mujoco_body_names(self) -> list[str]:
+        if not hasattr(self, "_body_names") or len(self._body_names) != self.robot_model.nbody:
+            self._body_names = [
+                mujoco.mj_id2name(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, b) or ""
+                for b in range(self.robot_model.nbody)
+            ]
+        return self._body_names
+
+    def _contact_object_geom_ids(self) -> list[int]:
+        token = self.object_name.lower()
+        geom_names = self._mujoco_geom_names()
+        body_names = self._mujoco_body_names()
+        geom_ids = []
+        for geom_id, geom_name in enumerate(geom_names):
+            body_name = body_names[int(self.robot_model.geom_bodyid[geom_id])]
+            if token in geom_name.lower() or token in body_name.lower():
+                geom_ids.append(geom_id)
+        return geom_ids
+
+    def _contact_robot_geom_ids_by_body(self, robot_names: list[str]) -> list[list[int]]:
+        object_geom_ids = set(self._contact_object_geom_ids())
+        geom_ids_by_body: list[list[int]] = []
+        for robot_name in robot_names:
+            body_id = mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, robot_name)
+            if body_id == -1:
+                geom_ids_by_body.append([])
+                continue
+            geom_ids_by_body.append(
+                [
+                    geom_id
+                    for geom_id in range(self.robot_model.ngeom)
+                    if int(self.robot_model.geom_bodyid[geom_id]) == body_id and geom_id not in object_geom_ids
+                ]
+            )
+        return geom_ids_by_body
+
+    def _robot_object_geom_distances(
+        self,
+        qpos_sequence: np.ndarray,
+        robot_names: list[str],
+        object_points_local: np.ndarray,
+    ) -> np.ndarray:
+        qpos_sequence = np.asarray(qpos_sequence, dtype=np.float64)
+        object_geom_ids = self._contact_object_geom_ids()
+        if not object_geom_ids:
+            body_positions = np.stack([self._get_robot_link_positions(q, robot_names) for q in qpos_sequence], axis=0)
+            sample_points = self._contact_sample_points(object_points_local)
+            return self._distances_to_object_surface(body_positions, qpos_sequence, sample_points)
+
+        geom_ids_by_body = self._contact_robot_geom_ids_by_body(robot_names)
+        distances = np.full((qpos_sequence.shape[0], len(robot_names)), np.inf, dtype=np.float32)
+        distance_cutoff = max(float(self.contact_threshold) + 1e-6, float(self.collision_detection_threshold), 1.0)
+        fromto = np.zeros(6, dtype=np.float64)
+
+        for frame_idx, q in enumerate(qpos_sequence):
+            if q.shape[0] != self.robot_data.qpos.shape[0]:
+                raise ValueError(
+                    f"qpos frame has length {q.shape[0]}, expected {self.robot_data.qpos.shape[0]} for contact labels."
+                )
+            self.robot_data.qpos[:] = q
+            mujoco.mj_forward(self.robot_model, self.robot_data)
+
+            for body_col, robot_geom_ids in enumerate(geom_ids_by_body):
+                min_dist = np.inf
+                for robot_geom_id in robot_geom_ids:
+                    for object_geom_id in object_geom_ids:
+                        fromto[:] = 0.0
+                        dist = mujoco.mj_geomDistance(
+                            self.robot_model,
+                            self.robot_data,
+                            robot_geom_id,
+                            object_geom_id,
+                            distance_cutoff,
+                            fromto,
+                        )
+                        min_dist = min(min_dist, float(dist))
+                        if min_dist <= self.contact_threshold:
+                            break
+                    if min_dist <= self.contact_threshold:
+                        break
+                distances[frame_idx, body_col] = min_dist
+
+        fallback_cols = [idx for idx, geom_ids in enumerate(geom_ids_by_body) if not geom_ids]
+        if fallback_cols:
+            fallback_names = [robot_names[idx] for idx in fallback_cols]
+            body_positions = np.stack(
+                [self._get_robot_link_positions(q, fallback_names) for q in qpos_sequence],
+                axis=0,
+            )
+            sample_points = self._contact_sample_points(object_points_local)
+            distances[:, fallback_cols] = self._distances_to_object_surface(
+                body_positions,
+                qpos_sequence,
+                sample_points,
+            )
+        return distances
+
+    def _compute_contact_labels(
+        self,
+        qpos_sequence: np.ndarray,
+        human_joint_motions: np.ndarray,
+        object_points_local: np.ndarray,
+    ) -> dict[str, np.ndarray]:
+        human_names, human_indices, robot_names, pairs = self._selected_contact_targets()
+        empty = {
+            "contact_object_label": np.zeros((qpos_sequence.shape[0], 0), dtype=bool),
+            "contact_object_distance": np.zeros((qpos_sequence.shape[0], 0), dtype=np.float32),
+            "contact_object_names": np.asarray([], dtype=str),
+            "contact_object_indices": np.asarray([], dtype=np.int32),
+            "contact_object_source": np.asarray(self.contact_source),
+            "contact_object_threshold_m": np.asarray(self.contact_threshold, dtype=np.float32),
+        }
+        if not robot_names:
+            return empty
+
+        if self.contact_source == "human":
+            sample_points = self._contact_sample_points(object_points_local)
+            query_points = np.asarray(human_joint_motions[:, human_indices], dtype=np.float64)
+            human_distances = self._distances_to_object_surface(query_points, qpos_sequence, sample_points)
+            human_labels = human_distances <= self.contact_threshold
+            robot_labels = np.zeros((qpos_sequence.shape[0], len(robot_names)), dtype=bool)
+            robot_distances = np.full((qpos_sequence.shape[0], len(robot_names)), np.inf, dtype=np.float32)
+            for human_col, robot_col in pairs:
+                robot_labels[:, robot_col] |= human_labels[:, human_col]
+                robot_distances[:, robot_col] = np.minimum(robot_distances[:, robot_col], human_distances[:, human_col])
+            return {
+                "contact_object_label": robot_labels,
+                "contact_object_distance": robot_distances,
+                "contact_object_names": np.asarray(robot_names),
+                "contact_object_indices": np.asarray(
+                    [mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, name) for name in robot_names],
+                    dtype=np.int32,
+                ),
+                "contact_object_source": np.asarray("human_smplh"),
+                "contact_object_threshold_m": np.asarray(self.contact_threshold, dtype=np.float32),
+                "contact_human_joint_names": np.asarray(human_names),
+                "contact_human_joint_indices": np.asarray(human_indices, dtype=np.int32),
+                "contact_human_joint_regex": np.asarray(self.contact_human_joint_regex),
+            }
+
+        robot_distances = self._robot_object_geom_distances(qpos_sequence, robot_names, object_points_local)
+        robot_labels = robot_distances <= self.contact_threshold
+        return {
+            "contact_object_label": robot_labels,
+            "contact_object_distance": robot_distances,
+            "contact_object_names": np.asarray(robot_names),
+            "contact_object_indices": np.asarray(
+                [mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, name) for name in robot_names],
+                dtype=np.int32,
+            ),
+            "contact_object_source": np.asarray("retarget_robot_geom"),
+            "contact_object_threshold_m": np.asarray(self.contact_threshold, dtype=np.float32),
+            "contact_human_joint_names": np.asarray(human_names),
+            "contact_human_joint_indices": np.asarray(human_indices, dtype=np.int32),
+            "contact_human_joint_regex": np.asarray(self.contact_human_joint_regex),
+        }
 
     def retarget_motion(
         self,
@@ -464,13 +767,23 @@ class InteractionMeshRetargeter:
                 handle.remove()
             robot_kpts_handle_list.clear()
 
+        retargeted_motions_np = np.array(retargeted_motions)[1:]
+        contact_arrays: dict[str, np.ndarray] = {}
+        if self.contact_visualization:
+            contact_arrays = self._compute_contact_labels(
+                retargeted_motions_np,
+                human_joint_motions,
+                object_points_local,
+            )
+
         # Save results
         np.savez(
             dest_res_path,
-            qpos=np.array(retargeted_motions)[1:],
+            qpos=retargeted_motions_np,
             human_joints=human_joint_motions,
             fps=30,
             cost=cost,
+            **contact_arrays,
         )
         print("Saving results to path:", dest_res_path)
 
@@ -489,6 +802,20 @@ class InteractionMeshRetargeter:
                 initial_fps=30,
                 initial_interp_mult=2,
                 loop=False,
+                contact_urdf=getattr(self, "contact_viser_robot", None),
+                robot_mesh_handles_by_link=(
+                    self.robot_mesh_handles_by_link if self.contact_visualization else None
+                ),
+                contact_mesh_handles_by_link=(
+                    self.contact_mesh_handles_by_link if self.contact_visualization else None
+                ),
+                contact_labels=contact_arrays.get("contact_object_label") if contact_arrays else None,
+                contact_body_names=(
+                    [str(name) for name in contact_arrays["contact_object_names"].tolist()]
+                    if contact_arrays and "contact_object_names" in contact_arrays
+                    else None
+                ),
+                contact_visual_link_aliases=self.FOOT_CONTACT_VISUAL_ALIASES,
             )
 
             # 4) optional: visibility toggle
@@ -498,11 +825,13 @@ class InteractionMeshRetargeter:
                 @show_meshes_cb.on_update
                 def _(_):
                     self.viser_robot.show_visual = show_meshes_cb.value
+                    if getattr(self, "contact_viser_robot", None) is not None:
+                        self.contact_viser_robot.show_visual = show_meshes_cb.value
                     if self.viser_object is not None:
                         self.viser_object.show_visual = show_meshes_cb.value
 
         return (
-            np.array(retargeted_motions)[1:],
+            retargeted_motions_np,
             obj_pts_demo_list,
             obj_pts_list,
             tetrahedra,
@@ -756,6 +1085,8 @@ class InteractionMeshRetargeter:
         # Update robot joint configurations
         robot_joint_positions = q[7 : 7 + self.task_constants.ROBOT_DOF]
         self.viser_robot.update_cfg(robot_joint_positions)
+        if getattr(self, "contact_viser_robot", None) is not None:
+            self.contact_viser_robot.update_cfg(robot_joint_positions)
 
         # Update robot base pose using set_transform
         robot_quat = q[3:7]  # Base orientation

@@ -254,6 +254,10 @@
                     <joint name="left_wrist_roll_joint" pos="0 0 0" axis="1 0 0" range="-1.9199 1.9199" actuatorfrcrange="-33 33" />
                     <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.4 0.4 0.4 1" mesh="left_wrist_roll_link" />
                     <geom name="left_wrist_roll_link" type="mesh" density="0" rgba="0.4 0.4 0.4 1" mesh="left_wrist_roll_link" />
+                    <body name="left_hand_contact_link" pos="0.07 0 0">
+                      <inertial pos="0 0 0" mass="0.001" diaginertia="1e-07 1e-07 1e-07" />
+                      <geom type="sphere" size="0.015" contype="0" conaffinity="0" density="0" group="1" rgba="0 0.8 1 1" />
+                    </body>
                   </body>
                 </body>
               </body>
@@ -284,6 +288,10 @@
                     <joint name="right_wrist_roll_joint" pos="0 0 0" axis="1 0 0" range="-1.9199 1.9199" actuatorfrcrange="-33 33" />
                     <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.4 0.4 0.4 1" mesh="right_wrist_roll_link" />
                     <geom name="right_wrist_roll_link" type="mesh" density="0" rgba="0.4 0.4 0.4 1" mesh="right_wrist_roll_link" />
+                    <body name="right_hand_contact_link" pos="0.07 0 0">
+                      <inertial pos="0 0 0" mass="0.001" diaginertia="1e-07 1e-07 1e-07" />
+                      <geom type="sphere" size="0.015" contype="0" conaffinity="0" density="0" group="1" rgba="0 0.8 1 1" />
+                    </body>
                   </body>
                 </body>
               </body>
@@ -312,35 +320,9 @@
                 contype="1" conaffinity="1"
                 pos="0 0 0" quat="1 0 0 0"
                 rgba="0.7 0.8 0.9 0.7"
-                friction="0.28 0.0008 0.0008"
+                friction="0.9 0.5 0.5"
                 solref="0.02 1"
                 solimp="0.9 0.95 0.001"/>
-
-        <!-- wheel-like contacts (same rigid body, aligned with suitcase URDF) -->
-        <geom name="suitcase_wheel_fl" type="sphere" size="0.02"
-              pos="-0.0236 -0.3 0.1623"
-              contype="1" conaffinity="1"
-              rgba="0.08 0.08 0.08 1"
-              friction="0.28 0.0008 0.0008"
-              solref="0.02 1" solimp="0.9 0.95 0.001"/>
-        <geom name="suitcase_wheel_fr" type="sphere" size="0.02"
-              pos="0.1629 -0.3 -0.0188"
-              contype="1" conaffinity="1"
-              rgba="0.08 0.08 0.08 1"
-              friction="0.28 0.0008 0.0008"
-              solref="0.02 1" solimp="0.9 0.95 0.001"/>
-        <geom name="suitcase_wheel_rl" type="sphere" size="0.02"
-              pos="-0.1629 -0.3 0.0188"
-              contype="1" conaffinity="1"
-              rgba="0.08 0.08 0.08 1"
-              friction="0.28 0.0008 0.0008"
-              solref="0.02 1" solimp="0.9 0.95 0.001"/>
-        <geom name="suitcase_wheel_rr" type="sphere" size="0.02"
-              pos="0.0236 -0.3 -0.1623"
-              contype="1" conaffinity="1"
-              rgba="0.08 0.08 0.08 1"
-              friction="0.28 0.0008 0.0008"
-              solref="0.02 1" solimp="0.9 0.95 0.001"/>
     </body>
 
     <light name="sun" pos="0 0 5" dir="0 0 -1" directional="true"

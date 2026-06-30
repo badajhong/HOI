@@ -1670,7 +1670,7 @@ class MotionCommand(CommandTermBase):
                 )
             self.hard_motion_completion_update_count[clip_id_int] += 1
 
-    def _park_object_actor(self, object_key: str, env_ids: torch.Tensor) -> None:
+    def _park_object_actor(self, object_key: str, env_ids: torch.Tensor, write_updates: bool = True) -> None:
         """Move an inactive object actor outside depth/render/collision range for the selected envs."""
         if env_ids.numel() == 0:
             return
@@ -1681,7 +1681,7 @@ class MotionCommand(CommandTermBase):
         parked_quat[:, 3] = 1.0
         parked_vel = torch.zeros((env_ids.numel(), 3), device=self.device)
         parked_states = torch.cat([parked_pos, parked_quat, parked_vel, parked_vel], dim=-1)
-        self._env.simulator.set_actor_states([f"object_{object_key}"], env_ids, parked_states)
+        self._env.simulator.set_actor_states([f"object_{object_key}"], env_ids, parked_states, write_updates=write_updates)
 
     def set_simulator_object_states(self, env_ids: torch.Tensor | None, object_states: torch.Tensor) -> None:
         """Place the active object for each env and park inactive multi-object actors."""
@@ -1712,6 +1712,7 @@ class MotionCommand(CommandTermBase):
                     [f"object_{object_key}"],
                     env_ids_subset,
                     object_states[mask],
+                    write_updates=False,
                 )
                 self.active_object_indices[env_ids_subset] = self.object_name_to_indices[object_key][env_ids_subset]
 
@@ -1723,7 +1724,8 @@ class MotionCommand(CommandTermBase):
                 env_ids_inactive = env_ids[mask_inactive]
                 if env_ids_inactive.numel() == 0:
                     continue
-                self._park_object_actor(object_key, env_ids_inactive)
+                self._park_object_actor(object_key, env_ids_inactive, write_updates=False)
+            self._env.simulator.write_state_updates()
         else:
             self._env.simulator.set_actor_states([self.object_name], env_ids, object_states)
             self.active_object_indices[env_ids] = self.object_indices_in_simulator[env_ids]

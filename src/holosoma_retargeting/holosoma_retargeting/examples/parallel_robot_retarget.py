@@ -31,6 +31,7 @@ from holosoma_retargeting.config_types.robot import RobotConfig  # noqa: E402
 # Import reusable functions from robot_retarget.py
 from holosoma_retargeting.examples.robot_retarget import (  # type: ignore[import-not-found]  # noqa: E402
     DEFAULT_DATA_FORMATS,
+    OBJECT_INTERACTION_TASKS,
     build_retargeter_kwargs_from_config,
     create_task_constants,
     initialize_robot_pose,
@@ -54,6 +55,7 @@ from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]  
 PARALLEL_SAVE_DIRS = {
     "robot_only": "demo_results_parallel/{robot}/robot_only/omomo",
     "object_interaction": "demo_results_parallel/{robot}/object_interaction/omomo",
+    "object_interaction_contact": "demo_results_parallel/{robot}/object_interaction_contact/omomo",
     "object_interaction_scaled": "demo_results_parallel/{robot}/object_interaction_scaled/omomo",
     "climbing": "demo_results_parallel/{robot}/climbing/mocap_climb",
 }
@@ -102,7 +104,7 @@ def generate_augmentation_configs(task_type: str, augmentation: bool = True):
         # No augmentation for robot_only
         return [{"name": "original"}]
 
-    if task_type in {"object_interaction", "object_interaction_scaled"}:
+    if task_type in OBJECT_INTERACTION_TASKS:
         """Generate different augmentation configurations for object interaction."""
         augmentations = []
         augmentations.append({"name": "original", "translation": np.array([0.0, 0.0, 0.0]), "rotation": 0.0})
@@ -243,7 +245,7 @@ def process_single_task(args):
         # Preprocess motion data
         if task_type == "robot_only":
             human_joints = preprocess_motion_data(human_joints, retargeter, toe_names, smpl_scale)
-        elif task_type in {"object_interaction", "object_interaction_scaled", "climbing"}:
+        elif task_type in {"object_interaction", "object_interaction_contact", "object_interaction_scaled", "climbing"}:
             human_joints, object_poses, object_moving_frame_idx = preprocess_motion_data(
                 human_joints, retargeter, toe_names, scale=smpl_scale, object_poses=object_poses
             )
@@ -257,7 +259,7 @@ def process_single_task(args):
         )
 
         # Task-specific foot sticking adjustments
-        if task_type in {"object_interaction", "object_interaction_scaled"}:
+        if task_type in OBJECT_INTERACTION_TASKS:
             # Disable initial sticking
             foot_sticking_sequences[0][toe_names[0]] = False
             foot_sticking_sequences[0][toe_names[1]] = False
@@ -265,7 +267,7 @@ def process_single_task(args):
         # Determine if this is an augmentation run (k > 0 means we're augmenting)
         is_augmentation_run = k > 0
 
-        if task_type in {"object_interaction", "object_interaction_scaled"}:
+        if task_type in OBJECT_INTERACTION_TASKS:
             # Initialize robot pose
             q_init, q_nominal, object_poses_augmented, human_joints, object_poses = initialize_robot_pose(
                 task_type,

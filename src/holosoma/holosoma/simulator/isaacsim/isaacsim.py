@@ -1235,16 +1235,17 @@ class IsaacSim(BaseSimulator):
         """See base class."""
         return self.object_registry.get_object_indices(names, env_ids)
 
-    def set_actor_states(self, names: ActorNames, env_ids: EnvIds, states: ActorStates):
+    def set_actor_states(self, names: ActorNames, env_ids: EnvIds, states: ActorStates, write_updates: bool = True):
         """See base class.
 
         IsaacSim-specific notes:
         - Uses AllRootStatesProxy for unified tensor access
-        - Automatically calls write_state_updates() for immediate sync
+        - Automatically calls write_state_updates() for immediate sync unless disabled
         """
         actor_indices = self.get_actor_indices(names, env_ids)
         self.all_root_states[actor_indices, :13] = states
-        self.write_state_updates()
+        if write_updates:
+            self.write_state_updates()
 
     def get_actor_initial_poses(self, names: ActorNames, env_ids: EnvIds | None = None) -> ActorPoses:
         """See base class."""

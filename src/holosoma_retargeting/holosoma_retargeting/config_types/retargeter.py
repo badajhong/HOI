@@ -3,6 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
+
+
+DEFAULT_CONTACT_HUMAN_JOINT_REGEX = (
+    r"^(Pelvis|L_Hip|R_Hip|L_Knee|R_Knee|L_Shoulder|R_Shoulder|L_Elbow|R_Elbow|"
+    r"L_Ankle|R_Ankle|L_Toe|R_Toe|L_Wrist|R_Wrist|L_HandCenter|R_HandCenter|"
+    r"L_Index[123]|L_Middle[123]|L_Pinky[123]|L_Ring[123]|L_Thumb[123]|"
+    r"R_Index[123]|R_Middle[123]|R_Pinky[123]|R_Ring[123]|R_Thumb[123])$"
+)
 
 
 @dataclass(frozen=True)
@@ -58,6 +67,21 @@ class RetargeterConfig:
 
     visualize: bool = False
     """Whether to visualize the retargeting process."""
+
+    contact_visualization: bool = False
+    """Whether to color robot links by object contact in the Viser playback."""
+
+    contact_source: Literal["robot", "human"] = "human"
+    """Source for contact visualization.
+    robot: color links whose retargeted robot geometry is near the object geometry.
+    human: color mapped robot links from selected human joints near the object surface.
+    """
+
+    contact_threshold: float = 0.05
+    """Object-contact distance threshold in meters for contact visualization."""
+
+    contact_human_joint_regex: str = DEFAULT_CONTACT_HUMAN_JOINT_REGEX
+    """Human joint regex used to select contact targets and map them to robot links."""
 
     debug: bool = False
     """Whether to enable debug mode."""
