@@ -73,6 +73,8 @@ class InteractionMeshRetargeter:
         step_size: float = 0.2,
         collision_detection_threshold: float = 0.1,
         penetration_tolerance: float = 1e-3,
+        surface_penetration_tolerance: float | None = None,
+        object_penetration_tolerance: float | None = None,
         foot_sticking_tolerance: float = 1e-3,
         foot_lock: FootLockConfig | None = None,
         visualize: bool = False,
@@ -101,6 +103,10 @@ class InteractionMeshRetargeter:
             collision_detection_threshold: only start to detect collision
             when the distance is smaller than this threshold.
             penetration_tolerance: tolerance for penetration when enforcing non-penetration constraints.
+            surface_penetration_tolerance: optional tolerance for ground/surface contacts. Defaults to
+                penetration_tolerance.
+            object_penetration_tolerance: optional tolerance for robot-object contacts. Defaults to
+                penetration_tolerance.
             foot_sticking_tolerance: tolerance for foot sticking constraints in x, y.
             foot_lock: configuration for explicit frame-range based foot locking constraints.
             nominal_tracking_tau: the time constant for the nominal tracking cost.
@@ -115,6 +121,12 @@ class InteractionMeshRetargeter:
         self.activate_joint_limits = activate_joint_limits
         self.foot_links = dict(zip(task_constants.FOOT_STICKING_LINKS, task_constants.FOOT_STICKING_LINKS))
         self.penetration_tolerance = penetration_tolerance
+        self.surface_penetration_tolerance = (
+            penetration_tolerance if surface_penetration_tolerance is None else surface_penetration_tolerance
+        )
+        self.object_penetration_tolerance = (
+            penetration_tolerance if object_penetration_tolerance is None else object_penetration_tolerance
+        )
         self.step_size = step_size
         self.visualize = visualize
         self.contact_visualization = contact_visualization
@@ -964,7 +976,7 @@ class InteractionMeshRetargeter:
         for key, phi in phis.items():
             Ja_n_full = Js[key]
             Ja_n = Ja_n_full[self.q_a_indices]
-            rhs = -phi - self.penetration_tolerance
+            rhs = -phi - self._penetration_tolerance_for_geom_pair(key)
             constraints += [Ja_n @ dqa >= rhs]
 
         # Joint limits constraints (actuated)
@@ -1042,6 +1054,20 @@ class InteractionMeshRetargeter:
             return False
 
         return any(start <= frame_idx <= end for start, end in self._foot_lock_windows.get(side, ()))
+
+    def _penetration_tolerance_for_geom_pair(self, geom_pair: tuple[int, int]) -> float:
+        """Select a non-penetration tolerance for a MuJoCo geom pair."""
+        g1, g2 = geom_pair
+        name1 = self._geom_names[g1].lower()
+        name2 = self._geom_names[g2].lower()
+        if "ground" in name1 or "ground" in name2:
+            return float(self.surface_penetration_tolerance)
+
+        object_name = str(self.object_name or "").lower()
+        if object_name and object_name != "ground" and (object_name in name1 or object_name in name2):
+            return float(self.object_penetration_tolerance)
+
+        return float(self.penetration_tolerance)
 
     def iterate(
         self,

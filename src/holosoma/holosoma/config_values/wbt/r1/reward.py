@@ -4,12 +4,21 @@ from dataclasses import replace
 
 from holosoma.config_types.reward import RewardTermCfg
 from holosoma.config_values.wbt.g1.reward import g1_29dof_wbt_reward_w_object_multi_teacher
-from holosoma.config_values.wbt.r1.contact import R1_OBJECT_CONTACT_THRESHOLD
 
 r1_26dof_wbt_reward_w_object_multi_teacher = replace(
     g1_29dof_wbt_reward_w_object_multi_teacher,
     terms={
         **g1_29dof_wbt_reward_w_object_multi_teacher.terms,
+        "object_global_ref_position_error_exp": replace(
+            g1_29dof_wbt_reward_w_object_multi_teacher.terms["object_global_ref_position_error_exp"],
+            params={
+                **g1_29dof_wbt_reward_w_object_multi_teacher.terms[
+                    "object_global_ref_position_error_exp"
+                ].params,
+                "sigma": 0.6,
+            },
+            weight=3.0,
+        ),
         "undesired_contacts": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:UndesiredContacts",
             params={
@@ -22,14 +31,13 @@ r1_26dof_wbt_reward_w_object_multi_teacher = replace(
             },
             weight=-0.5,
         ),
-        "object_contact_label_distance": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:ObjectContactLabelDistance",
+        "object_point_cloud_distance_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:ObjectPointCloudDistanceExp",
             params={
-                "threshold": R1_OBJECT_CONTACT_THRESHOLD,
-                "contact_body_names_regex": ".*",
-                "fail_on_missing_labels": True,
+                "distance_scale": 10.0,
+                "max_points": 1024,
             },
-            weight=0.5,
+            weight=2.0,
         ),
     },
 )

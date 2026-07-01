@@ -42,7 +42,14 @@ motion_config = MotionConfig(
 motion_config_w_object_multi_teacher = replace(
     motion_config,
     motion_file="",
-    motion_folder="",
+    motion_folder="train_r1/rl",
+    start_at_timestep_zero_prob=0.9,
+    stable_state_reset_ratio=0.3,
+    stable_state_reset_warmup_steps=24000,
+    stable_state_reset_min_alive_steps=48,
+    stable_state_reset_update_interval=24,
+    stable_state_reset_pool_size=65536,
+    stable_state_reset_max_updates_per_step=512,
 )
 
 r1_26dof_wbt_command_w_object_multi_teacher = CommandManagerCfg(

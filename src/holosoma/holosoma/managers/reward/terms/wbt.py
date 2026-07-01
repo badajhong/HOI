@@ -13,9 +13,10 @@ from holosoma.managers.command.terms.wbt import MotionCommand
 from holosoma.managers.object_contact import (
     get_cached_object_surface_distances,
     load_sample_points_by_key,
+    object_keys_for_envs,
 )
 from holosoma.managers.reward.base import RewardTermBase
-from holosoma.utils.rotations import quat_error_magnitude
+from holosoma.utils.rotations import quat_error_magnitude, quaternion_to_matrix
 
 if TYPE_CHECKING:
     from holosoma.envs.wbt.wbt_manager import WholeBodyTrackingManager
@@ -139,6 +140,115 @@ def object_global_ref_orientation_error_exp(env: WholeBodyTrackingManager, sigma
     return torch.exp(-error / sigma**2)
 
 
+class ObjectPointCloudDistanceExp(RewardTermBase):
+    """Reward object pose tracking by comparing sampled object surface points."""
+
+    def __init__(self, cfg: RewardTermCfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+        self.env = env
+        self.initialized = False
+        self.sample_points_by_key: dict[str | None, torch.Tensor] = {}
+
+    def __call__(
+        self,
+        env: WholeBodyTrackingManager,
+        *,
+        sample_points_root: str | None = None,
+        distance_scale: float = 10.0,
+        max_points: int = 1024,
+        **kwargs,
+    ) -> torch.Tensor:
+        motion_command = _get_motion_command_and_assert_type(env)
+        if not self.initialized:
+            self._initialize(motion_command, sample_points_root=sample_points_root, max_points=max_points)
+
+        distances = self._object_point_cloud_distance(env, motion_command)
+        return torch.exp(-float(distance_scale) * distances)
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        pass
+
+    def _initialize(
+        self,
+        motion_command: MotionCommand,
+        *,
+        sample_points_root: str | None,
+        max_points: int,
+    ) -> None:
+        root, sample_points_by_key = load_sample_points_by_key(
+            env=self.env,
+            motion_command=motion_command,
+            sample_points_root=sample_points_root,
+        )
+
+        if max_points > 0:
+            for object_key, sample_points in list(sample_points_by_key.items()):
+                if sample_points.shape[0] <= max_points:
+                    continue
+                indices = torch.linspace(
+                    0,
+                    sample_points.shape[0] - 1,
+                    max_points,
+                    dtype=torch.long,
+                    device=sample_points.device,
+                )
+                sample_points_by_key[object_key] = sample_points.index_select(0, indices)
+
+        self.sample_points_by_key = sample_points_by_key
+        logger.info(
+            "Initialized ObjectPointCloudDistanceExp: "
+            f"objects={list(self.sample_points_by_key.keys())}, sample_points_root={root}, max_points={max_points}"
+        )
+        self.initialized = True
+
+    def _object_point_cloud_distance(
+        self,
+        env: WholeBodyTrackingManager,
+        motion_command: MotionCommand,
+    ) -> torch.Tensor:
+        ref_pos_w = motion_command.object_pos_w
+        if hasattr(motion_command, "object_pos_reward_offset"):
+            ref_pos_w = ref_pos_w + motion_command.object_pos_reward_offset
+        ref_quat_w = motion_command.object_quat_w
+
+        current_pos_w = motion_command.simulator_object_pos_w
+        current_quat_w = motion_command.simulator_object_quat_w
+        ref_rot_w_from_obj = quaternion_to_matrix(ref_quat_w, w_last=True)
+        current_rot_w_from_obj = quaternion_to_matrix(current_quat_w, w_last=True)
+
+        distances = torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
+        object_keys = object_keys_for_envs(motion_command, env.num_envs)
+        object_scales = getattr(env, "object_scale_factors", None)
+
+        for object_key in sorted({key for key in object_keys}):
+            mask = torch.tensor([key == object_key for key in object_keys], dtype=torch.bool, device=env.device)
+            if not torch.any(mask):
+                continue
+
+            local_points = self.sample_points_by_key.get(object_key)
+            if local_points is None:
+                local_points = self.sample_points_by_key.get(None)
+            if local_points is None:
+                raise RuntimeError(f"No object sample points loaded for object key: {object_key}")
+
+            local_points = local_points.to(device=env.device, dtype=torch.float32)
+            if object_scales is not None:
+                points = local_points.unsqueeze(0) * object_scales[mask].to(
+                    device=env.device, dtype=torch.float32
+                ).unsqueeze(1)
+            else:
+                points = local_points.unsqueeze(0).expand(int(mask.sum().item()), -1, -1)
+
+            ref_points_w = torch.bmm(points, ref_rot_w_from_obj[mask].transpose(1, 2)) + ref_pos_w[mask].unsqueeze(1)
+            current_points_w = (
+                torch.bmm(points, current_rot_w_from_obj[mask].transpose(1, 2))
+                + current_pos_w[mask].unsqueeze(1)
+            )
+            distances[mask] = torch.linalg.norm(current_points_w - ref_points_w, dim=-1).mean(dim=-1)
+
+        return distances
+
+
 # ================================================================================================
 # Labeled Object Contact Rewards
 # ================================================================================================
@@ -218,7 +328,7 @@ class ObjectContactLabelDistance(RewardTermBase):
         if not motion_command.has_contact_labels:
             message = (
                 "ObjectContactLabelDistance is enabled but motion_command has no contact labels. "
-                "Generate contact-labeled motion files or set motion_config.contact_file/contact_folder."
+                "Embed contact labels in the motion files or set motion_config.contact_file for a single motion."
             )
             if fail_on_missing_labels:
                 raise RuntimeError(message)

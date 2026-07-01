@@ -85,6 +85,8 @@ class WholeBodyTrackingManager(BaseTask):
         # -------------------------------- terms same with locomotion_manager.py [end]--------------------------------
         # Add tracking metrics to log_dict
         motion_command = self.command_manager.get_state("motion_command")
+        if hasattr(motion_command, "update_stable_state_reset_pool"):
+            motion_command.update_stable_state_reset_pool()
         motion_command.update_metrics()
         self.log_dict.update(motion_command.metrics)
         self._update_motion_start0_log_dict(motion_command)

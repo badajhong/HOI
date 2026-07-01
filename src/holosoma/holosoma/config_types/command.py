@@ -107,12 +107,6 @@ class MotionConfig:
     If empty, contact labels are read from motion_file when present.
     """
 
-    contact_folder: str = ""
-    """Optional folder containing contact-label .npz files aligned with motion_folder.
-
-    If empty, contact labels are read from each motion file when present.
-    """
-
     object_contact_threshold: float | None = None
     """Optional shared object-contact threshold for contact reward and observations.
 
@@ -140,6 +134,27 @@ class MotionConfig:
     """When starting at timestep 0, probability of freezing motion counter at 0 (not advancing).
     This makes the robot practice holding the initial pose. Only applies when episode starts at timestep 0.
     Sampled independently each policy step; expected wait is roughly 1 / (1 - p) steps before unfreezing."""
+
+    stable_state_reset_ratio: float = 0.0
+    """Fraction of reset environments initialized from a pool of states that survived in simulation.
+
+    A value of 0 disables stable-state reset curriculum. The remaining resets still use regular motion-file sampling.
+    """
+
+    stable_state_reset_warmup_steps: int = 0
+    """Number of policy steps before stable-state pool samples are used for reset."""
+
+    stable_state_reset_min_alive_steps: int = 48
+    """Minimum episode length before an alive simulator state may be written into the stable-state pool."""
+
+    stable_state_reset_update_interval: int = 24
+    """Policy-step interval for writing alive simulator states into the stable-state pool."""
+
+    stable_state_reset_pool_size: int = 65536
+    """Maximum number of simulator states stored for stable-state reset curriculum."""
+
+    stable_state_reset_max_updates_per_step: int = 512
+    """Maximum number of alive environments copied into the stable-state pool on one update step."""
 
     enable_default_pose_prepend: bool = True
     """If True, pre-append interpolated frames from default pose to the motion's first pose.

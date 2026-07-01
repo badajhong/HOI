@@ -179,14 +179,16 @@ python examples/robot_retarget.py \
 ```bash
 python examples/robot_retarget.py \
   --data_path demo_data/OMOMO_new \
-  --task-type object_interaction \
-  --task-name sub4_whitechair_030 \
+  --task-type object_interaction_contact \
+  --task-name sub4_whitechair_029 \
   --data_format smplh \
   --task-config.object-name whitechair \
   --retargeter.debug \
   --retargeter.visualize \
   --robot r1 \
-  --retargeter.penetration-tolerance 0.02
+  --retargeter.penetration-tolerance 0.05 \
+  --retargeter.contact-threshold 0.02 \
+  --retargeter.contact-source robot
 ```
 ```bash
 python examples/robot_retarget.py \
@@ -198,6 +200,6 @@ python examples/robot_retarget.py \
   --retargeter.debug \
   --retargeter.visualize \
   --robot r1 \
-  --retargeter.penetration-tolerance 0.02 \
+  --retargeter.penetration-tolerance 0.1 \
   --retargeter.contact-threshold 0.05
 ```

@@ -206,6 +206,27 @@ def motion_command(env: WholeBodyTrackingManager) -> torch.Tensor:
     return motion_command.command
 
 
+def motion_command_future(
+    env: WholeBodyTrackingManager,
+    offsets: tuple[int, ...] | list[int] = (1, 2, 3),
+) -> torch.Tensor:
+    motion_command = _get_motion_command_and_assert_type(env)
+    if len(offsets) == 0:
+        return torch.zeros(env.num_envs, 0, dtype=torch.float32, device=env.device)
+
+    offset_tensor = torch.tensor(offsets, dtype=torch.long, device=env.device)
+    if torch.any(offset_tensor <= 0):
+        raise ValueError(f"motion_command_future offsets must be positive, got {list(offsets)}.")
+
+    future_steps = motion_command.time_steps[:, None] + offset_tensor[None, :]
+    future_steps = torch.minimum(future_steps, motion_command.clip_end_steps[:, None] - 1)
+
+    future_joint_pos = motion_command.motion.joint_pos[future_steps]
+    future_joint_vel = motion_command.motion.joint_vel[future_steps]
+    future_command = torch.cat([future_joint_pos, future_joint_vel], dim=-1)
+    return future_command.reshape(env.num_envs, -1)
+
+
 def motion_command_joint_pos(env: WholeBodyTrackingManager) -> torch.Tensor:
     motion_command_joint_pos = _get_motion_command_and_assert_type(env)
     return motion_command_joint_pos.joint_pos
@@ -428,6 +449,31 @@ class ObjectContactCurrent(ObservationTermBase):
                 f"body_names_regex={body_names_regex!r}"
             )
         return selected
+
+
+class ObjectDistanceCurrent(ObjectContactCurrent):
+    """Current normalized distances from selected robot bodies to the object surface."""
+
+    def __call__(
+        self,
+        env: WholeBodyTrackingManager,
+        *,
+        sample_points_root: str | None = None,
+        distance_clip: float = 0.5,
+        body_names: tuple[str, ...] | list[str] | str | None = None,
+        body_names_regex: str = ".*",
+        **kwargs,
+    ) -> torch.Tensor:
+        return super().__call__(
+            env,
+            sample_points_root=sample_points_root,
+            distance_clip=distance_clip,
+            body_names=body_names,
+            body_names_regex=body_names_regex,
+            include_soft_contact=False,
+            include_distance=True,
+            **kwargs,
+        )
 
 
 def _normalize_ir_surface_feature_body_source(body_source: str) -> str:

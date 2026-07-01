@@ -56,6 +56,18 @@ class RetargeterConfig:
     penetration_tolerance: float = 0.001
     """Tolerance for penetration when enforcing non-penetration constraints."""
 
+    surface_penetration_tolerance: float | None = None
+    """Optional penetration tolerance for ground/surface contacts.
+
+    If None, uses penetration_tolerance.
+    """
+
+    object_penetration_tolerance: float | None = None
+    """Optional penetration tolerance for robot-object contacts.
+
+    If None, uses penetration_tolerance.
+    """
+
     foot_sticking_tolerance: float = 1e-3
     """Tolerance for foot sticking constraints in x, y."""
 

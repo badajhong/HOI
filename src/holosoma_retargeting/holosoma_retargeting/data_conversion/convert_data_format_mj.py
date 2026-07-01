@@ -131,6 +131,8 @@ class MotionLoader:
         self.robot_dof = robot_dof
         self.has_dynamic_object = has_dynamic_object
         self.use_omniretarget_data = use_omniretarget_data
+        self.contact_arrays_input: dict[str, np.ndarray] = {}
+        self.contact_arrays: dict[str, np.ndarray] = {}
         self._load_motion()
         self._interpolate_motion()
         self._compute_velocities()
@@ -145,6 +147,12 @@ class MotionLoader:
                 self.input_fps = round(1 / fps_scalar) if fps_scalar < 1 else round(fps_scalar)
                 self.input_dt = 1.0 / self.input_fps
             motion = torch.from_numpy(data["qpos"]).to(torch.float32)
+            raw_motion_frames = motion.shape[0]
+            self.contact_arrays_input = {
+                key: np.asarray(data[key])
+                for key in data.files
+                if key.startswith("contact_")
+            }
         else:
             raise ValueError("Unsupported motion file format. Use .csv or .npz.")
 
@@ -159,6 +167,10 @@ class MotionLoader:
                 "line_range must select at least 2 frames to compute interpolation/velocities: "
                 f"selected_frames={motion.shape[0]}, start={start}, end={end}"
             )
+            self.contact_arrays_input = {
+                key: value[start : end + 1] if value.ndim > 0 and value.shape[0] == raw_motion_frames else value
+                for key, value in self.contact_arrays_input.items()
+            }
 
         motion = motion.to(torch.float32).to(self.device)
         if self.use_omniretarget_data:
@@ -210,6 +222,7 @@ class MotionLoader:
             self.motion_dof_poss_input[index_1],
             blend.unsqueeze(1),
         )
+        self.contact_arrays = self._resample_contact_arrays(index_0, index_1, blend)
 
         if self.has_dynamic_object:
             self.motion_object_poss = self._lerp(
@@ -227,6 +240,48 @@ class MotionLoader:
             f"{self.input_frames}, input fps: {self.input_fps}, "
             f"output frames: {self.output_frames}, output fps: {self.output_fps}"
         )
+
+    def _resample_contact_arrays(
+        self,
+        index_0: torch.Tensor,
+        index_1: torch.Tensor,
+        blend: torch.Tensor,
+    ) -> dict[str, np.ndarray]:
+        """Resample contact arrays to the converted output timeline."""
+        if not self.contact_arrays_input:
+            return {}
+
+        idx0 = index_0.cpu().numpy()
+        idx1 = index_1.cpu().numpy()
+        blend_np = blend.cpu().numpy()
+        output: dict[str, np.ndarray] = {}
+        threshold_array = self.contact_arrays_input.get("contact_object_threshold_m")
+        threshold = float(np.asarray(threshold_array)) if threshold_array is not None else None
+
+        for key, value in self.contact_arrays_input.items():
+            if value.ndim > 0 and value.shape[0] == self.input_frames:
+                if value.dtype == np.bool_:
+                    nearest = np.where(blend_np < 0.5, idx0, idx1)
+                    output[key] = value[nearest].astype(bool, copy=False)
+                elif np.issubdtype(value.dtype, np.floating):
+                    blend_shape = (self.output_frames,) + (1,) * (value.ndim - 1)
+                    blend_view = blend_np.reshape(blend_shape)
+                    output[key] = ((1.0 - blend_view) * value[idx0] + blend_view * value[idx1]).astype(
+                        value.dtype,
+                        copy=False,
+                    )
+                else:
+                    nearest = np.where(blend_np < 0.5, idx0, idx1)
+                    output[key] = value[nearest]
+            else:
+                output[key] = value
+
+        distance = output.get("contact_object_distance")
+        label = output.get("contact_object_label")
+        if threshold is not None and distance is not None and label is not None and distance.shape == label.shape:
+            output["contact_object_label"] = distance <= threshold
+
+        return output
 
     def _lerp(self, a: torch.Tensor, b: torch.Tensor, blend: torch.Tensor) -> torch.Tensor:
         """Linear interpolation between two tensors."""
@@ -604,6 +659,7 @@ def run_simulator(args_cli: DataConversionConfig):
                 log["joint_names"] = joint_names[1:]  # remove the root free joint name
 
             log["body_names"] = body_names
+            log.update(motion.contact_arrays)
 
             if args_cli.output_name is None:
                 raise ValueError("output_name cannot be None")

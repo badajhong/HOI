@@ -36,13 +36,17 @@ run_task() {
 
   local args=(
     --data_path demo_data/OMOMO_new
-    --task-type object_interaction
+    --task-type object_interaction_contact
     --task-name "$task_name"
     --data_format smplh
     --save_dir "${save_dir}"
     --task-config.object-name "$object_name"
     --robot r1
-    --retargeter.penetration-tolerance 0.02
+    --retargeter.penetration-tolerance 0.0
+    --retargeter.surface-penetration-tolerance 0.0
+    --retargeter.object-penetration-tolerance 0.02
+    --retargeter.contact-threshold 0.01
+    --retargeter.contact-source robot
   )
 
   if [[ "${DEBUG}" == "1" ]]; then

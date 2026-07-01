@@ -181,44 +181,13 @@ nohup bash scripts/setup_mujoco.sh \
            r1
 ############################
 
-# Generate SMPLH-intended object contact labels for the converted RL motions.
-R1_CONTACT_JOINT_REGEX='^(Pelvis|L_Hip|R_Hip|L_Knee|R_Knee|L_Shoulder|R_Shoulder|L_Elbow|R_Elbow|L_Ankle|R_Ankle|L_Toe|R_Toe|L_Wrist|R_Wrist|L_Index[123]|L_Middle[123]|L_Pinky[123]|L_Ring[123]|L_Thumb[123]|R_Index[123]|R_Middle[123]|R_Pinky[123]|R_Ring[123]|R_Thumb[123])$'
-
-python src/holosoma_retargeting/holosoma_retargeting/data_utils/label_object_contacts.py \
-    --input train_r1/rl \
-    --output train_r1/rl_contact_labeled \
-    --human-reference-root train_r1/motions \
-    --object-root train_r1/objects \
-    --robot-type r1 \
-    --human-joint-regex "$R1_CONTACT_JOINT_REGEX" \
-    --threshold 0.05 \
-    --overwrite
-
 nohup xvfb-run -a python src/holosoma/holosoma/train_agent.py \
     exp:r1-teacher \
-    logger:wandb \
-    --training.project teacher \
-    --command.setup-terms.motion-command.params.motion-config.motion-folder="./train_r1/rl" \
-    --command.setup-terms.motion-command.params.motion-config.contact-folder="./train_r1/rl_contact_labeled" \
-    --command.setup-terms.motion-command.params.motion-config.object-contact-threshold 0.05 \
-    --command.setup-terms.motion-command.params.motion-config.hard-motion-sampling-ratio 0.3 \
-    --command.setup-terms.motion-command.params.motion-config.hard-motion-sampling-ema-alpha 0.1 \
-    --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob 0.4 \
-    --robot.object.object-urdf-asset="./train_r1/objects" \
-    --robot.object.object-parm="./train_r1/objects/objects_parm.yaml" \
-    --robot.control.action-scale 0.5 \
-    --training.num-envs 4096 \
-    --algo.config.save-interval 1000 \
-    --algo.config.module-dict.actor.layer-config.hidden-dims '[1024,512,256,128]' \
-    --algo.config.module-dict.critic.layer-config.hidden-dims '[1024,512,256,128]' \
-    --termination.terms.bad-tracking.params.bad-object-pos-threshold 0.4 \
-    --reward.terms.object-global-ref-position-error-exp.params.sigma 0.6 \
-    --reward.terms.object-global-ref-position-error-exp.weight 3.0 \
-    --simulator.config.scene.env-spacing 5.0 \
-    --simulator.config.sim.physx.gpu-max-rigid-patch-count 524288 \
-    --logger.video.interval 100 \
-    --logger.video.camera.offset '[3.0, -3.0, 1.5]' \
-    --training.checkpoint ./logs/teacher/20260625_070902-r1_teacher-locomotion/model_12000.pt \
+    --training.num-envs 2048 \
+    --command.setup-terms.motion-command.params.motion-config.stable-state-reset-ratio 0.3 \
+    --command.setup-terms.motion-command.params.motion-config.stable-state-reset-warmup-steps 24000 \
+    --command.setup-terms.motion-command.params.motion-config.stable-state-reset-min-alive-steps 48 \
+    --command.setup-terms.motion-command.params.motion-config.stable-state-reset-update-interval 24 \
+    --command.setup-terms.motion-command.params.motion-config.stable-state-reset-pool-size 65536 \
+    --command.setup-terms.motion-command.params.motion-config.stable-state-reset-max-updates-per-step 512 \
     > train_output.log 2>&1 &
-
-#    --training.checkpoint ./logs/teacher/20260625_031621-r1_teacher-locomotion/model_02000.pt

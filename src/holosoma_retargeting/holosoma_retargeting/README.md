@@ -288,31 +288,10 @@ python data_utils/label_object_contacts.py \
   --overwrite
 ```
 
-For the R1 training folders in the main Holosoma workspace, run from the repository root:
-
-```bash
-R1_CONTACT_JOINT_REGEX='^(Pelvis|L_Hip|R_Hip|L_Knee|R_Knee|L_Shoulder|R_Shoulder|L_Elbow|R_Elbow|L_Ankle|R_Ankle|L_Toe|R_Toe|L_Wrist|R_Wrist|L_HandCenter|R_HandCenter|L_Index[123]|L_Middle[123]|L_Pinky[123]|L_Ring[123]|L_Thumb[123]|R_Index[123]|R_Middle[123]|R_Pinky[123]|R_Ring[123]|R_Thumb[123])$'
-
-python src/holosoma_retargeting/holosoma_retargeting/data_utils/label_object_contacts.py \
-  --input train_r1/rl \
-  --output train_r1/rl_contact_labeled \
-  --human-reference-root train_r1/motions \
-  --object-root train_r1/objects \
-  --robot-type r1 \
-  --human-joint-regex "$R1_CONTACT_JOINT_REGEX" \
-  --threshold 0.05 \
-  --overwrite
-```
-
-This R1 regex selects the full SMPLH-to-R1 mapped major body set from `config_types/data_type.py`, plus SMPLH fingers and the virtual hand centers. With `--robot-type r1`, hand-center contacts map directly to `left_hand_contact_link` / `right_hand_contact_link`; finger contacts also collapse to those hand-contact proxy links when available.
-
-When training the R1 teacher with these contact labels, keep the runtime threshold in the motion command config so the same value is shared by the object-contact reward and actor/critic current-contact observations:
-
-```bash
---command.setup-terms.motion-command.params.motion-config.object-contact-threshold 0.05
-```
-
-Use `--source robot` only for diagnostics when you want to measure contact from the retargeted robot trajectory itself.
+For the current R1 teacher setup, contact labels are not consumed during RL training. The training config reads
+`train_r1/rl` directly and uses object distance observations plus object point-cloud distance reward instead of a
+separate contact-label folder, current-contact observations, or contact-label reward. Use `--source robot` only for
+diagnostics when you want to measure contact from the retargeted robot trajectory itself.
 
 ### OmniRetarget Data
 
