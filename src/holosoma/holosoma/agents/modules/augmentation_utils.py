@@ -124,12 +124,13 @@ class SymmetryUtils:
                 # Store the base dimension (without history)
                 self.sub_observation_dims[term_name] = term_dim
 
-                # Create indices for this term in the concatenated observation
-                # Account for history at group level
-                if group_cfg.history_length > 1:
-                    term_dim_with_history = term_dim * group_cfg.history_length
-                else:
-                    term_dim_with_history = term_dim
+                # Create indices for this term in the concatenated observation.
+                # Account for group-level history or a term-level override.
+                term_history_length = getattr(term_cfg, "history_length", None)
+                history_length = (
+                    int(term_history_length) if isinstance(term_history_length, int) else int(group_cfg.history_length)
+                )
+                term_dim_with_history = term_dim * history_length
 
                 # Indices for full observation (with history flattened)
                 self.sub_observation_indices[group_name][term_name] = torch.arange(

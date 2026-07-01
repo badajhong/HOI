@@ -13,7 +13,7 @@ from holosoma.managers.command.terms.wbt import MotionCommand
 from holosoma.managers.object_contact import (
     get_cached_object_surface_distances,
     load_sample_points_by_key,
-    object_keys_for_envs,
+    object_key_masks_for_envs,
 )
 from holosoma.managers.reward.base import RewardTermBase
 from holosoma.utils.rotations import quat_error_magnitude, quaternion_to_matrix
@@ -217,14 +217,9 @@ class ObjectPointCloudDistanceExp(RewardTermBase):
         current_rot_w_from_obj = quaternion_to_matrix(current_quat_w, w_last=True)
 
         distances = torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
-        object_keys = object_keys_for_envs(motion_command, env.num_envs)
         object_scales = getattr(env, "object_scale_factors", None)
 
-        for object_key in sorted({key for key in object_keys}):
-            mask = torch.tensor([key == object_key for key in object_keys], dtype=torch.bool, device=env.device)
-            if not torch.any(mask):
-                continue
-
+        for object_key, mask in object_key_masks_for_envs(motion_command, env.num_envs, env.device):
             local_points = self.sample_points_by_key.get(object_key)
             if local_points is None:
                 local_points = self.sample_points_by_key.get(None)
@@ -232,17 +227,24 @@ class ObjectPointCloudDistanceExp(RewardTermBase):
                 raise RuntimeError(f"No object sample points loaded for object key: {object_key}")
 
             local_points = local_points.to(device=env.device, dtype=torch.float32)
+            selected_ref_pos_w = ref_pos_w[mask]
+            selected_ref_rot_w_from_obj = ref_rot_w_from_obj[mask]
+            selected_current_pos_w = current_pos_w[mask]
+            selected_current_rot_w_from_obj = current_rot_w_from_obj[mask]
             if object_scales is not None:
                 points = local_points.unsqueeze(0) * object_scales[mask].to(
                     device=env.device, dtype=torch.float32
                 ).unsqueeze(1)
             else:
-                points = local_points.unsqueeze(0).expand(int(mask.sum().item()), -1, -1)
+                points = local_points.unsqueeze(0).expand(selected_ref_pos_w.shape[0], -1, -1)
 
-            ref_points_w = torch.bmm(points, ref_rot_w_from_obj[mask].transpose(1, 2)) + ref_pos_w[mask].unsqueeze(1)
+            ref_points_w = (
+                torch.bmm(points, selected_ref_rot_w_from_obj.transpose(1, 2))
+                + selected_ref_pos_w.unsqueeze(1)
+            )
             current_points_w = (
-                torch.bmm(points, current_rot_w_from_obj[mask].transpose(1, 2))
-                + current_pos_w[mask].unsqueeze(1)
+                torch.bmm(points, selected_current_rot_w_from_obj.transpose(1, 2))
+                + selected_current_pos_w.unsqueeze(1)
             )
             distances[mask] = torch.linalg.norm(current_points_w - ref_points_w, dim=-1).mean(dim=-1)
 

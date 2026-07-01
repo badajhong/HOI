@@ -69,9 +69,10 @@ class ObservationManager:
                     # Stateless function
                     self._term_funcs[group_name][term_name] = func
 
-                # Initialize history buffer if needed (using group-level history_length)
-                if group_cfg.history_length > 1:
-                    self._history_buffers[group_name][term_name] = deque(maxlen=group_cfg.history_length)
+                # Initialize history buffer if needed. Terms may override the group-level history length.
+                history_length = self._term_history_length(group_cfg, term_cfg)
+                if history_length > 1:
+                    self._history_buffers[group_name][term_name] = deque(maxlen=history_length)
 
     def compute(self, *, modify_history: bool = True) -> dict[str, torch.Tensor | dict[str, torch.Tensor]]:
         """Compute all observation groups.
@@ -142,8 +143,15 @@ class ObservationManager:
                     obs = obs.clip(term_cfg.clip[0], term_cfg.clip[1])
 
                 # 5. Handle history buffering
-                if group_cfg.history_length > 1:
-                    obs = self._apply_history(group_name, term_name, obs, group_cfg, modify_buffer=modify_history)
+                history_length = self._term_history_length(group_cfg, term_cfg)
+                if history_length > 1:
+                    obs = self._apply_history(
+                        group_name,
+                        term_name,
+                        obs,
+                        history_length,
+                        modify_buffer=modify_history,
+                    )
 
                 obs_tensors[term_name] = obs
 
@@ -233,8 +241,22 @@ class ObservationManager:
         """
         return obs * scale
 
+    @staticmethod
+    def _term_history_length(group_cfg: ObsGroupCfg, term_cfg: ObsTermCfg) -> int:
+        history_length = group_cfg.history_length if term_cfg.history_length is None else term_cfg.history_length
+        history_length = int(history_length)
+        if history_length < 1:
+            raise ValueError(f"Observation history_length must be >= 1, got {history_length}.")
+        return history_length
+
     def _apply_history(
-        self, group_name: str, term_name: str, obs: torch.Tensor, group_cfg: ObsGroupCfg, *, modify_buffer: bool = True
+        self,
+        group_name: str,
+        term_name: str,
+        obs: torch.Tensor,
+        history_length: int,
+        *,
+        modify_buffer: bool = True,
     ) -> torch.Tensor:
         """Apply history buffering to an observation term.
 
@@ -249,8 +271,8 @@ class ObservationManager:
             Name of the observation term.
         obs : torch.Tensor
             Current observation tensor with shape ``[num_envs, obs_dim]``.
-        group_cfg : ObsGroupCfg
-            Configuration for the observation group (contains ``history_length``).
+        history_length : int
+            Number of observations to retain for this term.
         modify_buffer : bool, optional
             If ``True``, append to the history buffer; if ``False``, preserve the
             buffer contents. Defaults to ``True``.
@@ -270,17 +292,17 @@ class ObservationManager:
             # Don't modify buffer - create temporary history with current obs
             history = list(buffer) + [obs]
             # Trim to history_length if needed
-            if len(history) > group_cfg.history_length:
-                history = history[-group_cfg.history_length :]
+            if len(history) > history_length:
+                history = history[-history_length:]
 
         # If buffer not full yet, pad with zeros (same as direct behavior)
-        if len(history) < group_cfg.history_length:
-            num_missing = group_cfg.history_length - len(history)
+        if len(history) < history_length:
+            num_missing = history_length - len(history)
             obs_dim = obs.shape[1]
             padding = [torch.zeros(self.env.num_envs, obs_dim, device=self.device) for _ in range(num_missing)]
             history = padding + history
 
-        # Stack along time dimension: [num_envs, history_length, obs_dim]
+        # Stack along time dimension: [num_envs, term_history_length, obs_dim]
         stacked = torch.stack(history, dim=1)
 
         # Flatten to [num_envs, history_length * obs_dim]
@@ -365,17 +387,19 @@ class ObservationManager:
                     obs = self._compute_term(group_name, term_name, term_cfg, modify_history=False)
                     term_dim = obs.shape[1]
 
-                    # Account for history at group level
-                    if group_cfg.history_length > 1:
-                        term_dim *= group_cfg.history_length
+                    # Account for group-level history or a term-level override.
+                    history_length = self._term_history_length(group_cfg, term_cfg)
+                    if history_length > 1:
+                        term_dim *= history_length
 
                     total_dim += term_dim
                 dims[group_name] = total_dim
             else:
                 # Return dict of individual dimensions
-                term_dims: dict[str, int] = {
-                    term_name: self._compute_term(group_name, term_name, term_cfg, modify_history=False).shape[1]
-                    for term_name, term_cfg in group_cfg.terms.items()
-                }
+                term_dims: dict[str, int] = {}
+                for term_name, term_cfg in group_cfg.terms.items():
+                    term_dim = self._compute_term(group_name, term_name, term_cfg, modify_history=False).shape[1]
+                    term_dim *= self._term_history_length(group_cfg, term_cfg)
+                    term_dims[term_name] = term_dim
                 dims[group_name] = term_dims
         return dims

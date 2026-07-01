@@ -330,14 +330,20 @@ def object_randomization_privileged(env: WholeBodyTrackingManager) -> torch.Tens
     output = torch.zeros(env.num_envs, 13, device=env.device, dtype=torch.float32)
 
     physics_by_key = getattr(env, "object_randomization_privileged_by_key", None) or {}
-    object_keys = _object_keys_for_envs(motion_command, env.num_envs)
-    for object_key in sorted({key for key in object_keys if key is not None}):
+    object_key_to_id = getattr(motion_command, "object_key_to_id", None) or {}
+    object_type_ids = getattr(motion_command, "object_type_ids", None)
+    for object_key in sorted(physics_by_key.keys()):
         physics = physics_by_key.get(object_key)
         if physics is None:
             continue
-        mask = torch.tensor([key == object_key for key in object_keys], device=env.device, dtype=torch.bool)
-        if mask.any():
-            output[mask, :10] = physics.to(device=env.device, dtype=torch.float32)[mask]
+        if object_key_to_id and object_type_ids is not None:
+            object_type_id = object_key_to_id.get(object_key)
+            if object_type_id is None:
+                continue
+            mask = object_type_ids == int(object_type_id)
+        else:
+            mask = torch.ones(env.num_envs, device=env.device, dtype=torch.bool)
+        output[mask, :10] = physics.to(device=env.device, dtype=torch.float32)[mask]
 
     object_spawn_offset = getattr(motion_command, "object_pos_reward_offset", None)
     if object_spawn_offset is not None:

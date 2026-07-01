@@ -9,6 +9,10 @@ r1_26dof_wbt_reward_w_object_multi_teacher = replace(
     g1_29dof_wbt_reward_w_object_multi_teacher,
     terms={
         **g1_29dof_wbt_reward_w_object_multi_teacher.terms,
+        "action_rate_l2": replace(
+            g1_29dof_wbt_reward_w_object_multi_teacher.terms["action_rate_l2"],
+            weight=-0.5,
+        ),
         "object_global_ref_position_error_exp": replace(
             g1_29dof_wbt_reward_w_object_multi_teacher.terms["object_global_ref_position_error_exp"],
             params={

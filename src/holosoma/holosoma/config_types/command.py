@@ -136,10 +136,14 @@ class MotionConfig:
     Sampled independently each policy step; expected wait is roughly 1 / (1 - p) steps before unfreezing."""
 
     stable_state_reset_ratio: float = 0.0
-    """Fraction of reset environments initialized from a pool of states that survived in simulation.
+    """Maximum fraction of reset environments initialized from a pool of states that survived in simulation.
 
-    A value of 0 disables stable-state reset curriculum. The remaining resets still use regular motion-file sampling.
+    A value of 0 disables stable-state reset curriculum. When adaptive reset is enabled, this is only an upper bound;
+    the applied ratio is reduced automatically while tracking is unstable.
     """
+
+    stable_state_reset_adaptive: bool = True
+    """If True, gate stable-state reset by pool fill, average episode length, and recent bad-tracking rate."""
 
     stable_state_reset_warmup_steps: int = 0
     """Number of policy steps before stable-state pool samples are used for reset."""
@@ -153,8 +157,41 @@ class MotionConfig:
     stable_state_reset_pool_size: int = 65536
     """Maximum number of simulator states stored for stable-state reset curriculum."""
 
+    stable_state_reset_per_clip_pool_size: int = 0
+    """Maximum number of simulator states stored per motion clip.
+
+    A value of 0 derives a balanced per-clip capacity from stable_state_reset_pool_size and the number of clips.
+    """
+
     stable_state_reset_max_updates_per_step: int = 512
     """Maximum number of alive environments copied into the stable-state pool on one update step."""
+
+    stable_state_reset_min_pool_fill_ratio: float = 0.02
+    """Minimum pool fill ratio before adaptive stable-state reset may sample from the pool."""
+
+    stable_state_reset_full_pool_fill_ratio: float = 0.10
+    """Pool fill ratio where the adaptive pool-fill factor reaches 1."""
+
+    stable_state_reset_min_average_episode_length: float = 0.0
+    """Minimum average episode length before adaptive stable-state reset may write/use the pool.
+
+    A value of 0 derives the threshold from stable_state_reset_min_alive_steps.
+    """
+
+    stable_state_reset_full_average_episode_length: float = 0.0
+    """Average episode length where the adaptive episode-length factor reaches 1.
+
+    A value of 0 derives the threshold from stable_state_reset_min_average_episode_length.
+    """
+
+    stable_state_reset_bad_tracking_rate_threshold: float = 0.35
+    """Disable adaptive stable-state reset while recent bad-tracking termination rate is above this value.
+
+    A value of 0 disables this gate.
+    """
+
+    stable_state_reset_bad_tracking_ema_alpha: float = 0.05
+    """EMA update rate for the recent bad-tracking termination rate used by adaptive stable-state reset."""
 
     enable_default_pose_prepend: bool = True
     """If True, pre-append interpolated frames from default pose to the motion's first pose.

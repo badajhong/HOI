@@ -34,6 +34,29 @@ def _object_mesh_rel_path(robot_dir: Path, obj_file: Path, base_xml: str) -> str
     return os.path.relpath(obj_file.resolve(), mesh_base_dir).replace(os.sep, "/")
 
 
+def _extra_object_geoms_xml(obj_name: str) -> str:
+    if obj_name != "suitcase":
+        return ""
+
+    wheel_positions = (
+        (-0.0236, -0.3, 0.1623),
+        (0.1629, -0.3, -0.0188),
+        (-0.1629, -0.3, 0.0188),
+        (0.0236, -0.3, -0.1623),
+    )
+    return "".join(
+        f"""
+        <geom name="suitcase_wheel_{idx}" type="sphere" size="0.02"
+                contype="1" conaffinity="1"
+                pos="{x:g} {y:g} {z:g}"
+                rgba="0.08 0.08 0.08 1"
+                friction="0.9 0.5 0.5"
+                solref="0.02 1"
+                solimp="0.9 0.95 0.001"/>"""
+        for idx, (x, y, z) in enumerate(wheel_positions)
+    )
+
+
 def generate_object_xml(base_xml: str, obj_name: str, obj_rel_path: str) -> str:
     """Generate a combined R1 robot + object MuJoCo XML."""
     xml = base_xml
@@ -61,6 +84,7 @@ def generate_object_xml(base_xml: str, obj_name: str, obj_rel_path: str) -> str:
                 friction="0.9 0.5 0.5"
                 solref="0.02 1"
                 solimp="0.9 0.95 0.001"/>
+{_extra_object_geoms_xml(obj_name)}
     </body>
 
     <light name="sun" pos="0 0 5" dir="0 0 -1" directional="true"

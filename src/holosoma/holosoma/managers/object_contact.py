@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Mapping, Sequence
+from typing import TYPE_CHECKING, Iterator, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -55,6 +55,24 @@ def object_keys_for_envs(motion_command: MotionCommand, num_envs: int) -> list[s
     id_to_key = {int(idx): key for key, idx in object_key_to_id.items()}
     object_type_ids = motion_command.object_type_ids.detach().cpu().tolist()
     return [id_to_key.get(int(type_id)) for type_id in object_type_ids]
+
+
+def object_key_masks_for_envs(
+    motion_command: MotionCommand,
+    num_envs: int,
+    device: torch.device | str,
+) -> Iterator[tuple[str | None, torch.Tensor]]:
+    """Yield active object keys with GPU masks for the envs using each object."""
+    object_key_to_id = getattr(motion_command, "object_key_to_id", None) or {}
+    object_type_ids = getattr(motion_command, "object_type_ids", None)
+    if object_key_to_id and object_type_ids is not None:
+        object_type_ids = object_type_ids.to(device=device)
+        for object_key, object_type_id in sorted(object_key_to_id.items(), key=lambda item: str(item[0])):
+            yield object_key, object_type_ids == int(object_type_id)
+        return
+
+    key = motion_command.motion.clip_object_keys[0] if motion_command.motion.clip_object_keys else None
+    yield key, torch.ones(num_envs, dtype=torch.bool, device=device)
 
 
 def resolve_sample_points_path(root: Path, object_key: str | None) -> Path:
@@ -158,13 +176,8 @@ def get_cached_object_surface_distances(
         device=env.device,
     )
 
-    object_keys = object_keys_for_envs(motion_command, env.num_envs)
     object_scales = getattr(env, "object_scale_factors", None)
-    for object_key in sorted({key for key in object_keys}):
-        mask = torch.tensor([key == object_key for key in object_keys], dtype=torch.bool, device=env.device)
-        if not torch.any(mask):
-            continue
-
+    for object_key, mask in object_key_masks_for_envs(motion_command, env.num_envs, env.device):
         sample_points = sample_points_by_key.get(object_key)
         if sample_points is None:
             sample_points = sample_points_by_key.get(None)

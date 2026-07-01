@@ -25,7 +25,7 @@ r1_26dof_wbt_termination = TerminationManagerCfg(
                     "left_wrist_roll_link",
                     "right_wrist_roll_link",
                 ],
-                "bad_object_pos_threshold": 0.4,
+                "bad_object_pos_threshold": 0.2,
                 "bad_object_ori_threshold": 0.8,
             },
         ),

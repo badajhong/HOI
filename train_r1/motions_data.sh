@@ -43,8 +43,8 @@ run_task() {
     --task-config.object-name "$object_name"
     --robot r1
     --retargeter.penetration-tolerance 0.0
-    --retargeter.surface-penetration-tolerance 0.0
-    --retargeter.object-penetration-tolerance 0.02
+    --retargeter.surface-penetration-tolerance 0.00
+    --retargeter.object-penetration-tolerance 0.05
     --retargeter.contact-threshold 0.01
     --retargeter.contact-source robot
   )

@@ -27,6 +27,9 @@ class ObsTermCfg:
     clip: tuple[float, float] | None = None
     """Optional min/max clip bounds applied after scaling."""
 
+    history_length: int | None = None
+    """Optional term-level history length. If None, the observation group history length is used."""
+
 
 @dataclass(frozen=True)
 class ObsGroupCfg:

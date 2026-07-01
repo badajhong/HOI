@@ -180,6 +180,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-motions", action="store_true")
     parser.add_argument("--skip-objects", action="store_true")
     parser.add_argument("--skip-retargeting-models", action="store_true")
+    parser.add_argument(
+        "--write-retargeting-xmls",
+        dest="write_retargeting_xmls",
+        action="store_true",
+        default=True,
+        help="Write robot-object XML scene files under --retargeting-models-root (default).",
+    )
+    parser.add_argument(
+        "--skip-retargeting-xmls",
+        dest="write_retargeting_xmls",
+        action="store_false",
+        help="Do not write robot-object XML scene files under --retargeting-models-root.",
+    )
     parser.add_argument("--skip-object-parm", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -772,6 +785,7 @@ def convert_object(
     skip_r1: bool,
     skip_g1: bool,
     skip_retargeting_models: bool,
+    write_retargeting_xmls: bool,
 ) -> list[Path]:
     source_obj = resolve_source_obj(sugar_root, source_object_name)
     object_dirs: list[Path] = []
@@ -789,10 +803,11 @@ def convert_object(
             overwrite,
             dry_run,
         )
-        if not skip_r1:
-            write_r1_scene_xml(retargeting_models_root, object_name, overwrite, dry_run)
-        if not skip_g1:
-            write_g1_scene_xml(retargeting_models_root, object_name, overwrite, dry_run)
+        if write_retargeting_xmls:
+            if not skip_r1:
+                write_r1_scene_xml(retargeting_models_root, object_name, overwrite, dry_run)
+            if not skip_g1:
+                write_g1_scene_xml(retargeting_models_root, object_name, overwrite, dry_run)
     return object_dirs
 
 
@@ -910,6 +925,7 @@ def main() -> None:
                 skip_r1=args.skip_r1,
                 skip_g1=args.skip_g1,
                 skip_retargeting_models=args.skip_retargeting_models,
+                write_retargeting_xmls=args.write_retargeting_xmls,
             )
             print(f"[object] {object_name}: {', '.join(str(path) for path in object_dirs)}")
 

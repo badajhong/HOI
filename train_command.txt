@@ -183,11 +183,5 @@ nohup bash scripts/setup_mujoco.sh \
 
 nohup xvfb-run -a python src/holosoma/holosoma/train_agent.py \
     exp:r1-teacher \
-    --training.num-envs 2048 \
-    --command.setup-terms.motion-command.params.motion-config.stable-state-reset-ratio 0.3 \
-    --command.setup-terms.motion-command.params.motion-config.stable-state-reset-warmup-steps 24000 \
-    --command.setup-terms.motion-command.params.motion-config.stable-state-reset-min-alive-steps 48 \
-    --command.setup-terms.motion-command.params.motion-config.stable-state-reset-update-interval 24 \
-    --command.setup-terms.motion-command.params.motion-config.stable-state-reset-pool-size 65536 \
-    --command.setup-terms.motion-command.params.motion-config.stable-state-reset-max-updates-per-step 512 \
+    --training.num-envs 4096 \
     > train_output.log 2>&1 &

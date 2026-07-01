@@ -458,13 +458,19 @@ class IsaacSim(BaseSimulator):
                     grounded_init_z *= float(self.object_spawn_scale[2])
                 else:
                     grounded_init_z *= float(self.object_spawn_scale)
+            local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+            usd_conversion_dir = os.path.abspath(
+                os.path.join(os.path.dirname(urdf_path), f"converted_rank{local_rank}")
+            )
             return RigidObjectCfg(
                 prim_path=f"/World/envs/env_.*/{actor_name}",
                 spawn=sim_utils.UrdfFileCfg(
+                    usd_dir=usd_conversion_dir,
                     fix_base=False,
                     replace_cylinders_with_capsules=True,
                     asset_path=urdf_path,
                     scale=self.object_spawn_scale,
+                    force_usd_conversion=True,
                     activate_contact_sensors=True,
                     rigid_props=sim_utils.RigidBodyPropertiesCfg(
                         disable_gravity=False,

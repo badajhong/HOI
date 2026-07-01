@@ -43,13 +43,20 @@ motion_config_w_object_multi_teacher = replace(
     motion_config,
     motion_file="",
     motion_folder="train_r1/rl",
-    start_at_timestep_zero_prob=0.9,
+    start_at_timestep_zero_prob=0.8,
     stable_state_reset_ratio=0.3,
+    stable_state_reset_adaptive=True,
     stable_state_reset_warmup_steps=24000,
     stable_state_reset_min_alive_steps=48,
-    stable_state_reset_update_interval=24,
+    stable_state_reset_update_interval=48,
     stable_state_reset_pool_size=65536,
-    stable_state_reset_max_updates_per_step=512,
+    stable_state_reset_max_updates_per_step=128,
+    stable_state_reset_min_pool_fill_ratio=0.02,
+    stable_state_reset_full_pool_fill_ratio=0.10,
+    stable_state_reset_min_average_episode_length=96.0,
+    stable_state_reset_full_average_episode_length=240.0,
+    stable_state_reset_bad_tracking_rate_threshold=0.35,
+    stable_state_reset_bad_tracking_ema_alpha=0.05,
 )
 
 r1_26dof_wbt_command_w_object_multi_teacher = CommandManagerCfg(

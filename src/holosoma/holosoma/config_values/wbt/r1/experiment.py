@@ -13,6 +13,7 @@ r1_teacher_algo = replace(
     g1_29dof_wbt_w_object_multi_teacher.algo,
     config=replace(
         g1_29dof_wbt_w_object_multi_teacher.algo.config,
+        init_noise_std=0.5,
         save_interval=1000,
         module_dict=replace(
             g1_29dof_wbt_w_object_multi_teacher.algo.config.module_dict,
@@ -79,8 +80,8 @@ r1_teacher = replace(
             object_urdf_path="train_r1/objects/largebox/largebox.urdf",
             object_parm="train_r1/objects/objects_parm.yaml",
         ),
-        control=replace(robot.r1_26dof_w_object_multi_teacher.control, action_scale=0.5),
-        init_state=replace(robot.r1_26dof_w_object_multi_teacher.init_state, pos=[0.0, 0.0, 0.72]),
+        control=replace(robot.r1_26dof_w_object_multi_teacher.control, action_scale=0.25),
+        init_state=replace(robot.r1_26dof_w_object_multi_teacher.init_state, pos=[0.0, 0.0, 0.76]),
     ),
     algo=r1_teacher_algo,
     logger=r1_teacher_logger,

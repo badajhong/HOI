@@ -323,6 +323,35 @@
                 friction="0.9 0.5 0.5"
                 solref="0.02 1"
                 solimp="0.9 0.95 0.001"/>
+
+        <geom name="suitcase_wheel_0" type="sphere" size="0.02"
+                contype="1" conaffinity="1"
+                pos="-0.0236 -0.3 0.1623"
+                rgba="0.08 0.08 0.08 1"
+                friction="0.9 0.5 0.5"
+                solref="0.02 1"
+                solimp="0.9 0.95 0.001"/>
+        <geom name="suitcase_wheel_1" type="sphere" size="0.02"
+                contype="1" conaffinity="1"
+                pos="0.1629 -0.3 -0.0188"
+                rgba="0.08 0.08 0.08 1"
+                friction="0.9 0.5 0.5"
+                solref="0.02 1"
+                solimp="0.9 0.95 0.001"/>
+        <geom name="suitcase_wheel_2" type="sphere" size="0.02"
+                contype="1" conaffinity="1"
+                pos="-0.1629 -0.3 0.0188"
+                rgba="0.08 0.08 0.08 1"
+                friction="0.9 0.5 0.5"
+                solref="0.02 1"
+                solimp="0.9 0.95 0.001"/>
+        <geom name="suitcase_wheel_3" type="sphere" size="0.02"
+                contype="1" conaffinity="1"
+                pos="0.0236 -0.3 -0.1623"
+                rgba="0.08 0.08 0.08 1"
+                friction="0.9 0.5 0.5"
+                solref="0.02 1"
+                solimp="0.9 0.95 0.001"/>
     </body>
 
     <light name="sun" pos="0 0 5" dir="0 0 -1" directional="true"
