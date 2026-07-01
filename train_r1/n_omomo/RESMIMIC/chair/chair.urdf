@@ -1,0 +1,29 @@
+<?xml version="1.0" ?>
+<robot name="chair">
+   <material name="chair_color">
+      <color rgba="0.8 0.6 0.4 0.5"/>
+   </material>
+   
+   <link name="chair_link">
+      <inertial>
+         <origin rpy="0 0 0" xyz="0 0 0"/>
+         <mass value="4.0"/>
+         <inertia ixx="0.1" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.1"/>
+      </inertial>
+      
+      <visual>
+         <origin rpy="0 0 0" xyz="0 0 0"/>
+         <geometry>
+            <mesh filename="chair.obj" scale="1 1 1"/>
+         </geometry>
+         <material name="chair_color"/>
+      </visual>
+      
+      <collision name="chair_collision">
+         <origin rpy="0 0 0" xyz="0 0 0"/>
+         <geometry>
+            <mesh filename="chair.obj" scale="1 1 1"/>
+         </geometry>
+      </collision>
+   </link>
+</robot> 
