@@ -2,6 +2,8 @@
 
 R1_OBJECT_CONTACT_THRESHOLD = 0.05
 R1_OBJECT_CONTACT_DISTANCE_CLIP = 0.5
+R1_OBJECT_CONTACT_TARGET_MARGIN = 0.12
+R1_OBJECT_CONTACT_TARGET_RELATIVE_CLIP = 0.25
 
 R1_OBJECT_CONTACT_BODY_NAMES = (
     "pelvis_link",
@@ -16,7 +18,9 @@ R1_OBJECT_CONTACT_BODY_NAMES = (
     "left_shoulder_roll_link",
     "left_elbow_link",
     "left_wrist_roll_link",
+    "left_hand_contact_link",
     "right_shoulder_roll_link",
     "right_elbow_link",
     "right_wrist_roll_link",
+    "right_hand_contact_link",
 )

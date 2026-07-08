@@ -47,6 +47,11 @@ class InteractionMeshRetargeter:
     preserving spatial relationships using an interaction mesh.
     """
 
+    VIRTUAL_CONTACT_BODY_SPECS = {
+        "left_hand_contact_link": ("left_wrist_roll_link", np.array([0.07, 0.0, 0.0], dtype=np.float64)),
+        "right_hand_contact_link": ("right_wrist_roll_link", np.array([0.07, 0.0, 0.0], dtype=np.float64)),
+    }
+
     FOOT_CONTACT_VISUAL_ALIASES = {
         "left_ankle_constraint_A_link": ("left_ankle_roll_link",),
         "left_ankle_constraint_B_link": ("left_ankle_roll_link",),
@@ -81,6 +86,7 @@ class InteractionMeshRetargeter:
         contact_visualization: bool = False,
         contact_source: Literal["robot", "human"] = "human",
         contact_threshold: float = 0.05,
+        contact_target_topk: int = 5,
         contact_human_joint_regex: str = DEFAULT_CONTACT_HUMAN_JOINT_REGEX,
         debug: bool = False,
         w_nominal_tracking_init: float = 5.0,
@@ -132,6 +138,7 @@ class InteractionMeshRetargeter:
         self.contact_visualization = contact_visualization
         self.contact_source = contact_source
         self.contact_threshold = contact_threshold
+        self.contact_target_topk = max(int(contact_target_topk), 1)
         self.contact_human_joint_regex = contact_human_joint_regex
         self.debug = debug
         self.demo_joints = task_constants.DEMO_JOINTS
@@ -406,6 +413,47 @@ class InteractionMeshRetargeter:
             return mapping.get("R_HandCenter", mapping.get("R_Wrist"))
         return None
 
+    def _resolve_contact_body_base_and_offset(self, body_name: str) -> tuple[int, np.ndarray] | None:
+        virtual_spec = self.VIRTUAL_CONTACT_BODY_SPECS.get(body_name)
+        if virtual_spec is None:
+            body_id = mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+            if body_id != -1:
+                return body_id, np.zeros(3, dtype=np.float64)
+            return None
+
+        parent_body_name, local_offset = virtual_spec
+        parent_body_id = mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, parent_body_name)
+        if parent_body_id == -1:
+            return None
+        return parent_body_id, np.asarray(local_offset, dtype=np.float64)
+
+    def _contact_body_parent_name(self, body_name: str) -> str:
+        virtual_spec = self.VIRTUAL_CONTACT_BODY_SPECS.get(body_name)
+        if virtual_spec is None:
+            return body_name
+        return virtual_spec[0]
+
+    def _contact_body_parent_index(self, body_name: str) -> int:
+        parent_name = self._contact_body_parent_name(body_name)
+        return mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, parent_name)
+
+    def _contact_body_local_offsets(self, body_names: list[str]) -> np.ndarray:
+        offsets: list[np.ndarray] = []
+        for body_name in body_names:
+            resolved = self._resolve_contact_body_base_and_offset(body_name)
+            if resolved is None:
+                offsets.append(np.zeros(3, dtype=np.float64))
+            else:
+                offsets.append(resolved[1])
+        return np.asarray(offsets, dtype=np.float32)
+
+    def _contact_body_marker_position(self, body_id: int, local_offset: np.ndarray) -> np.ndarray:
+        pos = self.robot_data.xpos[body_id].copy()
+        if np.any(local_offset):
+            rot = self.robot_data.xmat[body_id].reshape(3, 3)
+            pos = pos + rot @ local_offset
+        return pos
+
     def _selected_contact_targets(self) -> tuple[list[str], list[int], list[str], list[tuple[int, int]]]:
         include = re.compile(self.contact_human_joint_regex)
         human_names: list[str] = []
@@ -420,8 +468,7 @@ class InteractionMeshRetargeter:
             robot_name = self._human_joint_to_robot_body(human_name)
             if robot_name is None:
                 continue
-            body_id = mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, robot_name)
-            if body_id == -1:
+            if self._resolve_contact_body_base_and_offset(robot_name) is None:
                 continue
             if robot_name not in robot_name_to_idx:
                 robot_name_to_idx[robot_name] = len(robot_names)
@@ -472,6 +519,78 @@ class InteractionMeshRetargeter:
             distances[frame_idx] = tree.query(query_local, k=1)[0].astype(np.float32)
         return distances
 
+    def _object_surface_topk_from_local_queries(
+        self,
+        query_points_local: np.ndarray,
+        object_points_local: np.ndarray,
+        topk: int | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        query_points_local = np.asarray(query_points_local, dtype=np.float64)
+        object_points_local = np.asarray(object_points_local, dtype=np.float64)
+        requested_topk = self.contact_target_topk if topk is None else max(int(topk), 1)
+        if object_points_local.ndim != 2 or object_points_local.shape[1] != 3:
+            raise ValueError(f"object_points_local must have shape (N, 3), got {object_points_local.shape}")
+        if object_points_local.shape[0] == 0:
+            raise ValueError("object_points_local is empty; cannot compute contact target points.")
+
+        query_shape = query_points_local.shape[:-1]
+        query_topk = min(requested_topk, object_points_local.shape[0])
+        tree = cKDTree(object_points_local)
+        distances, indices = tree.query(query_points_local.reshape(-1, 3), k=query_topk)
+        if query_topk == 1:
+            distances = distances[:, None]
+            indices = indices[:, None]
+
+        distances = distances.reshape(*query_shape, query_topk).astype(np.float32)
+        indices = indices.reshape(*query_shape, query_topk).astype(np.int32)
+        target_points = object_points_local[indices].astype(np.float32)
+
+        if query_topk < requested_topk:
+            pad_count = requested_topk - query_topk
+            distances = np.concatenate(
+                [distances, np.repeat(distances[..., -1:], pad_count, axis=-1)],
+                axis=-1,
+            )
+            indices = np.concatenate(
+                [indices, np.repeat(indices[..., -1:], pad_count, axis=-1)],
+                axis=-1,
+            )
+            target_points = np.concatenate(
+                [target_points, np.repeat(target_points[..., -1:, :], pad_count, axis=-2)],
+                axis=-2,
+            )
+
+        return distances, indices, target_points
+
+    def _object_surface_topk_from_world_points(
+        self,
+        query_points_w: np.ndarray,
+        qpos_sequence: np.ndarray,
+        object_points_local: np.ndarray,
+        topk: int | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        query_points_w = np.asarray(query_points_w, dtype=np.float64)
+        qpos_sequence = np.asarray(qpos_sequence, dtype=np.float64)
+        if query_points_w.ndim != 3 or query_points_w.shape[-1] != 3:
+            raise ValueError(f"query_points_w must have shape (T, N, 3), got {query_points_w.shape}")
+        if query_points_w.shape[0] != qpos_sequence.shape[0]:
+            raise ValueError("query_points_w and qpos_sequence must have the same frame count.")
+
+        query_points_local = np.empty_like(query_points_w, dtype=np.float64)
+        for frame_idx, q in enumerate(qpos_sequence):
+            if self.has_dynamic_object and q.shape[0] >= 7:
+                object_pos = q[-7:-4]
+                object_quat = q[-4:]
+            else:
+                object_pos = np.zeros(3)
+                object_quat = np.array([1.0, 0.0, 0.0, 0.0])
+            query_points_local[frame_idx] = transform_points_world_to_local(
+                object_quat,
+                object_pos,
+                query_points_w[frame_idx],
+            )
+        return self._object_surface_topk_from_local_queries(query_points_local, object_points_local, topk=topk)
+
     def _mujoco_geom_names(self) -> list[str]:
         if not hasattr(self, "_geom_names") or len(self._geom_names) != self.robot_model.ngeom:
             self._geom_names = [
@@ -503,6 +622,9 @@ class InteractionMeshRetargeter:
         object_geom_ids = set(self._contact_object_geom_ids())
         geom_ids_by_body: list[list[int]] = []
         for robot_name in robot_names:
+            if robot_name in self.VIRTUAL_CONTACT_BODY_SPECS:
+                geom_ids_by_body.append([])
+                continue
             body_id = mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, robot_name)
             if body_id == -1:
                 geom_ids_by_body.append([])
@@ -516,6 +638,28 @@ class InteractionMeshRetargeter:
             )
         return geom_ids_by_body
 
+    def _get_robot_contact_positions(self, q: np.ndarray, body_names: list[str]) -> np.ndarray:
+        q = np.asarray(q, dtype=np.float64)
+        if q.shape[0] == self.robot_data.qpos.shape[0]:
+            self.robot_data.qpos[:] = q
+        elif q.shape[0] == self.robot_data.qpos.shape[0] + 7:
+            self.robot_data.qpos[:] = q[:-7]
+        else:
+            raise ValueError(
+                f"q frame has length {q.shape[0]}, expected {self.robot_data.qpos.shape[0]} "
+                f"for contact marker positions."
+            )
+        mujoco.mj_forward(self.robot_model, self.robot_data)
+
+        positions = []
+        for body_name in body_names:
+            resolved = self._resolve_contact_body_base_and_offset(body_name)
+            if resolved is None:
+                raise ValueError(f"Contact body {body_name} not found in Mujoco model or virtual specs.")
+            body_id, local_offset = resolved
+            positions.append(self._contact_body_marker_position(body_id, local_offset))
+        return np.asarray(positions, dtype=np.float64)
+
     def _robot_object_geom_distances(
         self,
         qpos_sequence: np.ndarray,
@@ -525,7 +669,7 @@ class InteractionMeshRetargeter:
         qpos_sequence = np.asarray(qpos_sequence, dtype=np.float64)
         object_geom_ids = self._contact_object_geom_ids()
         if not object_geom_ids:
-            body_positions = np.stack([self._get_robot_link_positions(q, robot_names) for q in qpos_sequence], axis=0)
+            body_positions = np.stack([self._get_robot_contact_positions(q, robot_names) for q in qpos_sequence], axis=0)
             sample_points = self._contact_sample_points(object_points_local)
             return self._distances_to_object_surface(body_positions, qpos_sequence, sample_points)
 
@@ -566,7 +710,7 @@ class InteractionMeshRetargeter:
         if fallback_cols:
             fallback_names = [robot_names[idx] for idx in fallback_cols]
             body_positions = np.stack(
-                [self._get_robot_link_positions(q, fallback_names) for q in qpos_sequence],
+                [self._get_robot_contact_positions(q, fallback_names) for q in qpos_sequence],
                 axis=0,
             )
             sample_points = self._contact_sample_points(object_points_local)
@@ -576,6 +720,110 @@ class InteractionMeshRetargeter:
                 sample_points,
             )
         return distances
+
+    def _robot_object_geom_contact_targets(
+        self,
+        qpos_sequence: np.ndarray,
+        robot_names: list[str],
+        object_points_local: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        qpos_sequence = np.asarray(qpos_sequence, dtype=np.float64)
+        sample_points = self._contact_sample_points(object_points_local)
+        topk = self.contact_target_topk
+
+        fallback_positions = np.stack(
+            [self._get_robot_contact_positions(q, robot_names) for q in qpos_sequence],
+            axis=0,
+        )
+        fallback_topk_distances, fallback_topk_indices, fallback_target_points = (
+            self._object_surface_topk_from_world_points(
+                fallback_positions,
+                qpos_sequence,
+                sample_points,
+                topk=topk,
+            )
+        )
+
+        object_geom_ids = self._contact_object_geom_ids()
+        if not object_geom_ids:
+            return (
+                fallback_topk_distances[..., 0],
+                fallback_target_points,
+                fallback_topk_distances,
+                fallback_topk_indices,
+            )
+
+        geom_ids_by_body = self._contact_robot_geom_ids_by_body(robot_names)
+        distances = np.full((qpos_sequence.shape[0], len(robot_names)), np.inf, dtype=np.float32)
+        query_points_obj = np.empty((qpos_sequence.shape[0], len(robot_names), 3), dtype=np.float64)
+
+        fallback_query_distances = fallback_topk_distances[..., 0]
+        for frame_idx, q in enumerate(qpos_sequence):
+            if q.shape[0] != self.robot_data.qpos.shape[0]:
+                raise ValueError(
+                    f"qpos frame has length {q.shape[0]}, expected {self.robot_data.qpos.shape[0]} "
+                    "for contact labels."
+                )
+
+            self.robot_data.qpos[:] = q
+            mujoco.mj_forward(self.robot_model, self.robot_data)
+
+            if self.has_dynamic_object and q.shape[0] >= 7:
+                object_pos = q[-7:-4]
+                object_quat = q[-4:]
+            else:
+                object_pos = np.zeros(3)
+                object_quat = np.array([1.0, 0.0, 0.0, 0.0])
+
+            fallback_local = transform_points_world_to_local(
+                object_quat,
+                object_pos,
+                fallback_positions[frame_idx],
+            )
+            query_points_obj[frame_idx] = fallback_local
+            distances[frame_idx] = fallback_query_distances[frame_idx]
+
+            distance_cutoff = max(float(self.contact_threshold) + 1e-6, float(self.collision_detection_threshold), 1.0)
+            fromto = np.zeros(6, dtype=np.float64)
+            for body_col, robot_geom_ids in enumerate(geom_ids_by_body):
+                if not robot_geom_ids:
+                    continue
+
+                min_dist = np.inf
+                best_object_point_w: np.ndarray | None = None
+                for robot_geom_id in robot_geom_ids:
+                    for object_geom_id in object_geom_ids:
+                        fromto[:] = 0.0
+                        dist = mujoco.mj_geomDistance(
+                            self.robot_model,
+                            self.robot_data,
+                            robot_geom_id,
+                            object_geom_id,
+                            distance_cutoff,
+                            fromto,
+                        )
+                        if float(dist) < min_dist:
+                            min_dist = float(dist)
+                            best_object_point_w = fromto[3:].copy()
+                        if min_dist <= self.contact_threshold:
+                            break
+                    if min_dist <= self.contact_threshold:
+                        break
+
+                distances[frame_idx, body_col] = min_dist
+                if best_object_point_w is not None and min_dist < distance_cutoff:
+                    query_points_obj[frame_idx, body_col] = transform_points_world_to_local(
+                        object_quat,
+                        object_pos,
+                        best_object_point_w[None, :],
+                    )[0]
+
+        target_distances, target_indices, target_points = self._object_surface_topk_from_local_queries(
+            query_points_obj,
+            sample_points,
+            topk=topk,
+        )
+        return distances, target_points, target_distances, target_indices
 
     def _compute_contact_labels(
         self,
@@ -589,6 +837,23 @@ class InteractionMeshRetargeter:
             "contact_object_distance": np.zeros((qpos_sequence.shape[0], 0), dtype=np.float32),
             "contact_object_names": np.asarray([], dtype=str),
             "contact_object_indices": np.asarray([], dtype=np.int32),
+            "contact_object_parent_names": np.asarray([], dtype=str),
+            "contact_object_parent_indices": np.asarray([], dtype=np.int32),
+            "contact_object_local_offsets": np.zeros((0, 3), dtype=np.float32),
+            "contact_object_target_points_obj": np.zeros(
+                (qpos_sequence.shape[0], 0, self.contact_target_topk, 3),
+                dtype=np.float32,
+            ),
+            "contact_object_target_distances": np.zeros(
+                (qpos_sequence.shape[0], 0, self.contact_target_topk),
+                dtype=np.float32,
+            ),
+            "contact_object_target_indices": np.zeros(
+                (qpos_sequence.shape[0], 0, self.contact_target_topk),
+                dtype=np.int32,
+            ),
+            "contact_object_target_valid": np.zeros((qpos_sequence.shape[0], 0), dtype=bool),
+            "contact_object_target_topk": np.asarray(self.contact_target_topk, dtype=np.int32),
             "contact_object_source": np.asarray(self.contact_source),
             "contact_object_threshold_m": np.asarray(self.contact_threshold, dtype=np.float32),
         }
@@ -598,13 +863,39 @@ class InteractionMeshRetargeter:
         if self.contact_source == "human":
             sample_points = self._contact_sample_points(object_points_local)
             query_points = np.asarray(human_joint_motions[:, human_indices], dtype=np.float64)
-            human_distances = self._distances_to_object_surface(query_points, qpos_sequence, sample_points)
+            human_target_distances, human_target_indices, human_target_points = (
+                self._object_surface_topk_from_world_points(
+                    query_points,
+                    qpos_sequence,
+                    sample_points,
+                    topk=self.contact_target_topk,
+                )
+            )
+            human_distances = human_target_distances[..., 0]
             human_labels = human_distances <= self.contact_threshold
             robot_labels = np.zeros((qpos_sequence.shape[0], len(robot_names)), dtype=bool)
             robot_distances = np.full((qpos_sequence.shape[0], len(robot_names)), np.inf, dtype=np.float32)
+            robot_target_distances = np.full(
+                (qpos_sequence.shape[0], len(robot_names), self.contact_target_topk),
+                np.inf,
+                dtype=np.float32,
+            )
+            robot_target_indices = np.full(
+                (qpos_sequence.shape[0], len(robot_names), self.contact_target_topk),
+                -1,
+                dtype=np.int32,
+            )
+            robot_target_points = np.zeros(
+                (qpos_sequence.shape[0], len(robot_names), self.contact_target_topk, 3),
+                dtype=np.float32,
+            )
             for human_col, robot_col in pairs:
+                replace = human_distances[:, human_col] < robot_distances[:, robot_col]
                 robot_labels[:, robot_col] |= human_labels[:, human_col]
-                robot_distances[:, robot_col] = np.minimum(robot_distances[:, robot_col], human_distances[:, human_col])
+                robot_distances[replace, robot_col] = human_distances[replace, human_col]
+                robot_target_distances[replace, robot_col] = human_target_distances[replace, human_col]
+                robot_target_indices[replace, robot_col] = human_target_indices[replace, human_col]
+                robot_target_points[replace, robot_col] = human_target_points[replace, human_col]
             return {
                 "contact_object_label": robot_labels,
                 "contact_object_distance": robot_distances,
@@ -613,6 +904,20 @@ class InteractionMeshRetargeter:
                     [mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, name) for name in robot_names],
                     dtype=np.int32,
                 ),
+                "contact_object_parent_names": np.asarray(
+                    [self._contact_body_parent_name(name) for name in robot_names],
+                    dtype=str,
+                ),
+                "contact_object_parent_indices": np.asarray(
+                    [self._contact_body_parent_index(name) for name in robot_names],
+                    dtype=np.int32,
+                ),
+                "contact_object_local_offsets": self._contact_body_local_offsets(robot_names),
+                "contact_object_target_points_obj": robot_target_points,
+                "contact_object_target_distances": robot_target_distances,
+                "contact_object_target_indices": robot_target_indices,
+                "contact_object_target_valid": robot_labels,
+                "contact_object_target_topk": np.asarray(self.contact_target_topk, dtype=np.int32),
                 "contact_object_source": np.asarray("human_smplh"),
                 "contact_object_threshold_m": np.asarray(self.contact_threshold, dtype=np.float32),
                 "contact_human_joint_names": np.asarray(human_names),
@@ -620,7 +925,9 @@ class InteractionMeshRetargeter:
                 "contact_human_joint_regex": np.asarray(self.contact_human_joint_regex),
             }
 
-        robot_distances = self._robot_object_geom_distances(qpos_sequence, robot_names, object_points_local)
+        robot_distances, robot_target_points, robot_target_distances, robot_target_indices = (
+            self._robot_object_geom_contact_targets(qpos_sequence, robot_names, object_points_local)
+        )
         robot_labels = robot_distances <= self.contact_threshold
         return {
             "contact_object_label": robot_labels,
@@ -630,6 +937,20 @@ class InteractionMeshRetargeter:
                 [mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, name) for name in robot_names],
                 dtype=np.int32,
             ),
+            "contact_object_parent_names": np.asarray(
+                [self._contact_body_parent_name(name) for name in robot_names],
+                dtype=str,
+            ),
+            "contact_object_parent_indices": np.asarray(
+                [self._contact_body_parent_index(name) for name in robot_names],
+                dtype=np.int32,
+            ),
+            "contact_object_local_offsets": self._contact_body_local_offsets(robot_names),
+            "contact_object_target_points_obj": robot_target_points,
+            "contact_object_target_distances": robot_target_distances,
+            "contact_object_target_indices": robot_target_indices,
+            "contact_object_target_valid": robot_labels,
+            "contact_object_target_topk": np.asarray(self.contact_target_topk, dtype=np.int32),
             "contact_object_source": np.asarray("retarget_robot_geom"),
             "contact_object_threshold_m": np.asarray(self.contact_threshold, dtype=np.float32),
             "contact_human_joint_names": np.asarray(human_names),

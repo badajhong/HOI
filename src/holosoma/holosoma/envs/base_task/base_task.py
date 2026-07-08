@@ -311,7 +311,7 @@ class BaseTask:
         obs_dict, _, _, _ = self.step(actor_state)
         return obs_dict
 
-    def reset_envs_idx(self, env_ids, target_states=None, target_buf=None):
+    def reset_envs_idx(self, env_ids, target_states=None, target_buf=None, *, start_episode_callbacks: bool = True):
         """Reset some environments and handle video recording callbacks."""
 
         # Call episode end for environments that are being reset
@@ -349,10 +349,8 @@ class BaseTask:
         # Call manager-based reset events
         self.reset_manager.reset_scene(env_ids)
 
-        # Call episode start for environments that have been reset
-        for env_id in env_ids:
-            if hasattr(self.simulator, "on_episode_start"):
-                self.simulator.on_episode_start(env_id.item())
+        if start_episode_callbacks:
+            self._start_episode_callbacks(env_ids)
 
     def _reset_envs_idx_impl(self, env_ids, target_states=None, target_buf=None):
         """Template implementation of environment reset.
@@ -524,11 +522,14 @@ class BaseTask:
         if env_ids.numel() > 0:
             final_obs_dict = self._compute_final_observations()
 
-        self.reset_envs_idx(env_ids)
+        self.reset_envs_idx(env_ids, start_episode_callbacks=False)
 
         refresh_env_ids = self._ensure_long_tensor(self._get_envs_to_refresh())
         if refresh_env_ids.numel() > 0:
             self._refresh_envs_after_reset(refresh_env_ids)
+
+        if env_ids.numel() > 0:
+            self._start_episode_callbacks(env_ids)
 
         self._compute_observations()
 
@@ -551,6 +552,11 @@ class BaseTask:
 
     def _get_envs_to_refresh(self):
         return torch.empty(0, device=self.device, dtype=torch.long)
+
+    def _start_episode_callbacks(self, env_ids):
+        for env_id in env_ids:
+            if hasattr(self.simulator, "on_episode_start"):
+                self.simulator.on_episode_start(env_id.item())
 
     def _refresh_envs_after_reset(self, env_ids):
         """Hook for subclasses to synchronise simulator state after resets."""

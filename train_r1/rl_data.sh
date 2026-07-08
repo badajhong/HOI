@@ -13,6 +13,7 @@ OUTPUT_FPS="${OUTPUT_FPS:-50}"
 DATA_FORMAT="${DATA_FORMAT:-smplh}"
 ROBOT="${ROBOT:-r1}"
 RETRIES="${RETRIES:-5}"
+FORCE="${FORCE:-1}"
 FAILED_TASKS_FILE="${FAILED_TASKS_FILE:-${REPO_ROOT}/train_r1/failed_rl_tasks.txt}"
 
 # Keep native MuJoCo / BLAS libraries quieter during long conversion batches.
@@ -38,7 +39,7 @@ for object_dir in "${MOTIONS_DIR}"/*; do
     output_name="${file_name%_original}"
     output_file="${output_dir}/${output_name}.npz"
 
-    if [[ -f "${output_file}" ]]; then
+    if [[ "${FORCE}" != "1" && -f "${output_file}" ]]; then
       echo "[rl_data] Skip existing: ${output_file}"
       continue
     fi

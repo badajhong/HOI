@@ -12,6 +12,8 @@ import threading
 import time
 import traceback
 from abc import ABC, abstractmethod
+from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
+from multiprocessing import get_context
 from pathlib import Path
 from threading import Thread
 from typing import TYPE_CHECKING
@@ -21,11 +23,31 @@ import numpy.typing as npt
 from loguru import logger
 
 from holosoma.simulator.shared.camera_controller import CameraController, CameraParameters
-from holosoma.utils.video_utils import create_video, format_command_labels, overlay_text_on_image
+from holosoma.utils.video_utils import create_video, format_command_labels, log_video_to_wandb, overlay_text_on_image
 
 if TYPE_CHECKING:
     from holosoma.config_types.video import VideoConfig
     from holosoma.simulator.base_simulator.base_simulator import BaseSimulator
+
+
+def _encode_video_array_worker(
+    video_array: npt.NDArray[np.uint8],
+    *,
+    fps: float,
+    save_dir: str,
+    output_format: str,
+    episode_id: int,
+) -> str | None:
+    """Encode video in an isolated spawned process."""
+    video_path = create_video(
+        video_frames=video_array,
+        fps=fps,
+        save_dir=Path(save_dir),
+        output_format=output_format,
+        wandb_logging=False,
+        episode_id=episode_id,
+    )
+    return None if video_path is None else str(video_path)
 
 
 class VideoRecorderInterface(ABC):
@@ -96,9 +118,18 @@ class VideoRecorderInterface(ABC):
         self.recording_thread: Thread | None = None
         self.stop_recording_event: threading.Event | None = None
         self.thread_active = False
+        self._encoding_executor: ProcessPoolExecutor | ThreadPoolExecutor | None = None
+        self._encoding_backend = getattr(config, "async_encoding_backend", "process")
+        self._encoding_futures: list[Future] = []
+        self._encoding_lock = threading.Lock()
 
         if config.use_recording_thread:
             self._setup_threaded_recording()
+        if getattr(config, "async_encoding", True):
+            if self._encoding_backend == "process":
+                self._encoding_executor = ProcessPoolExecutor(max_workers=1, mp_context=get_context("spawn"))
+            else:
+                self._encoding_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="VideoEncoder")
 
     def _setup_threaded_recording(self) -> None:
         """Shared threading setup logic."""
@@ -170,6 +201,7 @@ class VideoRecorderInterface(ABC):
             If recording cannot be started due to system issues.
         """
         # Set recording state - this method now owns the recording flag
+        self._current_episode = episode_id
         self._is_recording = True
         self._start_recording(episode_id)
 
@@ -303,6 +335,8 @@ class VideoRecorderInterface(ABC):
         if self.config.use_recording_thread:
             self._cleanup_persistent_thread()
 
+        self._cleanup_encoding_executor()
+
         # Clear frame buffer using shared method
         self._clear_frame_buffer()
 
@@ -430,9 +464,7 @@ class VideoRecorderInterface(ABC):
             return
 
         try:
-            # Convert frames to numpy array
-            video_array = np.array(self.video_frames)
-            video_array_uint8 = video_array.astype(np.uint8)
+            video_array_uint8 = np.asarray(self.video_frames, dtype=np.uint8)
 
             # Calculate actual video FPS based on control frequency and playback rate
             # Frames are captured at control_frequency = sim_fps / control_decimation
@@ -443,23 +475,133 @@ class VideoRecorderInterface(ABC):
 
             # Get save directory
             save_dir = self._get_save_directory()
-            save_dir.mkdir(parents=True, exist_ok=True)
-
-            # Create and save video
-            create_video(
-                video_frames=video_array_uint8,
-                fps=display_fps,
-                save_dir=save_dir,
-                output_format=self.config.output_format,
-                wandb_logging=self.config.upload_to_wandb,
-                episode_id=self._current_episode,
-            )
+            output_format = self.config.output_format
+            upload_to_wandb = self.config.upload_to_wandb
+            episode_id = self._current_episode
+            if self._encoding_executor is None:
+                self._encode_video_array(
+                    video_array_uint8,
+                    fps=display_fps,
+                    save_dir=save_dir,
+                    output_format=output_format,
+                    upload_to_wandb=upload_to_wandb,
+                    episode_id=episode_id,
+                )
+            else:
+                self._submit_video_encoding(
+                    video_array_uint8,
+                    fps=display_fps,
+                    save_dir=save_dir,
+                    output_format=output_format,
+                    upload_to_wandb=upload_to_wandb,
+                    episode_id=episode_id,
+                )
 
         except Exception as e:
             raise RuntimeError(f"Video encoding failed: {e}") from e
         finally:
             # Clear frame buffer
             self._clear_frame_buffer()
+
+    def _encode_video_array(
+        self,
+        video_array: npt.NDArray[np.uint8],
+        *,
+        fps: float,
+        save_dir: Path,
+        output_format: str,
+        upload_to_wandb: bool,
+        episode_id: int,
+    ) -> None:
+        create_video(
+            video_frames=video_array,
+            fps=fps,
+            save_dir=save_dir,
+            output_format=output_format,
+            wandb_logging=upload_to_wandb,
+            episode_id=episode_id,
+        )
+
+    def _submit_video_encoding(
+        self,
+        video_array: npt.NDArray[np.uint8],
+        *,
+        fps: float,
+        save_dir: Path,
+        output_format: str,
+        upload_to_wandb: bool,
+        episode_id: int,
+    ) -> None:
+        if self._encoding_executor is None:
+            self._encode_video_array(
+                video_array,
+                fps=fps,
+                save_dir=save_dir,
+                output_format=output_format,
+                upload_to_wandb=upload_to_wandb,
+                episode_id=episode_id,
+            )
+            return
+
+        self._reap_encoding_futures()
+        with self._encoding_lock:
+            if self._encoding_backend == "process":
+                future = self._encoding_executor.submit(
+                    _encode_video_array_worker,
+                    video_array.copy(),
+                    fps=fps,
+                    save_dir=str(save_dir),
+                    output_format=output_format,
+                    episode_id=episode_id,
+                )
+                future.add_done_callback(
+                    lambda done_future: self._log_encoding_future_result(
+                        done_future,
+                        upload_to_wandb=upload_to_wandb,
+                    )
+                )
+            else:
+                future = self._encoding_executor.submit(
+                    self._encode_video_array,
+                    video_array.copy(),
+                    fps=fps,
+                    save_dir=save_dir,
+                    output_format=output_format,
+                    upload_to_wandb=upload_to_wandb,
+                    episode_id=episode_id,
+                )
+                future.add_done_callback(self._log_encoding_future_result)
+            self._encoding_futures.append(future)
+
+    def _reap_encoding_futures(self) -> None:
+        with self._encoding_lock:
+            self._encoding_futures = [future for future in self._encoding_futures if not future.done()]
+
+    def _log_encoding_future_result(self, future: Future, *, upload_to_wandb: bool = False) -> None:
+        try:
+            video_path = future.result()
+        except Exception as e:
+            logger.warning(f"Async video encoding/upload failed; continuing training: {e}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+            return
+
+        if upload_to_wandb and video_path:
+            log_video_to_wandb(video_path, cleanup_file=True)
+
+    def _cleanup_encoding_executor(self) -> None:
+        if self._encoding_executor is None:
+            return
+
+        with self._encoding_lock:
+            futures = list(self._encoding_futures)
+            self._encoding_futures.clear()
+        for future in futures:
+            try:
+                future.result(timeout=120.0)
+            except Exception as e:
+                logger.warning(f"Pending video encoding/upload failed during cleanup: {e}")
+        self._encoding_executor.shutdown(wait=True, cancel_futures=False)
+        self._encoding_executor = None
 
     # ===== Camera Helper Methods =====
 

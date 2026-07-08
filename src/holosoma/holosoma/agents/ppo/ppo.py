@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import itertools
 import os
+from collections import defaultdict
+from collections.abc import MutableMapping
 from typing import TypedDict
 
 import torch
@@ -408,6 +410,8 @@ class PPO(BaseAlgo):
         nn.utils.clip_grad_norm_(self.actor.parameters(), self.config.max_grad_norm)
         nn.utils.clip_grad_norm_(self.critic.parameters(), self.config.max_grad_norm)
 
+        self._sanitize_optimizer_state(self.actor_optimizer, self.actor, "actor_optimizer")
+        self._sanitize_optimizer_state(self.critic_optimizer, self.critic, "critic_optimizer")
         self.actor_optimizer.step()
         self.critic_optimizer.step()
 
@@ -421,6 +425,53 @@ class PPO(BaseAlgo):
             loss_value = loss.item() if torch.is_tensor(loss) else loss
             loss_dict[key] += loss_value
         return loss_dict
+
+    def _sanitize_optimizer_state(
+        self,
+        optimizer: torch.optim.Optimizer,
+        module: nn.Module,
+        optimizer_name: str,
+    ) -> None:
+        """Recover from rare malformed AdamW state entries before optimizer.step()."""
+        state_by_param = optimizer.state
+        if not isinstance(state_by_param, MutableMapping):
+            optimizer.state = defaultdict(dict)
+            logger.warning(f"{optimizer_name} state mapping was malformed; reset all optimizer state.")
+            return
+
+        repaired = 0
+        for param in module.parameters():
+            state = state_by_param.get(param)
+            if state is None:
+                continue
+
+            malformed = not isinstance(state, dict)
+            if not malformed and len(state) > 0:
+                step = state.get("step")
+                exp_avg = state.get("exp_avg")
+                exp_avg_sq = state.get("exp_avg_sq")
+                malformed = (
+                    not isinstance(step, torch.Tensor)
+                    or not isinstance(exp_avg, torch.Tensor)
+                    or not isinstance(exp_avg_sq, torch.Tensor)
+                    or exp_avg.shape != param.shape
+                    or exp_avg_sq.shape != param.shape
+                )
+                max_exp_avg_sq = state.get("max_exp_avg_sq")
+                if max_exp_avg_sq is not None:
+                    malformed = malformed or not isinstance(max_exp_avg_sq, torch.Tensor)
+                    if isinstance(max_exp_avg_sq, torch.Tensor):
+                        malformed = malformed or max_exp_avg_sq.shape != param.shape
+
+            if malformed:
+                state_by_param[param] = {}
+                repaired += 1
+
+        if repaired:
+            logger.warning(
+                f"Reinitialized {repaired} malformed {optimizer_name} state entr"
+                f"{'y' if repaired == 1 else 'ies'} before optimizer.step()."
+            )
 
     def _compute_ppo_loss(self, minibatch: Minibatch):
         actions_batch = minibatch["actions"]

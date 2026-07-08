@@ -12,6 +12,10 @@ from loguru import logger
 from holosoma.config_types.command import MotionConfig, NoiseToInitialPoseConfig
 from holosoma.envs.wbt.wbt_manager import WholeBodyTrackingManager
 from holosoma.managers.command.base import CommandTermBase
+from holosoma.managers.object_contact import (
+    is_resolvable_contact_body_name,
+    resolve_contact_body_indices_and_offsets_from_names,
+)
 from holosoma.utils.file_cache import cached_open
 from holosoma.utils.path import resolve_data_file_path
 from holosoma.utils.rotations import (
@@ -123,8 +127,11 @@ class MotionLoader:
         self.has_contact_labels = False
         self._contact_object_label = torch.zeros(0, 0, dtype=torch.bool, device=device)
         self._contact_object_distance = torch.zeros(0, 0, dtype=torch.float32, device=device)
+        self._contact_object_target_points_obj = torch.zeros(0, 0, 0, 3, dtype=torch.float32, device=device)
+        self._contact_object_target_valid = torch.zeros(0, 0, dtype=torch.bool, device=device)
         self.contact_body_names: list[str] = []
         self.contact_body_indices = torch.zeros(0, dtype=torch.long, device=device)
+        self.contact_body_local_offsets = torch.zeros(0, 3, dtype=torch.float32, device=device)
         self.contact_source = ""
         self.contact_target = ""
 
@@ -153,6 +160,8 @@ class MotionLoader:
         self._joint_indexes = joint_indexes
         self._body_indexes = body_indexes
         self.time_step_total = self._joint_pos.shape[0]
+        if not hasattr(self, "real_motion_clip_ranges"):
+            self.real_motion_clip_ranges = list(self.clip_ranges)
 
     def _get_index_of_a_in_b(self, a_names: List[str], b_names: List[str], device: str = "cpu") -> torch.Tensor:
         indexes = []
@@ -169,7 +178,17 @@ class MotionLoader:
         robot_body_names: list[str],
         device: str,
         required: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor, list[str], torch.Tensor, str, str] | None:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        list[str],
+        torch.Tensor,
+        torch.Tensor,
+        str,
+        str,
+    ] | None:
         with cached_open(contact_file, "rb") as f, np.load(f, allow_pickle=True) as data:
             label_key = _first_existing_key(data, CONTACT_LABEL_KEYS)
             if label_key is None:
@@ -203,16 +222,21 @@ class MotionLoader:
                     f"{len(contact_names)} contact names."
                 )
 
-            selected_cols = [i for i, name in enumerate(contact_names) if name in robot_body_names]
+            selected_cols = [
+                i for i, name in enumerate(contact_names) if is_resolvable_contact_body_name(robot_body_names, name)
+            ]
             if not selected_cols:
                 raise ValueError(
                     f"Contact label file '{contact_file}' has contact names {contact_names}, but none match robot "
-                    f"body names. Regenerate labels with the correct --robot-type or check the robot body names."
+                    "body names or supported virtual contact markers. Regenerate labels with the correct "
+                    "--robot-type or check the robot body names."
                 )
 
             selected_names = [contact_names[i] for i in selected_cols]
-            body_indices = torch.tensor(
-                [robot_body_names.index(name) for name in selected_names], dtype=torch.long, device=device
+            body_indices, body_local_offsets = resolve_contact_body_indices_and_offsets_from_names(
+                robot_body_names,
+                selected_names,
+                device=device,
             )
 
             labels = torch.tensor(labels_np[:, selected_cols], dtype=torch.bool, device=device)
@@ -231,6 +255,46 @@ class MotionLoader:
             else:
                 distances = torch.full(labels.shape, float("inf"), dtype=torch.float32, device=device)
 
+            if "contact_object_target_points_obj" in data:
+                target_points_np = np.asarray(data["contact_object_target_points_obj"], dtype=np.float32)
+                if target_points_np.ndim != 4 or target_points_np.shape[:2] != labels_np.shape[:2]:
+                    raise ValueError(
+                        f"Contact target points in '{contact_file}' have shape {target_points_np.shape}, "
+                        f"expected ({labels_np.shape[0]}, {labels_np.shape[1]}, K, 3)."
+                    )
+                if target_points_np.shape[-1] != 3:
+                    raise ValueError(
+                        f"Contact target points in '{contact_file}' must have trailing xyz dimension, "
+                        f"got shape {target_points_np.shape}."
+                    )
+                target_points = torch.tensor(
+                    target_points_np[:, selected_cols],
+                    dtype=torch.float32,
+                    device=device,
+                )
+            else:
+                target_points = torch.zeros(
+                    labels.shape[0],
+                    labels.shape[1],
+                    0,
+                    3,
+                    dtype=torch.float32,
+                    device=device,
+                )
+
+            if "contact_object_target_valid" in data:
+                target_valid_np = np.asarray(data["contact_object_target_valid"]).astype(bool)
+                if target_valid_np.ndim == 1:
+                    target_valid_np = target_valid_np[:, None]
+                if target_valid_np.shape[:2] != labels_np.shape[:2]:
+                    raise ValueError(
+                        f"Contact target valid mask in '{contact_file}' has shape {target_valid_np.shape}, "
+                        f"expected {labels_np.shape}."
+                    )
+                target_valid = torch.tensor(target_valid_np[:, selected_cols], dtype=torch.bool, device=device)
+            else:
+                target_valid = labels.clone() if target_points.shape[2] > 0 else torch.zeros_like(labels)
+
             source = str(np.asarray(data["contact_object_source"]).item()) if "contact_object_source" in data else ""
             target = str(np.asarray(data["contact_object_target"]).item()) if "contact_object_target" in data else ""
 
@@ -238,14 +302,27 @@ class MotionLoader:
             f"Loaded contact labels from {contact_file}: frames={labels.shape[0]}, bodies={selected_names}, "
             f"source={source or 'unknown'}, target={target or 'unknown'}"
         )
-        return labels, distances, selected_names, body_indices, source, target
+        return (
+            labels,
+            distances,
+            target_points,
+            target_valid,
+            selected_names,
+            body_indices,
+            body_local_offsets,
+            source,
+            target,
+        )
 
     def _set_contact_arrays(
         self,
         labels: torch.Tensor,
         distances: torch.Tensor,
+        target_points_obj: torch.Tensor,
+        target_valid: torch.Tensor,
         names: list[str],
         body_indices: torch.Tensor,
+        body_local_offsets: torch.Tensor,
         source: str,
         target: str,
         *,
@@ -254,8 +331,11 @@ class MotionLoader:
         self.has_contact_labels = labels.numel() > 0 and labels.shape[1] > 0
         self._contact_object_label = labels.to(device=device, dtype=torch.bool)
         self._contact_object_distance = distances.to(device=device, dtype=torch.float32)
+        self._contact_object_target_points_obj = target_points_obj.to(device=device, dtype=torch.float32)
+        self._contact_object_target_valid = target_valid.to(device=device, dtype=torch.bool)
         self.contact_body_names = list(names)
         self.contact_body_indices = body_indices.to(device=device, dtype=torch.long)
+        self.contact_body_local_offsets = body_local_offsets.to(device=device, dtype=torch.float32)
         self.contact_source = source
         self.contact_target = target
 
@@ -311,6 +391,7 @@ class MotionLoader:
                 self._object_lin_vel_w = torch.zeros(0, 3, device=device)
                 self._object_ang_vel_w = torch.zeros(0, 3, device=device)
         self.clip_ranges = [(0, int(self._joint_pos.shape[0]))]
+        self.real_motion_clip_ranges = list(self.clip_ranges)
         self.clip_files = [motion_file]
         if self.has_object:
             self.clip_object_keys = [extract_object_key_from_motion_filename(motion_file)]
@@ -372,11 +453,16 @@ class MotionLoader:
         object_ang_vel_w_list = []
         contact_label_list = []
         contact_distance_list = []
+        contact_target_points_list = []
+        contact_target_valid_list = []
         contact_body_names: list[str] | None = None
         contact_body_indices: torch.Tensor | None = None
+        contact_body_local_offsets: torch.Tensor | None = None
+        contact_target_topk: int | None = None
         contact_source = ""
         contact_target = ""
         self.clip_ranges = []
+        self.real_motion_clip_ranges = []
         self.clip_files = []
         self.clip_object_keys = []
         running_end = 0
@@ -424,6 +510,7 @@ class MotionLoader:
 
                 clip_len = int(joint_pos.shape[0])
                 self.clip_ranges.append((running_end, running_end + clip_len))
+                self.real_motion_clip_ranges.append((running_end, running_end + clip_len))
                 running_end += clip_len
                 self.clip_files.append(npz_file)
                 if self.has_object:
@@ -460,10 +547,22 @@ class MotionLoader:
                     required=False,
                 )
                 if contact_arrays is not None:
-                    labels, distances, names, body_indices, source, target = contact_arrays
+                    (
+                        labels,
+                        distances,
+                        target_points_obj,
+                        target_valid,
+                        names,
+                        body_indices,
+                        body_local_offsets,
+                        source,
+                        target,
+                    ) = contact_arrays
                     if contact_body_names is None:
                         contact_body_names = names
                         contact_body_indices = body_indices
+                        contact_body_local_offsets = body_local_offsets
+                        contact_target_topk = int(target_points_obj.shape[2])
                         contact_source = source
                         contact_target = target
                     elif names != contact_body_names:
@@ -471,8 +570,24 @@ class MotionLoader:
                             f"Contact labels in '{resolved_contact_file}' have body names {names}, but previous "
                             f"clips use {contact_body_names}. Regenerate labels with a consistent --robot-type."
                         )
+                    elif contact_body_local_offsets is not None and not torch.equal(
+                        body_local_offsets.to(contact_body_local_offsets.device),
+                        contact_body_local_offsets,
+                    ):
+                        raise ValueError(
+                            f"Contact labels in '{resolved_contact_file}' resolve to different contact offsets "
+                            "than previous clips. Check virtual contact body specs."
+                        )
+                    elif int(target_points_obj.shape[2]) != int(contact_target_topk or 0):
+                        raise ValueError(
+                            f"Contact target points in '{resolved_contact_file}' use topk={target_points_obj.shape[2]}, "
+                            f"but previous clips use topk={contact_target_topk}. Regenerate labels with the same "
+                            "--retargeter.contact-target-topk."
+                        )
                     contact_label_list.append(labels)
                     contact_distance_list.append(distances)
+                    contact_target_points_list.append(target_points_obj)
+                    contact_target_valid_list.append(target_valid)
                 elif contact_body_names is not None:
                     contact_label_list.append(
                         torch.zeros(clip_len, len(contact_body_names), dtype=torch.bool, device=device)
@@ -484,6 +599,20 @@ class MotionLoader:
                             dtype=torch.float32,
                             device=device,
                         )
+                    )
+                    topk = int(contact_target_topk or 0)
+                    contact_target_points_list.append(
+                        torch.zeros(
+                            clip_len,
+                            len(contact_body_names),
+                            topk,
+                            3,
+                            dtype=torch.float32,
+                            device=device,
+                        )
+                    )
+                    contact_target_valid_list.append(
+                        torch.zeros(clip_len, len(contact_body_names), dtype=torch.bool, device=device)
                     )
 
         # Concatenate all data
@@ -515,8 +644,13 @@ class MotionLoader:
             self._set_contact_arrays(
                 torch.cat(contact_label_list, dim=0),
                 torch.cat(contact_distance_list, dim=0),
+                torch.cat(contact_target_points_list, dim=0),
+                torch.cat(contact_target_valid_list, dim=0),
                 contact_body_names,
                 contact_body_indices if contact_body_indices is not None else torch.zeros(0, dtype=torch.long),
+                contact_body_local_offsets
+                if contact_body_local_offsets is not None
+                else torch.zeros(0, 3, dtype=torch.float32),
                 contact_source,
                 contact_target,
                 device=device,
@@ -525,8 +659,18 @@ class MotionLoader:
             self.has_contact_labels = False
             self._contact_object_label = torch.zeros(self._joint_pos.shape[0], 0, dtype=torch.bool, device=device)
             self._contact_object_distance = torch.zeros(self._joint_pos.shape[0], 0, dtype=torch.float32, device=device)
+            self._contact_object_target_points_obj = torch.zeros(
+                self._joint_pos.shape[0],
+                0,
+                0,
+                3,
+                dtype=torch.float32,
+                device=device,
+            )
+            self._contact_object_target_valid = torch.zeros(self._joint_pos.shape[0], 0, dtype=torch.bool, device=device)
             self.contact_body_names = []
             self.contact_body_indices = torch.zeros(0, dtype=torch.long, device=device)
+            self.contact_body_local_offsets = torch.zeros(0, 3, dtype=torch.float32, device=device)
 
         logger.info(f"Concatenated {len(npz_files)} motion files. Total timesteps: {self._joint_pos.shape[0]}")
 
@@ -583,6 +727,21 @@ class MotionLoader:
     @property
     def contact_object_distance(self) -> torch.Tensor:
         return self._contact_object_distance[:]
+
+    @property
+    def has_contact_target_points(self) -> bool:
+        return (
+            self._contact_object_target_points_obj.numel() > 0
+            and self._contact_object_target_points_obj.shape[2] > 0
+        )
+
+    @property
+    def contact_object_target_points_obj(self) -> torch.Tensor:
+        return self._contact_object_target_points_obj[:]
+
+    @property
+    def contact_object_target_valid(self) -> torch.Tensor:
+        return self._contact_object_target_valid[:]
 
     def extend_with_segments(self, segments: dict[str, torch.Tensor], prepend: bool) -> MotionLoader:
         """Merge interpolated segments with motion data, mutating this MotionLoader."""
@@ -641,6 +800,54 @@ class MotionLoader:
             )
             self._contact_object_label = torch.cat(label_tensors, dim=0)
             self._contact_object_distance = torch.cat(distance_tensors, dim=0)
+            if not hasattr(self, "_contact_object_target_points_obj"):
+                self._contact_object_target_points_obj = torch.zeros(
+                    self._contact_object_label.shape[0] - seg_len,
+                    len(self.contact_body_names),
+                    0,
+                    3,
+                    dtype=torch.float32,
+                    device=self._contact_object_label.device,
+                )
+            if not hasattr(self, "_contact_object_target_valid"):
+                self._contact_object_target_valid = torch.zeros(
+                    self._contact_object_label.shape[0] - seg_len,
+                    len(self.contact_body_names),
+                    dtype=torch.bool,
+                    device=self._contact_object_label.device,
+                )
+            contact_target_points = torch.zeros(
+                seg_len,
+                len(self.contact_body_names),
+                self._contact_object_target_points_obj.shape[2],
+                3,
+                dtype=self._contact_object_target_points_obj.dtype,
+                device=self._contact_object_target_points_obj.device,
+            )
+            contact_target_valid = torch.zeros(
+                seg_len,
+                len(self.contact_body_names),
+                dtype=torch.bool,
+                device=self._contact_object_target_valid.device,
+            )
+            target_point_tensors = (
+                (contact_target_points, self._contact_object_target_points_obj)
+                if prepend
+                else (
+                    self._contact_object_target_points_obj,
+                    contact_target_points,
+                )
+            )
+            target_valid_tensors = (
+                (contact_target_valid, self._contact_object_target_valid)
+                if prepend
+                else (
+                    self._contact_object_target_valid,
+                    contact_target_valid,
+                )
+            )
+            self._contact_object_target_points_obj = torch.cat(target_point_tensors, dim=0)
+            self._contact_object_target_valid = torch.cat(target_valid_tensors, dim=0)
 
         seg_len = int(segments["joint_pos"].shape[0])
         if prepend:
@@ -649,6 +856,9 @@ class MotionLoader:
                 first_start, first_end = shifted[0]
                 shifted[0] = (0, first_end)
             self.clip_ranges = shifted
+            self.real_motion_clip_ranges = [
+                (start + seg_len, end + seg_len) for start, end in self.real_motion_clip_ranges
+            ]
         elif self.clip_ranges:
             last_start, last_end = self.clip_ranges[-1]
             self.clip_ranges[-1] = (last_start, last_end + seg_len)
@@ -901,28 +1111,6 @@ class MotionCommand(CommandTermBase):
         self.init_pose_cfg: NoiseToInitialPoseConfig = self.motion_cfg.noise_to_initial_pose
         self.hard_motion_sampling_ratio = float(self.motion_cfg.hard_motion_sampling_ratio)
         self.hard_motion_sampling_ema_alpha = float(self.motion_cfg.hard_motion_sampling_ema_alpha)
-        self.stable_state_reset_ratio = float(self.motion_cfg.stable_state_reset_ratio)
-        self.stable_state_reset_adaptive = bool(self.motion_cfg.stable_state_reset_adaptive)
-        self.stable_state_reset_pool_size = int(self.motion_cfg.stable_state_reset_pool_size)
-        self.stable_state_reset_per_clip_pool_size = int(self.motion_cfg.stable_state_reset_per_clip_pool_size)
-        self.stable_state_reset_warmup_steps = int(self.motion_cfg.stable_state_reset_warmup_steps)
-        self.stable_state_reset_min_alive_steps = int(self.motion_cfg.stable_state_reset_min_alive_steps)
-        self.stable_state_reset_update_interval = int(self.motion_cfg.stable_state_reset_update_interval)
-        self.stable_state_reset_max_updates_per_step = int(self.motion_cfg.stable_state_reset_max_updates_per_step)
-        self.stable_state_reset_min_pool_fill_ratio = float(self.motion_cfg.stable_state_reset_min_pool_fill_ratio)
-        self.stable_state_reset_full_pool_fill_ratio = float(self.motion_cfg.stable_state_reset_full_pool_fill_ratio)
-        self.stable_state_reset_min_average_episode_length = float(
-            self.motion_cfg.stable_state_reset_min_average_episode_length
-        )
-        self.stable_state_reset_full_average_episode_length = float(
-            self.motion_cfg.stable_state_reset_full_average_episode_length
-        )
-        self.stable_state_reset_bad_tracking_rate_threshold = float(
-            self.motion_cfg.stable_state_reset_bad_tracking_rate_threshold
-        )
-        self.stable_state_reset_bad_tracking_ema_alpha = float(
-            self.motion_cfg.stable_state_reset_bad_tracking_ema_alpha
-        )
 
         if not 0.0 <= self.hard_motion_sampling_ratio <= 1.0:
             raise ValueError(
@@ -932,71 +1120,6 @@ class MotionCommand(CommandTermBase):
             raise ValueError(
                 "motion_config.hard_motion_sampling_ema_alpha must be in (0, 1], "
                 f"got {self.hard_motion_sampling_ema_alpha}."
-            )
-        if not 0.0 <= self.stable_state_reset_ratio <= 1.0:
-            raise ValueError(
-                "motion_config.stable_state_reset_ratio must be in [0, 1], "
-                f"got {self.stable_state_reset_ratio}."
-            )
-        if self.stable_state_reset_pool_size < 0:
-            raise ValueError(
-                "motion_config.stable_state_reset_pool_size must be non-negative, "
-                f"got {self.stable_state_reset_pool_size}."
-            )
-        if self.stable_state_reset_per_clip_pool_size < 0:
-            raise ValueError(
-                "motion_config.stable_state_reset_per_clip_pool_size must be non-negative, "
-                f"got {self.stable_state_reset_per_clip_pool_size}."
-            )
-        if self.stable_state_reset_warmup_steps < 0:
-            raise ValueError(
-                "motion_config.stable_state_reset_warmup_steps must be non-negative, "
-                f"got {self.stable_state_reset_warmup_steps}."
-            )
-        if self.stable_state_reset_min_alive_steps < 0:
-            raise ValueError(
-                "motion_config.stable_state_reset_min_alive_steps must be non-negative, "
-                f"got {self.stable_state_reset_min_alive_steps}."
-            )
-        if self.stable_state_reset_update_interval <= 0:
-            raise ValueError(
-                "motion_config.stable_state_reset_update_interval must be positive, "
-                f"got {self.stable_state_reset_update_interval}."
-            )
-        if self.stable_state_reset_max_updates_per_step < 0:
-            raise ValueError(
-                "motion_config.stable_state_reset_max_updates_per_step must be non-negative, "
-                f"got {self.stable_state_reset_max_updates_per_step}."
-            )
-        if not 0.0 <= self.stable_state_reset_min_pool_fill_ratio <= 1.0:
-            raise ValueError(
-                "motion_config.stable_state_reset_min_pool_fill_ratio must be in [0, 1], "
-                f"got {self.stable_state_reset_min_pool_fill_ratio}."
-            )
-        if not 0.0 <= self.stable_state_reset_full_pool_fill_ratio <= 1.0:
-            raise ValueError(
-                "motion_config.stable_state_reset_full_pool_fill_ratio must be in [0, 1], "
-                f"got {self.stable_state_reset_full_pool_fill_ratio}."
-            )
-        if self.stable_state_reset_min_average_episode_length < 0.0:
-            raise ValueError(
-                "motion_config.stable_state_reset_min_average_episode_length must be non-negative, "
-                f"got {self.stable_state_reset_min_average_episode_length}."
-            )
-        if self.stable_state_reset_full_average_episode_length < 0.0:
-            raise ValueError(
-                "motion_config.stable_state_reset_full_average_episode_length must be non-negative, "
-                f"got {self.stable_state_reset_full_average_episode_length}."
-            )
-        if not 0.0 <= self.stable_state_reset_bad_tracking_rate_threshold <= 1.0:
-            raise ValueError(
-                "motion_config.stable_state_reset_bad_tracking_rate_threshold must be in [0, 1], "
-                f"got {self.stable_state_reset_bad_tracking_rate_threshold}."
-            )
-        if not 0.0 < self.stable_state_reset_bad_tracking_ema_alpha <= 1.0:
-            raise ValueError(
-                "motion_config.stable_state_reset_bad_tracking_ema_alpha must be in (0, 1], "
-                f"got {self.stable_state_reset_bad_tracking_ema_alpha}."
             )
 
     def setup(self) -> None:
@@ -1113,13 +1236,6 @@ class MotionCommand(CommandTermBase):
     def reset(self, env_ids: torch.Tensor | None) -> None:
         """called per reset_idx, reset timesteps and robot/object poses."""
         env_ids = self._ensure_index_tensor(env_ids)
-        if env_ids.numel() == 0:
-            return
-        self.stable_state_reset_used_last[env_ids] = False
-
-        env_ids, pool_env_ids, pool_indices = self._split_env_ids_for_stable_state_reset(env_ids)
-        if pool_env_ids.numel() > 0:
-            self._reset_from_stable_state_pool(pool_env_ids, pool_indices)
         if env_ids.numel() == 0:
             return
 
@@ -1275,8 +1391,12 @@ class MotionCommand(CommandTermBase):
             support_points_by_actor = getattr(self._env, "object_local_support_points_by_actor", None)
             bbox_centers = getattr(self._env, "object_local_bbox_center_by_actor", None)
             bbox_half_extents = getattr(self._env, "object_local_bbox_half_extent_by_actor", None)
-            object_scales = getattr(self._env, "object_scale_factors", None)
-            if support_points_by_actor and object_scales is not None:
+            scale_factors_by_actor = getattr(self._env, "object_scale_factors_by_actor", None)
+            has_object_scales = (
+                getattr(self._env, "object_scale_factors", None) is not None
+                or (isinstance(scale_factors_by_actor, dict) and bool(scale_factors_by_actor))
+            )
+            if support_points_by_actor and has_object_scales:
                 if self.object_name_to_indices and selected_object_type_ids is not None and all_keys is not None:
                     for object_key in all_keys:
                         actor_name = f"object_{object_key}"
@@ -1286,23 +1406,27 @@ class MotionCommand(CommandTermBase):
 
                         object_type_id = self.object_key_to_id[object_key]
                         mask = selected_object_type_ids == object_type_id
+                        actor_scales = self._get_actor_scale_factors(actor_name, env_ids[mask])
+                        if actor_scales is None:
+                            continue
 
                         support_delta = get_scaled_object_support_delta_from_points(
                             quat_xyzw=obj_ori[mask],
-                            scales_xyz=object_scales[env_ids[mask]],
+                            scales_xyz=actor_scales,
                             local_support_points=local_support_points,
                         )
                         target_obj_pos[mask, 2] += support_delta
                 else:
                     local_support_points = support_points_by_actor.get(self.object_name)
-                    if local_support_points is not None:
+                    actor_scales = self._get_actor_scale_factors(self.object_name, env_ids)
+                    if local_support_points is not None and actor_scales is not None:
                         support_delta = get_scaled_object_support_delta_from_points(
                             quat_xyzw=obj_ori,
-                            scales_xyz=object_scales[env_ids],
+                            scales_xyz=actor_scales,
                             local_support_points=local_support_points,
                         )
                         target_obj_pos[:, 2] += support_delta
-            elif bbox_centers and bbox_half_extents and object_scales is not None:
+            elif bbox_centers and bbox_half_extents and has_object_scales:
                 if self.object_name_to_indices and selected_object_type_ids is not None and all_keys is not None:
                     for object_key in all_keys:
                         actor_name = f"object_{object_key}"
@@ -1313,10 +1437,13 @@ class MotionCommand(CommandTermBase):
 
                         object_type_id = self.object_key_to_id[object_key]
                         mask = selected_object_type_ids == object_type_id
+                        actor_scales = self._get_actor_scale_factors(actor_name, env_ids[mask])
+                        if actor_scales is None:
+                            continue
 
                         support_delta = get_scaled_object_support_delta(
                             quat_xyzw=obj_ori[mask],
-                            scales_xyz=object_scales[env_ids[mask]],
+                            scales_xyz=actor_scales,
                             local_bbox_center=local_center,
                             local_bbox_half_extent=local_half_extent,
                         )
@@ -1324,25 +1451,36 @@ class MotionCommand(CommandTermBase):
                 else:
                     local_center = bbox_centers.get(self.object_name)
                     local_half_extent = bbox_half_extents.get(self.object_name)
-                    if local_center is not None and local_half_extent is not None:
+                    actor_scales = self._get_actor_scale_factors(self.object_name, env_ids)
+                    if local_center is not None and local_half_extent is not None and actor_scales is not None:
                         support_delta = get_scaled_object_support_delta(
                             quat_xyzw=obj_ori,
-                            scales_xyz=object_scales[env_ids],
+                            scales_xyz=actor_scales,
                             local_bbox_center=local_center,
                             local_bbox_half_extent=local_half_extent,
                         )
                         target_obj_pos[:, 2] += support_delta
-            elif hasattr(self._env, "object_scale_factors_z") and hasattr(self._env, "object_scale_height"):
-                scale_z = self._env.object_scale_factors_z[env_ids].to(device=self.device)
+            elif hasattr(self._env, "object_scale_height"):
                 height = float(self._env.object_scale_height)
                 if height > 0.0:
-                    target_obj_pos[:, 2] += (scale_z - 1.0) * 0.5 * height
+                    if self.object_name_to_indices and selected_object_type_ids is not None and all_keys is not None:
+                        for object_key in all_keys:
+                            actor_name = f"object_{object_key}"
+                            object_type_id = self.object_key_to_id[object_key]
+                            mask = selected_object_type_ids == object_type_id
+                            scale_z = self._get_actor_scale_z(actor_name, env_ids[mask])
+                            if scale_z is not None:
+                                target_obj_pos[mask, 2] += (scale_z - 1.0) * 0.5 * height
+                    else:
+                        scale_z = self._get_actor_scale_z(self.object_name, env_ids)
+                        if scale_z is not None:
+                            target_obj_pos[:, 2] += (scale_z - 1.0) * 0.5 * height
             if hasattr(self, "object_pos_reward_offset"):
                 self.object_pos_reward_offset[env_ids] = target_obj_pos - obj_pos
 
             object_states = torch.cat([target_obj_pos, obj_ori, obj_lin_vel, obj_ang_vel], dim=-1)
             # 4.3 set object states in simulator (per-clip object selection when available)
-            self.set_simulator_object_states(env_ids, object_states)
+            self.set_simulator_object_states(env_ids, object_states, write_updates=False)
 
     def step(self) -> None:
         """called in _update_tasks_callback of the environment. (after compute_reward, before compute_observations)"""
@@ -1576,6 +1714,18 @@ class MotionCommand(CommandTermBase):
         return self.motion.contact_object_distance[self.time_steps]
 
     @property
+    def has_contact_target_points(self) -> bool:
+        return bool(getattr(self.motion, "has_contact_target_points", False))
+
+    @property
+    def contact_object_target_points_obj(self) -> torch.Tensor:
+        return self.motion.contact_object_target_points_obj[self.time_steps]
+
+    @property
+    def contact_object_target_valid(self) -> torch.Tensor:
+        return self.motion.contact_object_target_valid[self.time_steps]
+
+    @property
     def contact_body_pos_w(self) -> torch.Tensor:
         return self._env.simulator._rigid_body_pos[:, self.motion.contact_body_indices, :]
 
@@ -1651,392 +1801,6 @@ class MotionCommand(CommandTermBase):
         if self.motion_cfg.use_adaptive_timesteps_sampler:
             self.adaptive_timesteps_sampler.init_buffers()
 
-        self._init_stable_state_reset_pool()
-
-    def _stable_state_reset_enabled(self) -> bool:
-        return self.stable_state_reset_ratio > 0.0 and self.stable_state_reset_pool_size > 0
-
-    def _stable_state_reset_capacity(self) -> int:
-        return int(getattr(self, "stable_state_reset_pool_capacity", self.stable_state_reset_pool_size))
-
-    def _stable_state_reset_length_thresholds(self) -> tuple[float, float]:
-        min_length = self.stable_state_reset_min_average_episode_length
-        if min_length <= 0.0:
-            min_length = max(float(self.stable_state_reset_min_alive_steps * 2), 1.0)
-
-        full_length = self.stable_state_reset_full_average_episode_length
-        if full_length <= min_length:
-            full_length = max(min_length * 2.0, min_length + 1.0)
-        return min_length, full_length
-
-    def _stable_state_reset_pool_fill_ratio(self) -> float:
-        pool_capacity = self._stable_state_reset_capacity()
-        if pool_capacity <= 0:
-            return 0.0
-        return min(float(self.stable_state_pool_count) / float(pool_capacity), 1.0)
-
-    @staticmethod
-    def _stable_state_reset_ramp(value: float, start: float, full: float) -> float:
-        if value <= start:
-            return 0.0
-        if full <= start:
-            return 1.0
-        return max(0.0, min((value - start) / (full - start), 1.0))
-
-    def _stable_state_reset_average_episode_length(self) -> float:
-        curriculum_manager = getattr(self._env, "curriculum_manager", None)
-        if curriculum_manager is None:
-            return 0.0
-        tracker = curriculum_manager.get_term("average_episode_tracker")
-        if tracker is None:
-            return 0.0
-        average = tracker.get_average()
-        if torch.is_tensor(average):
-            return float(average.detach().item())
-        return float(average)
-
-    def _current_bad_tracking_rate(self) -> float:
-        term_manager = getattr(self._env, "termination_manager", None)
-        if term_manager is None:
-            return 0.0
-        last_term_results = getattr(term_manager, "last_term_results", {}) or {}
-        bad_tracking = last_term_results.get("bad_tracking")
-        if bad_tracking is None or bad_tracking.numel() == 0:
-            return 0.0
-        return float(bad_tracking.to(dtype=torch.float32).mean().detach().item())
-
-    def _update_stable_state_reset_health_metrics(self) -> None:
-        bad_tracking_rate = self._current_bad_tracking_rate()
-        if not self.stable_state_reset_bad_tracking_rate_initialized:
-            self.stable_state_reset_bad_tracking_rate_ema = bad_tracking_rate
-            self.stable_state_reset_bad_tracking_rate_initialized = True
-            return
-
-        alpha = self.stable_state_reset_bad_tracking_ema_alpha
-        self.stable_state_reset_bad_tracking_rate_ema = (
-            self.stable_state_reset_bad_tracking_rate_ema * (1.0 - alpha) + bad_tracking_rate * alpha
-        )
-
-    def _stable_state_reset_pool_write_allowed(self) -> bool:
-        if not self.stable_state_reset_adaptive:
-            return True
-
-        min_length, _ = self._stable_state_reset_length_thresholds()
-        if self._stable_state_reset_average_episode_length() < min_length:
-            return False
-
-        threshold = self.stable_state_reset_bad_tracking_rate_threshold
-        if threshold > 0.0 and self.stable_state_reset_bad_tracking_rate_ema >= threshold:
-            return False
-
-        return True
-
-    def _compute_stable_state_reset_actual_ratio(self) -> float:
-        if (
-            not self._stable_state_reset_enabled()
-            or self._env.is_evaluating
-            or self.stable_state_pool_count <= 0
-            or self.stable_state_reset_step_count < self.stable_state_reset_warmup_steps
-        ):
-            self.stable_state_reset_actual_ratio = 0.0
-            return 0.0
-
-        if not self.stable_state_reset_adaptive:
-            self.stable_state_reset_actual_ratio = self.stable_state_reset_ratio
-            return self.stable_state_reset_actual_ratio
-
-        min_pool_fill = self.stable_state_reset_min_pool_fill_ratio
-        full_pool_fill = max(self.stable_state_reset_full_pool_fill_ratio, min_pool_fill)
-        pool_fill = self._stable_state_reset_pool_fill_ratio()
-        pool_factor = self._stable_state_reset_ramp(pool_fill, min_pool_fill, full_pool_fill)
-        if pool_factor <= 0.0:
-            self.stable_state_reset_actual_ratio = 0.0
-            return 0.0
-
-        average_length = self._stable_state_reset_average_episode_length()
-        min_length, full_length = self._stable_state_reset_length_thresholds()
-        length_factor = self._stable_state_reset_ramp(average_length, min_length, full_length)
-        if length_factor <= 0.0:
-            self.stable_state_reset_actual_ratio = 0.0
-            return 0.0
-
-        bad_tracking_factor = 1.0
-        threshold = self.stable_state_reset_bad_tracking_rate_threshold
-        if threshold > 0.0:
-            bad_tracking_factor = max(
-                0.0,
-                min(1.0 - self.stable_state_reset_bad_tracking_rate_ema / threshold, 1.0),
-            )
-            if bad_tracking_factor <= 0.0:
-                self.stable_state_reset_actual_ratio = 0.0
-                return 0.0
-
-        self.stable_state_reset_actual_ratio = (
-            self.stable_state_reset_ratio * pool_factor * length_factor * bad_tracking_factor
-        )
-        return self.stable_state_reset_actual_ratio
-
-    def _init_stable_state_reset_pool(self) -> None:
-        self.stable_state_reset_step_count = 0
-        self.stable_state_pool_count = 0
-        self.stable_state_pool_per_clip_capacity = 0
-        self.stable_state_reset_pool_capacity = 0
-        self.stable_state_reset_actual_ratio = 0.0
-        self.stable_state_reset_pool_write_enabled = False
-        self.stable_state_reset_bad_tracking_rate_ema = 0.0
-        self.stable_state_reset_bad_tracking_rate_initialized = False
-        self.stable_state_reset_used_last = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-
-        if not self._stable_state_reset_enabled():
-            return
-
-        num_clips = max(len(self.motion.clip_ranges), 1)
-        if self.stable_state_reset_per_clip_pool_size > 0:
-            per_clip_capacity = self.stable_state_reset_per_clip_pool_size
-        else:
-            per_clip_capacity = max(self.stable_state_reset_pool_size // num_clips, 1)
-        pool_size = per_clip_capacity * num_clips
-        self.stable_state_pool_per_clip_capacity = per_clip_capacity
-        self.stable_state_reset_pool_capacity = pool_size
-        self.stable_state_pool_clip_counts = torch.zeros(num_clips, dtype=torch.long, device=self.device)
-        self.stable_state_pool_clip_next_slots = torch.zeros(num_clips, dtype=torch.long, device=self.device)
-        num_dofs = self.robot_joint_pos.shape[1]
-        self.stable_state_pool_clip_ids = torch.zeros(pool_size, dtype=torch.long, device=self.device)
-        self.stable_state_pool_time_steps = torch.zeros(pool_size, dtype=torch.long, device=self.device)
-        self.stable_state_pool_clip_start_steps = torch.zeros(pool_size, dtype=torch.long, device=self.device)
-        self.stable_state_pool_clip_end_steps = torch.zeros(pool_size, dtype=torch.long, device=self.device)
-        self.stable_state_pool_root_states_local = torch.zeros(pool_size, 13, dtype=torch.float32, device=self.device)
-        self.stable_state_pool_dof_pos = torch.zeros(pool_size, num_dofs, dtype=torch.float32, device=self.device)
-        self.stable_state_pool_dof_vel = torch.zeros(pool_size, num_dofs, dtype=torch.float32, device=self.device)
-
-        if self.motion.has_object:
-            self.stable_state_pool_object_type_ids = torch.zeros(pool_size, dtype=torch.long, device=self.device)
-            self.stable_state_pool_object_states_local = torch.zeros(
-                pool_size, 13, dtype=torch.float32, device=self.device
-            )
-            self.stable_state_pool_object_pos_reward_offset = torch.zeros(
-                pool_size, 3, dtype=torch.float32, device=self.device
-            )
-
-    def update_stable_state_reset_pool(self) -> None:
-        """Record simulator states that have survived long enough to be useful reset starts."""
-        if not self._stable_state_reset_enabled() or self._env.is_evaluating:
-            return
-
-        self.stable_state_reset_step_count += 1
-        self._update_stable_state_reset_health_metrics()
-        self.stable_state_reset_pool_write_enabled = self._stable_state_reset_pool_write_allowed()
-        if not self.stable_state_reset_pool_write_enabled:
-            return
-
-        if self.stable_state_reset_step_count % self.stable_state_reset_update_interval != 0:
-            return
-
-        candidate_mask = self._env.reset_buf == 0
-        candidate_mask &= self._env.episode_length_buf >= self.stable_state_reset_min_alive_steps
-        candidate_mask &= self.time_steps < (self.clip_end_steps - 2)
-        env_ids = candidate_mask.nonzero(as_tuple=False).flatten()
-        if env_ids.numel() == 0:
-            return
-
-        env_ids = self._limit_stable_state_write_env_ids(env_ids)
-
-        self._write_stable_state_reset_pool(env_ids)
-
-    def _limit_stable_state_write_env_ids(self, env_ids: torch.Tensor) -> torch.Tensor:
-        max_updates = self.stable_state_reset_max_updates_per_step
-        if max_updates <= 0 or env_ids.numel() <= max_updates:
-            return env_ids
-
-        clip_ids = self.clip_ids[env_ids]
-        unique_clip_ids = torch.unique(clip_ids)
-        unique_clip_ids = unique_clip_ids[torch.randperm(unique_clip_ids.numel(), device=self.device)]
-        quota_per_clip = max(max_updates // max(int(unique_clip_ids.numel()), 1), 1)
-        selected_parts: list[torch.Tensor] = []
-        leftover_parts: list[torch.Tensor] = []
-        selected_count = 0
-
-        for clip_id in unique_clip_ids.tolist():
-            if selected_count >= max_updates:
-                break
-            clip_mask = clip_ids == int(clip_id)
-            clip_env_ids = env_ids[clip_mask]
-            if clip_env_ids.numel() == 0:
-                continue
-
-            perm = torch.randperm(clip_env_ids.numel(), device=self.device)
-            remaining = max_updates - selected_count
-            take_count = min(int(clip_env_ids.numel()), quota_per_clip, remaining)
-            if take_count > 0:
-                selected_parts.append(clip_env_ids[perm[:take_count]])
-                selected_count += take_count
-            if take_count < clip_env_ids.numel():
-                leftover_parts.append(clip_env_ids[perm[take_count:]])
-
-        if selected_count < max_updates and leftover_parts:
-            leftovers = torch.cat(leftover_parts)
-            take_count = min(max_updates - selected_count, int(leftovers.numel()))
-            if take_count > 0:
-                selected_parts.append(leftovers[torch.randperm(leftovers.numel(), device=self.device)[:take_count]])
-
-        if not selected_parts:
-            return env_ids[:0]
-        return torch.cat(selected_parts, dim=0)
-
-    def _write_stable_state_reset_pool(self, env_ids: torch.Tensor) -> None:
-        if env_ids.numel() == 0 or not self._stable_state_reset_enabled():
-            return
-
-        per_clip_capacity = self.stable_state_pool_per_clip_capacity
-        if per_clip_capacity <= 0:
-            return
-
-        env_clip_ids = self.clip_ids[env_ids]
-        for clip_id in torch.unique(env_clip_ids).tolist():
-            clip_id_int = int(clip_id)
-            clip_env_ids = env_ids[env_clip_ids == clip_id_int]
-            if clip_env_ids.numel() == 0:
-                continue
-
-            write_count = min(int(clip_env_ids.numel()), per_clip_capacity)
-            clip_env_ids = clip_env_ids[:write_count]
-            slots = (
-                torch.arange(write_count, dtype=torch.long, device=self.device)
-                + self.stable_state_pool_clip_next_slots[clip_id_int]
-            ) % per_clip_capacity
-            pool_indices = clip_id_int * per_clip_capacity + slots
-
-            env_origins = self._env.simulator.scene.env_origins[clip_env_ids]
-            root_states = self._env.simulator.robot_root_states[clip_env_ids, :13].detach().clone()
-            root_states[:, :3] -= env_origins
-
-            self.stable_state_pool_clip_ids[pool_indices] = self.clip_ids[clip_env_ids]
-            self.stable_state_pool_time_steps[pool_indices] = self.time_steps[clip_env_ids]
-            self.stable_state_pool_clip_start_steps[pool_indices] = self.clip_start_steps[clip_env_ids]
-            self.stable_state_pool_clip_end_steps[pool_indices] = self.clip_end_steps[clip_env_ids]
-            self.stable_state_pool_root_states_local[pool_indices] = root_states
-            self.stable_state_pool_dof_pos[pool_indices] = self.robot_joint_pos[clip_env_ids].detach()
-            self.stable_state_pool_dof_vel[pool_indices] = self.robot_joint_vel[clip_env_ids].detach()
-
-            if self.motion.has_object:
-                object_states = self._active_object_states_w()[clip_env_ids].detach().clone()
-                object_pos_reward_offset = object_states[:, :3] - self.object_pos_w[clip_env_ids]
-                object_states[:, :3] -= env_origins
-                self.stable_state_pool_object_type_ids[pool_indices] = self.object_type_ids[clip_env_ids]
-                self.stable_state_pool_object_states_local[pool_indices] = object_states
-                self.stable_state_pool_object_pos_reward_offset[pool_indices] = object_pos_reward_offset
-
-            self.stable_state_pool_clip_next_slots[clip_id_int] = (
-                self.stable_state_pool_clip_next_slots[clip_id_int] + write_count
-            ) % per_clip_capacity
-            self.stable_state_pool_clip_counts[clip_id_int] = min(
-                per_clip_capacity,
-                int(self.stable_state_pool_clip_counts[clip_id_int].item()) + write_count,
-            )
-
-        self.stable_state_pool_count = int(self.stable_state_pool_clip_counts.sum().detach().item())
-
-    def _sample_stable_state_pool_indices(self, num_samples: int) -> torch.Tensor:
-        if num_samples <= 0 or self.stable_state_pool_count <= 0:
-            return torch.empty(0, dtype=torch.long, device=self.device)
-
-        available_clip_ids = (self.stable_state_pool_clip_counts > 0).nonzero(as_tuple=False).flatten()
-        if available_clip_ids.numel() == 0:
-            return torch.empty(0, dtype=torch.long, device=self.device)
-
-        if self.motion.has_object and hasattr(self, "object_type_id_per_clip"):
-            sampled_clip_ids = self._sample_stable_state_clip_ids_balanced_by_object(
-                num_samples,
-                available_clip_ids,
-            )
-        else:
-            sampled_clip_ids = available_clip_ids[
-                torch.randint(0, available_clip_ids.numel(), (num_samples,), device=self.device)
-            ]
-
-        sampled_clip_counts = self.stable_state_pool_clip_counts[sampled_clip_ids].clamp_min(1)
-        sampled_slots = (torch.rand(num_samples, device=self.device) * sampled_clip_counts.float()).long()
-
-        return sampled_clip_ids * self.stable_state_pool_per_clip_capacity + sampled_slots
-
-    def _sample_stable_state_clip_ids_balanced_by_object(
-        self,
-        num_samples: int,
-        available_clip_ids: torch.Tensor,
-    ) -> torch.Tensor:
-        object_ids = self.object_type_id_per_clip[available_clip_ids]
-        available_object_ids = torch.unique(object_ids)
-        valid_clip_mask = available_object_ids[:, None] == object_ids[None, :]
-        object_clip_counts = valid_clip_mask.sum(dim=1).clamp_min(1)
-        sampled_object_rows = torch.randint(0, available_object_ids.numel(), (num_samples,), device=self.device)
-        sampled_valid_clip_mask = valid_clip_mask[sampled_object_rows]
-        sampled_counts = object_clip_counts[sampled_object_rows]
-        sampled_ranks = (torch.rand(num_samples, device=self.device) * sampled_counts.float()).long()
-        sampled_orders = sampled_valid_clip_mask.to(dtype=torch.long).cumsum(dim=1) - 1
-        sampled_clip_columns = (
-            sampled_valid_clip_mask & (sampled_orders == sampled_ranks[:, None])
-        ).to(dtype=torch.long).argmax(dim=1)
-        return available_clip_ids[sampled_clip_columns]
-
-    def _split_env_ids_for_stable_state_reset(
-        self,
-        env_ids: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        empty = torch.empty(0, dtype=torch.long, device=self.device)
-        if (
-            not self._stable_state_reset_enabled()
-            or self._env.is_evaluating
-            or self.stable_state_pool_count <= 0
-            or self.stable_state_reset_step_count < self.stable_state_reset_warmup_steps
-        ):
-            self.stable_state_reset_actual_ratio = 0.0
-            return env_ids, empty, empty
-
-        actual_ratio = self._compute_stable_state_reset_actual_ratio()
-        num_pool_resets = round(int(env_ids.numel()) * actual_ratio)
-        num_pool_resets = max(0, min(num_pool_resets, int(env_ids.numel())))
-        if num_pool_resets == 0:
-            return env_ids, empty, empty
-
-        pool_slots = torch.randperm(env_ids.numel(), device=self.device)[:num_pool_resets]
-        motion_mask = torch.ones(env_ids.numel(), dtype=torch.bool, device=self.device)
-        motion_mask[pool_slots] = False
-
-        pool_env_ids = env_ids[pool_slots]
-        pool_indices = self._sample_stable_state_pool_indices(num_pool_resets)
-        if pool_indices.numel() != pool_env_ids.numel():
-            self.stable_state_reset_actual_ratio = 0.0
-            return env_ids, empty, empty
-        motion_env_ids = env_ids[motion_mask]
-        return motion_env_ids, pool_env_ids, pool_indices
-
-    def _reset_from_stable_state_pool(self, env_ids: torch.Tensor, pool_indices: torch.Tensor) -> None:
-        if env_ids.numel() == 0:
-            return
-
-        env_origins = self._env.simulator.scene.env_origins[env_ids]
-        root_states = self.stable_state_pool_root_states_local[pool_indices].clone()
-        root_states[:, :3] += env_origins
-
-        self.clip_ids[env_ids] = self.stable_state_pool_clip_ids[pool_indices]
-        self.time_steps[env_ids] = self.stable_state_pool_time_steps[pool_indices]
-        self.clip_start_steps[env_ids] = self.stable_state_pool_clip_start_steps[pool_indices]
-        self.clip_end_steps[env_ids] = self.stable_state_pool_clip_end_steps[pool_indices]
-        self.started_at_timestep_zero[env_ids] = False
-
-        self._env.simulator.dof_pos[env_ids] = self.stable_state_pool_dof_pos[pool_indices]
-        self._env.simulator.dof_vel[env_ids] = self.stable_state_pool_dof_vel[pool_indices]
-        self._env.simulator.robot_root_states[env_ids, :13] = root_states
-
-        if self.motion.has_object:
-            object_states = self.stable_state_pool_object_states_local[pool_indices].clone()
-            object_states[:, :3] += env_origins
-            self.object_type_ids[env_ids] = self.stable_state_pool_object_type_ids[pool_indices]
-            self.object_pos_reward_offset[env_ids] = self.stable_state_pool_object_pos_reward_offset[pool_indices]
-            self.set_simulator_object_states(env_ids, object_states)
-
-        self.stable_state_reset_used_last[env_ids] = True
-
     def _sample_clip_ids_for_reset(self, num_resets: int, num_clips: int) -> torch.Tensor:
         if self._env.is_evaluating:
             return torch.zeros(num_resets, dtype=torch.long, device=self.device)
@@ -2096,6 +1860,58 @@ class MotionCommand(CommandTermBase):
                 )
             self.hard_motion_completion_update_count[clip_id_int] += 1
 
+    def _get_actor_scale_factors(self, actor_name: str, env_ids: torch.Tensor) -> torch.Tensor | None:
+        scale_factors_by_actor = getattr(self._env, "object_scale_factors_by_actor", None)
+        if isinstance(scale_factors_by_actor, dict):
+            actor_scale_factors = scale_factors_by_actor.get(actor_name)
+            if actor_scale_factors is not None:
+                return actor_scale_factors[env_ids].to(device=self.device, dtype=torch.float32)
+
+        scale_factors = getattr(self._env, "object_scale_factors", None)
+        if scale_factors is not None:
+            return scale_factors[env_ids].to(device=self.device, dtype=torch.float32)
+        return None
+
+    def _get_actor_scale_z(self, actor_name: str, env_ids: torch.Tensor) -> torch.Tensor | None:
+        scale_factors_z_by_actor = getattr(self._env, "object_scale_factors_z_by_actor", None)
+        if isinstance(scale_factors_z_by_actor, dict):
+            actor_scale_factors_z = scale_factors_z_by_actor.get(actor_name)
+            if actor_scale_factors_z is not None:
+                return actor_scale_factors_z[env_ids].to(device=self.device, dtype=torch.float32)
+
+        scale_factors_z = getattr(self._env, "object_scale_factors_z", None)
+        if scale_factors_z is not None:
+            return scale_factors_z[env_ids].to(device=self.device, dtype=torch.float32)
+        return None
+
+    def _sync_active_object_scale_factors(self, actor_name: str, env_ids: torch.Tensor) -> None:
+        scale_factors_by_actor = getattr(self._env, "object_scale_factors_by_actor", None)
+        if not isinstance(scale_factors_by_actor, dict) or actor_name not in scale_factors_by_actor:
+            return
+
+        if not hasattr(self._env, "object_scale_factors"):
+            self._env.object_scale_factors = torch.ones(self.num_envs, 3, device=self.device, dtype=torch.float32)
+        if self._env.object_scale_factors.shape != (self.num_envs, 3):
+            self._env.object_scale_factors = torch.ones(self.num_envs, 3, device=self.device, dtype=torch.float32)
+
+        actor_scale_factors = scale_factors_by_actor[actor_name]
+        self._env.object_scale_factors[env_ids] = actor_scale_factors[env_ids].to(
+            device=self.device, dtype=torch.float32
+        )
+
+        scale_factors_z_by_actor = getattr(self._env, "object_scale_factors_z_by_actor", None)
+        if not isinstance(scale_factors_z_by_actor, dict) or actor_name not in scale_factors_z_by_actor:
+            return
+        if not hasattr(self._env, "object_scale_factors_z"):
+            self._env.object_scale_factors_z = torch.ones(self.num_envs, device=self.device, dtype=torch.float32)
+        if self._env.object_scale_factors_z.shape != (self.num_envs,):
+            self._env.object_scale_factors_z = torch.ones(self.num_envs, device=self.device, dtype=torch.float32)
+
+        actor_scale_factors_z = scale_factors_z_by_actor[actor_name]
+        self._env.object_scale_factors_z[env_ids] = actor_scale_factors_z[env_ids].to(
+            device=self.device, dtype=torch.float32
+        )
+
     def _park_object_actor(self, object_key: str, env_ids: torch.Tensor, write_updates: bool = True) -> None:
         """Move an inactive object actor outside depth/render/collision range for the selected envs."""
         if env_ids.numel() == 0:
@@ -2109,7 +1925,13 @@ class MotionCommand(CommandTermBase):
         parked_states = torch.cat([parked_pos, parked_quat, parked_vel, parked_vel], dim=-1)
         self._env.simulator.set_actor_states([f"object_{object_key}"], env_ids, parked_states, write_updates=write_updates)
 
-    def set_simulator_object_states(self, env_ids: torch.Tensor | None, object_states: torch.Tensor) -> None:
+    def set_simulator_object_states(
+        self,
+        env_ids: torch.Tensor | None,
+        object_states: torch.Tensor,
+        *,
+        write_updates: bool = True,
+    ) -> None:
         """Place the active object for each env and park inactive multi-object actors."""
         if not self.motion.has_object:
             return
@@ -2126,9 +1948,6 @@ class MotionCommand(CommandTermBase):
         if self.object_name_to_indices:
             all_keys = sorted(self.object_name_to_indices.keys())
             new_object_type_ids = self.object_type_ids[env_ids].clone()
-            previous_object_type_ids = self.simulator_active_object_type_ids[env_ids].clone()
-            first_object_sync_mask = previous_object_type_ids < 0
-            changed_object_mask = (~first_object_sync_mask) & (previous_object_type_ids != new_object_type_ids)
 
             # Place active object per env according to selected clip key.
             for object_key in all_keys:
@@ -2144,32 +1963,25 @@ class MotionCommand(CommandTermBase):
                     write_updates=False,
                 )
                 self.active_object_indices[env_ids_subset] = self.object_name_to_indices[object_key][env_ids_subset]
+                self._sync_active_object_scale_factors(f"object_{object_key}", env_ids_subset)
 
-            # Park inactive objects far below ground. Do a full park only once per env,
-            # then park just the previously active object when the env switches object type.
+            # Reassert the multi-object invariant every sync: exactly the active
+            # object actor is placed in-scene, and all other object actors are parked.
             for object_key in all_keys:
                 object_type_id = self.object_key_to_id[object_key]
-
-                first_sync_inactive_mask = first_object_sync_mask & (new_object_type_ids != object_type_id)
-                if first_sync_inactive_mask.any():
+                inactive_mask = new_object_type_ids != object_type_id
+                if inactive_mask.any():
                     self._park_object_actor(
                         object_key,
-                        env_ids[first_sync_inactive_mask],
-                        write_updates=False,
-                    )
-
-                previous_active_mask = changed_object_mask & (previous_object_type_ids == object_type_id)
-                if previous_active_mask.any():
-                    self._park_object_actor(
-                        object_key,
-                        env_ids[previous_active_mask],
+                        env_ids[inactive_mask],
                         write_updates=False,
                     )
 
             self.simulator_active_object_type_ids[env_ids] = new_object_type_ids
-            self._env.simulator.write_state_updates()
+            if write_updates:
+                self._env.simulator.write_state_updates()
         else:
-            self._env.simulator.set_actor_states([self.object_name], env_ids, object_states)
+            self._env.simulator.set_actor_states([self.object_name], env_ids, object_states, write_updates=write_updates)
             self.active_object_indices[env_ids] = self.object_indices_in_simulator[env_ids]
 
     def update_metrics(self):
@@ -2209,49 +2021,6 @@ class MotionCommand(CommandTermBase):
                 "sampling_top1_bin"
             ]
 
-        if self._stable_state_reset_enabled():
-            actual_ratio = torch.tensor(
-                self._compute_stable_state_reset_actual_ratio(), dtype=torch.float32, device=self.device
-            )
-            pool_count = torch.tensor(float(self.stable_state_pool_count), dtype=torch.float32, device=self.device)
-            pool_size = torch.tensor(
-                float(max(self._stable_state_reset_capacity(), 1)), dtype=torch.float32, device=self.device
-            )
-            configured_pool_size = torch.tensor(
-                float(max(self.stable_state_reset_pool_size, 1)), dtype=torch.float32, device=self.device
-            )
-            per_clip_capacity = torch.tensor(
-                float(max(self.stable_state_pool_per_clip_capacity, 1)), dtype=torch.float32, device=self.device
-            )
-            clip_counts = self.stable_state_pool_clip_counts.to(dtype=torch.float32)
-            available_clip_count = torch.count_nonzero(self.stable_state_pool_clip_counts > 0).to(dtype=torch.float32)
-            pool_write_enabled = torch.tensor(
-                float(self.stable_state_reset_pool_write_enabled), dtype=torch.float32, device=self.device
-            )
-            bad_tracking_rate_ema = torch.tensor(
-                self.stable_state_reset_bad_tracking_rate_ema, dtype=torch.float32, device=self.device
-            )
-            average_episode_length = torch.tensor(
-                self._stable_state_reset_average_episode_length(), dtype=torch.float32, device=self.device
-            )
-            self.metrics["motion/stable_state_reset_max_ratio"] = torch.tensor(
-                self.stable_state_reset_ratio, dtype=torch.float32, device=self.device
-            )
-            self.metrics["motion/stable_state_reset_actual_ratio"] = actual_ratio
-            self.metrics["motion/stable_state_reset_pool_count"] = pool_count
-            self.metrics["motion/stable_state_reset_configured_pool_size"] = configured_pool_size
-            self.metrics["motion/stable_state_reset_pool_size"] = pool_size
-            self.metrics["motion/stable_state_reset_pool_fill_ratio"] = pool_count / pool_size
-            self.metrics["motion/stable_state_reset_per_clip_capacity"] = per_clip_capacity
-            self.metrics["motion/stable_state_reset_available_clip_count"] = available_clip_count
-            self.metrics["motion/stable_state_reset_clip_count_min"] = clip_counts.min()
-            self.metrics["motion/stable_state_reset_clip_count_max"] = clip_counts.max()
-            self.metrics["motion/stable_state_reset_clip_count_mean"] = clip_counts.mean()
-            self.metrics["motion/stable_state_reset_pool_write_enabled"] = pool_write_enabled
-            self.metrics["motion/stable_state_reset_bad_tracking_rate_ema"] = bad_tracking_rate_ema
-            self.metrics["motion/stable_state_reset_average_episode_length"] = average_episode_length
-            self.metrics["motion/stable_state_reset_used"] = self.stable_state_reset_used_last.float()
-
     #########################################################################################
     ## Internal helpers
     #########################################################################################
@@ -2279,13 +2048,16 @@ class MotionCommand(CommandTermBase):
             )
             return
 
-        default_state = self._build_default_pose_state(use_motion_end=not prepend)
-
         action = "prepend" if prepend else "append"
         log_str = f"{action} {num_steps} interpolated frames ({duration}s) from default pose to motion"
         try:
-            self._add_transition_to_motion(default_state, num_steps, prepend=prepend)
-            logger.info(log_str)
+            if self.motion.has_multiple_clips:
+                self._add_transition_to_each_clip(num_steps, prepend=prepend)
+                logger.info(f"{log_str} for each of {len(self.motion.clip_ranges)} clips")
+            else:
+                default_state = self._build_default_pose_state(use_motion_end=not prepend)
+                self._add_transition_to_motion(default_state, num_steps, prepend=prepend)
+                logger.info(log_str)
         except Exception as exc:
             logger.error(f"Failed to {action} default pose transition: {exc}")
             raise RuntimeError(
@@ -2352,7 +2124,11 @@ class MotionCommand(CommandTermBase):
                 f"min={float(offsets.min().item()):.4f}, max={float(offsets.max().item()):.4f}"
             )
 
-    def _build_default_pose_state(self, use_motion_end: bool = False) -> dict[str, torch.Tensor]:
+    def _build_default_pose_state(
+        self,
+        use_motion_end: bool = False,
+        motion_idx: int | None = None,
+    ) -> dict[str, torch.Tensor]:
         """Build the state dict representing the robot's default standing pose.
 
         By default, anchor root pos/yaw to the motion start; when use_motion_end is True, anchor to motion end.
@@ -2364,7 +2140,8 @@ class MotionCommand(CommandTermBase):
         init_root_quat = torch.tensor(init_state.rot, dtype=torch.float32, device=self.device).unsqueeze(0)
         init_roll, init_pitch, _ = get_euler_xyz(init_root_quat, w_last=True)
 
-        motion_idx = -1 if use_motion_end else 0
+        if motion_idx is None:
+            motion_idx = -1 if use_motion_end else 0
 
         # Assume the pelvis is the first in robot_body_names
         motion_root_pos = self.motion.body_pos_w[motion_idx, 0].to(self.device)
@@ -2456,6 +2233,126 @@ class MotionCommand(CommandTermBase):
             dtype=dtype,
             device=device,
         )
+
+    def _add_transition_to_each_clip(self, num_steps: int, prepend: bool) -> None:
+        """Add default-pose transition frames to every clip in a concatenated motion set."""
+        assert self._body_indexes_in_motion is not None
+        assert self._joint_indexes_in_motion is not None
+
+        if num_steps <= 0 or not self.motion.clip_ranges:
+            return
+
+        device = self.device
+        dtype = self.motion._joint_pos.dtype
+        concat_targets = [
+            ("joint_pos", "_joint_pos"),
+            ("joint_vel", "_joint_vel"),
+            ("body_pos", "_body_pos_w"),
+            ("body_quat", "_body_quat_w"),
+            ("body_lin_vel", "_body_lin_vel_w"),
+            ("body_ang_vel", "_body_ang_vel_w"),
+        ]
+        if self.motion.has_object:
+            concat_targets.extend(
+                [
+                    ("object_pos", "_object_pos_w"),
+                    ("object_quat", "_object_quat_w"),
+                    ("object_lin_vel", "_object_lin_vel_w"),
+                    ("object_ang_vel", "_object_ang_vel_w"),
+                ]
+            )
+
+        new_chunks: dict[str, list[torch.Tensor]] = {attr_name: [] for _, attr_name in concat_targets}
+        new_contact_label_chunks: list[torch.Tensor] = []
+        new_contact_distance_chunks: list[torch.Tensor] = []
+        new_clip_ranges: list[tuple[int, int]] = []
+        new_real_motion_clip_ranges: list[tuple[int, int]] = []
+        running_start = 0
+
+        original_clip_ranges = list(self.motion.clip_ranges)
+        original_real_motion_clip_ranges = list(
+            getattr(self.motion, "real_motion_clip_ranges", original_clip_ranges)
+        )
+        for (clip_start, clip_end), (real_start, real_end) in zip(
+            original_clip_ranges,
+            original_real_motion_clip_ranges,
+            strict=False,
+        ):
+            if clip_end <= clip_start:
+                continue
+
+            anchor_idx = clip_start if prepend else clip_end - 1
+            default_state = self._build_default_pose_state(motion_idx=anchor_idx)
+            default_motion_state = self._default_motion_state(default_state, dtype=dtype, device=device)
+            motion_state = self._motion_state(anchor_idx, dtype=dtype, device=device)
+            start_state = default_motion_state if prepend else motion_state
+            target_state = motion_state if prepend else default_motion_state
+            drop_first, drop_last = (False, True) if prepend else (True, False)
+            transition = self._build_transition_segment(
+                start_state=start_state,
+                target_state=target_state,
+                num_steps=num_steps,
+                drop_first=drop_first,
+                drop_last=drop_last,
+                dtype=dtype,
+                device=device,
+            )
+            transition_len = int(transition["joint_pos"].shape[0])
+            clip_len = int(clip_end - clip_start)
+
+            for seg_key, attr_name in concat_targets:
+                clip_tensor = getattr(self.motion, attr_name)[clip_start:clip_end]
+                if prepend:
+                    new_chunks[attr_name].extend([transition[seg_key], clip_tensor])
+                else:
+                    new_chunks[attr_name].extend([clip_tensor, transition[seg_key]])
+
+            if self.motion.has_contact_labels:
+                contact_label = torch.zeros(
+                    transition_len,
+                    len(self.motion.contact_body_names),
+                    dtype=torch.bool,
+                    device=self.motion._contact_object_label.device,
+                )
+                contact_distance = torch.full(
+                    (transition_len, len(self.motion.contact_body_names)),
+                    float("inf"),
+                    dtype=self.motion._contact_object_distance.dtype,
+                    device=self.motion._contact_object_distance.device,
+                )
+                clip_contact_label = self.motion._contact_object_label[clip_start:clip_end]
+                clip_contact_distance = self.motion._contact_object_distance[clip_start:clip_end]
+                if prepend:
+                    new_contact_label_chunks.extend([contact_label, clip_contact_label])
+                    new_contact_distance_chunks.extend([contact_distance, clip_contact_distance])
+                else:
+                    new_contact_label_chunks.extend([clip_contact_label, contact_label])
+                    new_contact_distance_chunks.extend([clip_contact_distance, contact_distance])
+
+            new_clip_end = running_start + transition_len + clip_len
+            new_clip_ranges.append((running_start, new_clip_end))
+            real_start_offset = int(real_start - clip_start)
+            real_end_offset = int(real_end - clip_start)
+            real_shift = transition_len if prepend else 0
+            new_real_motion_clip_ranges.append(
+                (
+                    running_start + real_shift + real_start_offset,
+                    running_start + real_shift + real_end_offset,
+                )
+            )
+            running_start = new_clip_end
+
+        if not new_clip_ranges:
+            return
+
+        for _, attr_name in concat_targets:
+            setattr(self.motion, attr_name, torch.cat(new_chunks[attr_name], dim=0))
+        if self.motion.has_contact_labels:
+            self.motion._contact_object_label = torch.cat(new_contact_label_chunks, dim=0)
+            self.motion._contact_object_distance = torch.cat(new_contact_distance_chunks, dim=0)
+        self.motion.clip_ranges = new_clip_ranges
+        self.motion.real_motion_clip_ranges = new_real_motion_clip_ranges
+        self.motion.time_step_total = self.motion._joint_pos.shape[0]
 
     def _slerp_quat_sequence(self, start: torch.Tensor, end: torch.Tensor, alphas: torch.Tensor) -> torch.Tensor:
         """Spherically interpolate quaternions across multiple time steps."""
@@ -2626,6 +2523,33 @@ class MotionCommand(CommandTermBase):
         """Splice interpolated segments into motion data, either prepending or appending."""
         self.motion = self.motion.extend_with_segments(segments, prepend=prepend)
 
+    def _build_transition_segment(
+        self,
+        start_state: dict[str, torch.Tensor],
+        target_state: dict[str, torch.Tensor],
+        num_steps: int,
+        drop_first: bool,
+        drop_last: bool,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> dict[str, torch.Tensor]:
+        """Build transition tensors without mutating the motion loader."""
+        if num_steps <= 0:
+            return {}
+
+        alphas = torch.linspace(0.0, 1.0, steps=num_steps + 1, device=device, dtype=dtype)
+        if drop_first:
+            alphas = alphas[1:]
+        if drop_last:
+            alphas = alphas[:-1]
+        if alphas.numel() == 0:
+            return {}
+
+        segment_steps = int(alphas.numel())
+        alphas_joint = alphas.view(segment_steps, 1)
+        alphas_body = alphas.view(segment_steps, 1, 1)
+        return self._build_transition_segments(start_state, target_state, alphas, alphas_joint, alphas_body)
+
     def _build_and_apply_transition(
         self,
         start_state: dict[str, torch.Tensor],
@@ -2638,21 +2562,18 @@ class MotionCommand(CommandTermBase):
         device: torch.device,
     ) -> None:
         """Shared interpolation path for prepend/append transitions."""
-        if num_steps <= 0:
+        segments = self._build_transition_segment(
+            start_state=start_state,
+            target_state=target_state,
+            num_steps=num_steps,
+            drop_first=drop_first,
+            drop_last=drop_last,
+            dtype=dtype,
+            device=device,
+        )
+        if not segments:
             return
 
-        alphas = torch.linspace(0.0, 1.0, steps=num_steps + 1, device=device, dtype=dtype)
-        if drop_first:
-            alphas = alphas[1:]
-        if drop_last:
-            alphas = alphas[:-1]
-        if alphas.numel() == 0:
-            return
-
-        alphas_joint = alphas.view(num_steps, 1)
-        alphas_body = alphas.view(num_steps, 1, 1)
-
-        segments = self._build_transition_segments(start_state, target_state, alphas, alphas_joint, alphas_body)
         self._apply_transition_segments(segments, prepend=prepend)
 
     def _setup_visualization_markers_for_isaacsim(self):

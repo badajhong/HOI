@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator, Mapping, Sequence
 
@@ -9,10 +10,16 @@ import numpy as np
 import torch
 
 from holosoma.utils.path import resolve_data_file_path
-from holosoma.utils.rotations import quaternion_to_matrix
+from holosoma.utils.rotations import quat_apply, quaternion_to_matrix
 
 if TYPE_CHECKING:
     from holosoma.managers.command.terms.wbt import MotionCommand
+
+
+VIRTUAL_CONTACT_BODY_SPECS: dict[str, tuple[str, tuple[float, float, float]]] = {
+    "left_hand_contact_link": ("left_wrist_roll_link", (0.07, 0.0, 0.0)),
+    "right_hand_contact_link": ("right_wrist_roll_link", (0.07, 0.0, 0.0)),
+}
 
 
 def resolve_sample_points_root(env, sample_points_root: str | None) -> Path:
@@ -129,12 +136,202 @@ def resolve_body_indices(env, body_names: Sequence[str]) -> torch.Tensor:
     )
 
 
+def select_contact_body_columns(
+    available_contact_body_names: Sequence[str],
+    *,
+    body_names: Sequence[str] | str | None = None,
+    body_names_regex: str = ".*",
+) -> tuple[list[str], list[int]]:
+    """Select contact-label body columns by explicit names or regex."""
+    available = [str(name) for name in available_contact_body_names]
+    if body_names is not None:
+        requested = [str(body_names)] if isinstance(body_names, str) else [str(name) for name in body_names]
+        missing = [name for name in requested if name not in available]
+        if missing:
+            raise RuntimeError(
+                f"Contact target body names not found in motion labels: {missing}. Available: {available}"
+            )
+        return requested, [available.index(name) for name in requested]
+
+    body_regex = re.compile(body_names_regex)
+    selected = [(idx, name) for idx, name in enumerate(available) if body_regex.search(name)]
+    if not selected:
+        raise RuntimeError(
+            f"No contact target body names matched regex '{body_names_regex}'. Available: {available}"
+        )
+    return [name for _, name in selected], [idx for idx, _ in selected]
+
+
+def is_resolvable_contact_body_name(available_body_names: Sequence[str], body_name: str) -> bool:
+    """Return whether a real or supported virtual contact body can be resolved."""
+    if body_name in available_body_names:
+        return True
+    virtual_spec = VIRTUAL_CONTACT_BODY_SPECS.get(body_name)
+    if virtual_spec is None:
+        return False
+    parent_body_name, _ = virtual_spec
+    return parent_body_name in available_body_names
+
+
+def resolve_contact_body_indices_and_offsets_from_names(
+    available_body_names: Sequence[str],
+    body_names: Sequence[str],
+    *,
+    device: torch.device | str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Resolve contact labels into simulator body indices plus local offsets.
+
+    Real simulator bodies use a zero local offset.  Supported virtual contact
+    bodies, such as R1's fixed hand-contact markers, are represented as a parent
+    body and a fixed local offset.  This keeps rewards/observations aligned with
+    retargeting labels without adding fake actions or controllable links.
+    """
+    available_body_names = list(available_body_names)
+    missing_names: list[str] = []
+    body_indices: list[int] = []
+    local_offsets: list[tuple[float, float, float]] = []
+
+    for body_name in body_names:
+        if body_name in available_body_names:
+            body_indices.append(available_body_names.index(body_name))
+            local_offsets.append((0.0, 0.0, 0.0))
+            continue
+
+        virtual_spec = VIRTUAL_CONTACT_BODY_SPECS.get(body_name)
+        if virtual_spec is not None:
+            parent_body_name, local_offset = virtual_spec
+            if parent_body_name in available_body_names:
+                body_indices.append(available_body_names.index(parent_body_name))
+                local_offsets.append(local_offset)
+                continue
+
+        missing_names.append(body_name)
+
+    if missing_names:
+        raise ValueError(f"Contact body names not found in simulator body_names or virtual specs: {missing_names}")
+
+    return (
+        torch.tensor(body_indices, dtype=torch.long, device=device),
+        torch.tensor(local_offsets, dtype=torch.float32, device=device),
+    )
+
+
+def resolve_contact_body_indices_and_offsets(
+    env,
+    body_names: Sequence[str],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Resolve contact labels against an environment's simulator body names."""
+    return resolve_contact_body_indices_and_offsets_from_names(
+        getattr(env.simulator, "body_names", []),
+        body_names,
+        device=env.device,
+    )
+
+
+def get_contact_body_positions_w(
+    *,
+    env,
+    body_indices: torch.Tensor,
+    body_local_offsets: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """World positions for real body centers or virtual contact points."""
+    body_pos_w = env.simulator._rigid_body_pos[:, body_indices, :]
+    if body_local_offsets is None or body_local_offsets.numel() == 0:
+        return body_pos_w
+
+    body_local_offsets = body_local_offsets.to(device=env.device, dtype=torch.float32)
+    if torch.all(body_local_offsets == 0.0):
+        return body_pos_w
+
+    body_quat_w = env.simulator._rigid_body_rot[:, body_indices, :]
+    offsets = body_local_offsets.unsqueeze(0).expand(env.num_envs, -1, -1)
+    offsets_w = quat_apply(
+        body_quat_w.reshape(-1, 4),
+        offsets.reshape(-1, 3),
+        w_last=True,
+    ).view(env.num_envs, body_indices.numel(), 3)
+    return body_pos_w + offsets_w
+
+
+def get_object_local_points_w(
+    *,
+    env,
+    motion_command: MotionCommand,
+    object_local_points: torch.Tensor,
+) -> torch.Tensor:
+    """Transform object-local points to world frame using the live simulator object pose."""
+    if object_local_points.ndim != 4 or object_local_points.shape[-1] != 3:
+        raise ValueError(
+            "object_local_points must have shape [num_envs, num_bodies, num_points, 3], "
+            f"got {tuple(object_local_points.shape)}"
+        )
+
+    local_points = object_local_points.to(device=env.device, dtype=torch.float32)
+    object_scales = getattr(env, "object_scale_factors", None)
+    if object_scales is not None:
+        local_points = local_points * object_scales.to(device=env.device, dtype=torch.float32)[:, None, None, :]
+
+    num_envs, num_bodies, num_points, _ = local_points.shape
+    flat_points = local_points.reshape(num_envs, num_bodies * num_points, 3)
+    rot_w_from_obj = quaternion_to_matrix(motion_command.simulator_object_quat_w, w_last=True)
+    points_w = (
+        torch.bmm(flat_points, rot_w_from_obj.transpose(1, 2))
+        + motion_command.simulator_object_pos_w[:, None, :]
+    )
+    return points_w.reshape(num_envs, num_bodies, num_points, 3)
+
+
+def get_contact_target_point_distances(
+    *,
+    env,
+    motion_command: MotionCommand,
+    body_indices: torch.Tensor,
+    body_local_offsets: torch.Tensor | None,
+    target_points_obj: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Distances from contact bodies to their nearest labeled object target point.
+
+    Returns:
+        ``(distances, nearest_target_points_w, body_pos_w)`` with shapes
+        ``[num_envs, num_bodies]``, ``[num_envs, num_bodies, 3]``, and
+        ``[num_envs, num_bodies, 3]``.
+    """
+    body_pos_w = get_contact_body_positions_w(
+        env=env,
+        body_indices=body_indices,
+        body_local_offsets=body_local_offsets,
+    )
+    if target_points_obj.shape[2] == 0:
+        distances = torch.full(
+            body_pos_w.shape[:2],
+            float("inf"),
+            dtype=torch.float32,
+            device=env.device,
+        )
+        return distances, torch.zeros_like(body_pos_w), body_pos_w
+
+    target_points_w = get_object_local_points_w(
+        env=env,
+        motion_command=motion_command,
+        object_local_points=target_points_obj,
+    )
+    per_target_distances = torch.linalg.norm(body_pos_w[:, :, None, :] - target_points_w, dim=-1)
+    distances, nearest_indices = torch.min(per_target_distances, dim=-1)
+    nearest_points = torch.gather(
+        target_points_w,
+        dim=2,
+        index=nearest_indices[:, :, None, None].expand(-1, -1, 1, 3),
+    ).squeeze(2)
+    return distances, nearest_points, body_pos_w
+
+
 def get_cached_object_surface_distances(
     *,
     env,
     motion_command: MotionCommand,
     body_names: Sequence[str],
     body_indices: torch.Tensor,
+    body_local_offsets: torch.Tensor | None = None,
     sample_points_by_key: Mapping[str | None, torch.Tensor],
 ) -> torch.Tensor:
     """Current min distance from each selected robot body to the active object surface.
@@ -144,7 +341,10 @@ def get_cached_object_surface_distances(
     """
     body_names_key = tuple(str(name) for name in body_names)
     object_keys_key = tuple(sorted("__none__" if key is None else str(key) for key in sample_points_by_key))
-    cache_key = (body_names_key, object_keys_key)
+    offsets_key = ()
+    if body_local_offsets is not None and body_local_offsets.numel() > 0:
+        offsets_key = tuple(round(float(value), 6) for value in body_local_offsets.detach().cpu().flatten().tolist())
+    cache_key = (body_names_key, object_keys_key, offsets_key)
     cache_generation = getattr(env, "_object_contact_surface_cache_generation", 0)
     sim_step = getattr(env.simulator, "_sim_step_counter", None)
 
@@ -159,7 +359,11 @@ def get_cached_object_surface_distances(
         if cached_step == sim_step and cached_generation == cache_generation:
             return cached_distances
 
-    body_pos_w = env.simulator._rigid_body_pos[:, body_indices, :]
+    body_pos_w = get_contact_body_positions_w(
+        env=env,
+        body_indices=body_indices,
+        body_local_offsets=body_local_offsets,
+    )
     object_pos_w = motion_command.simulator_object_pos_w
     object_quat_w = motion_command.simulator_object_quat_w
 

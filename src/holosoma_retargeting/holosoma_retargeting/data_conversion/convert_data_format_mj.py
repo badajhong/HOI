@@ -36,6 +36,11 @@ DynamicState = Tuple[
 ]
 StaticState = Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, bool]
 
+CONTACT_NEAREST_RESAMPLE_KEYS = {
+    "contact_object_target_points_obj",
+    "contact_object_target_distances",
+}
+
 # Parse the arguments using the config structure
 
 
@@ -260,9 +265,11 @@ class MotionLoader:
 
         for key, value in self.contact_arrays_input.items():
             if value.ndim > 0 and value.shape[0] == self.input_frames:
-                if value.dtype == np.bool_:
+                if value.dtype == np.bool_ or key in CONTACT_NEAREST_RESAMPLE_KEYS:
                     nearest = np.where(blend_np < 0.5, idx0, idx1)
-                    output[key] = value[nearest].astype(bool, copy=False)
+                    output[key] = value[nearest]
+                    if value.dtype == np.bool_:
+                        output[key] = output[key].astype(bool, copy=False)
                 elif np.issubdtype(value.dtype, np.floating):
                     blend_shape = (self.output_frames,) + (1,) * (value.ndim - 1)
                     blend_view = blend_np.reshape(blend_shape)
@@ -280,6 +287,10 @@ class MotionLoader:
         label = output.get("contact_object_label")
         if threshold is not None and distance is not None and label is not None and distance.shape == label.shape:
             output["contact_object_label"] = distance <= threshold
+            if output.get("contact_object_target_valid") is not None:
+                target_valid = output["contact_object_target_valid"]
+                if target_valid.shape == output["contact_object_label"].shape:
+                    output["contact_object_target_valid"] = output["contact_object_label"].astype(bool, copy=True)
 
         return output
 

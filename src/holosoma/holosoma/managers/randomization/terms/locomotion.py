@@ -1941,6 +1941,10 @@ def randomize_object_scale_startup(
         env.object_scale_factors = torch.ones(env.num_envs, 3, device=env.device, dtype=torch.float32)
     if not hasattr(env, "object_scale_factors_z"):
         env.object_scale_factors_z = torch.ones(env.num_envs, device=env.device, dtype=torch.float32)
+    if not hasattr(env, "object_scale_factors_by_actor"):
+        env.object_scale_factors_by_actor = {}
+    if not hasattr(env, "object_scale_factors_z_by_actor"):
+        env.object_scale_factors_z_by_actor = {}
     _setup_object_scale_reference_bounds(env, object_names, object_height)
 
     from holosoma.managers.command.terms.wbt import (
@@ -2020,8 +2024,20 @@ def randomize_object_scale_startup(
                     op_order_spec.default = Vt.TokenArray(["xformOp:translate", "xformOp:orient", "xformOp:scale"])
 
         env_ids_device = env_ids_cpu.to(device=env.device)
-        env.object_scale_factors[env_ids_device] = rand_samples.to(device=env.device, dtype=torch.float32)
-        env.object_scale_factors_z[env_ids_device] = scale_z_samples.to(device=env.device, dtype=torch.float32)
+        actor_scale_factors = env.object_scale_factors_by_actor.get(object_name)
+        if actor_scale_factors is None or actor_scale_factors.shape != (env.num_envs, 3):
+            actor_scale_factors = torch.ones(env.num_envs, 3, device=env.device, dtype=torch.float32)
+        actor_scale_factors[env_ids_device] = rand_samples.to(device=env.device, dtype=torch.float32)
+        env.object_scale_factors_by_actor[object_name] = actor_scale_factors
+
+        actor_scale_factors_z = env.object_scale_factors_z_by_actor.get(object_name)
+        if actor_scale_factors_z is None or actor_scale_factors_z.shape != (env.num_envs,):
+            actor_scale_factors_z = torch.ones(env.num_envs, device=env.device, dtype=torch.float32)
+        actor_scale_factors_z[env_ids_device] = scale_z_samples.to(device=env.device, dtype=torch.float32)
+        env.object_scale_factors_z_by_actor[object_name] = actor_scale_factors_z
+        if len(object_names) == 1:
+            env.object_scale_factors[env_ids_device] = actor_scale_factors[env_ids_device]
+            env.object_scale_factors_z[env_ids_device] = actor_scale_factors_z[env_ids_device]
 
         rigid_object = simulator.scene.rigid_objects.get(object_name)
         if rigid_object is None:

@@ -11,9 +11,11 @@ from loguru import logger
 from holosoma.config_types.reward import RewardTermCfg
 from holosoma.managers.command.terms.wbt import MotionCommand
 from holosoma.managers.object_contact import (
+    get_contact_target_point_distances,
     get_cached_object_surface_distances,
     load_sample_points_by_key,
     object_key_masks_for_envs,
+    select_contact_body_columns,
 )
 from holosoma.managers.reward.base import RewardTermBase
 from holosoma.utils.rotations import quat_error_magnitude, quaternion_to_matrix
@@ -273,6 +275,7 @@ class ObjectContactLabelDistance(RewardTermBase):
         self.contact_label_columns = torch.zeros(0, dtype=torch.long, device=env.device)
         self.contact_body_names: list[str] = []
         self.contact_body_indices = torch.zeros(0, dtype=torch.long, device=env.device)
+        self.contact_body_local_offsets = torch.zeros(0, 3, dtype=torch.float32, device=env.device)
 
     def __call__(
         self,
@@ -306,6 +309,7 @@ class ObjectContactLabelDistance(RewardTermBase):
             motion_command=motion_command,
             body_names=self.contact_body_names,
             body_indices=self.contact_body_indices,
+            body_local_offsets=self.contact_body_local_offsets,
             sample_points_by_key=self.sample_points_by_key,
         )
 
@@ -357,6 +361,20 @@ class ObjectContactLabelDistance(RewardTermBase):
             device=self.env.device,
         )
         self.contact_body_indices = contact_body_indices[self.contact_label_columns]
+        contact_body_local_offsets = getattr(motion_command.motion, "contact_body_local_offsets", None)
+        if contact_body_local_offsets is None:
+            contact_body_local_offsets = torch.zeros(
+                len(motion_command.motion.contact_body_names),
+                3,
+                dtype=torch.float32,
+                device=self.env.device,
+            )
+        contact_body_local_offsets = torch.as_tensor(
+            contact_body_local_offsets,
+            dtype=torch.float32,
+            device=self.env.device,
+        )
+        self.contact_body_local_offsets = contact_body_local_offsets[self.contact_label_columns]
 
         root, self.sample_points_by_key = load_sample_points_by_key(
             env=self.env,
@@ -368,6 +386,116 @@ class ObjectContactLabelDistance(RewardTermBase):
             "Initialized ObjectContactLabelDistance: "
             f"bodies={[motion_command.motion.contact_body_names[i] for i in selected_cols]}, "
             f"objects={list(self.sample_points_by_key.keys())}, sample_points_root={root}"
+        )
+        self.initialized = True
+
+
+class ObjectContactTargetPointDistance(RewardTermBase):
+    """Reward labeled contact bodies for reaching their labeled object-surface target points."""
+
+    def __init__(self, cfg: RewardTermCfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+        self.env = env
+        self.initialized = False
+        self.warned_missing_targets = False
+        self.contact_label_columns = torch.zeros(0, dtype=torch.long, device=env.device)
+        self.contact_body_names: list[str] = []
+        self.contact_body_indices = torch.zeros(0, dtype=torch.long, device=env.device)
+        self.contact_body_local_offsets = torch.zeros(0, 3, dtype=torch.float32, device=env.device)
+
+    def __call__(
+        self,
+        env: WholeBodyTrackingManager,
+        *,
+        margin: float = 0.12,
+        body_names: tuple[str, ...] | list[str] | str | None = None,
+        contact_body_names_regex: str = ".*",
+        fail_on_missing_targets: bool = True,
+        **kwargs,
+    ) -> torch.Tensor:
+        motion_command = _get_motion_command_and_assert_type(env)
+        if not self.initialized:
+            self._initialize(
+                motion_command,
+                body_names=body_names,
+                contact_body_names_regex=contact_body_names_regex,
+                fail_on_missing_targets=fail_on_missing_targets,
+            )
+
+        if self.contact_label_columns.numel() == 0:
+            return torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
+
+        expected = motion_command.contact_object_label[:, self.contact_label_columns]
+        target_valid = motion_command.contact_object_target_valid[:, self.contact_label_columns]
+        active = expected & target_valid
+        has_active = active.any(dim=1)
+        if not torch.any(has_active):
+            return torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
+
+        target_points_obj = motion_command.contact_object_target_points_obj[:, self.contact_label_columns]
+        distances, _, _ = get_contact_target_point_distances(
+            env=env,
+            motion_command=motion_command,
+            body_indices=self.contact_body_indices,
+            body_local_offsets=self.contact_body_local_offsets,
+            target_points_obj=target_points_obj,
+        )
+
+        margin_tensor = torch.tensor(max(float(margin), 1e-6), dtype=torch.float32, device=env.device)
+        per_body_reward = torch.clamp(1.0 - distances / margin_tensor, min=0.0, max=1.0)
+        per_body_reward = per_body_reward * active.float()
+        denom = active.float().sum(dim=1).clamp(min=1.0)
+        reward = per_body_reward.sum(dim=1) / denom
+        return torch.where(has_active, reward, torch.zeros_like(reward))
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        pass
+
+    def _initialize(
+        self,
+        motion_command: MotionCommand,
+        *,
+        body_names: tuple[str, ...] | list[str] | str | None,
+        contact_body_names_regex: str,
+        fail_on_missing_targets: bool,
+    ) -> None:
+        if not motion_command.has_contact_labels or not motion_command.has_contact_target_points:
+            message = (
+                "ObjectContactTargetPointDistance is enabled but motion files have no contact target points. "
+                "Regenerate motions with contact_object_target_points_obj labels."
+            )
+            if fail_on_missing_targets:
+                raise RuntimeError(message)
+            if not self.warned_missing_targets:
+                logger.warning(message)
+                self.warned_missing_targets = True
+            self.initialized = True
+            return
+
+        selected_names, selected_cols = select_contact_body_columns(
+            motion_command.motion.contact_body_names,
+            body_names=body_names,
+            body_names_regex=contact_body_names_regex,
+        )
+        self.contact_label_columns = torch.tensor(selected_cols, dtype=torch.long, device=self.env.device)
+        self.contact_body_names = selected_names
+
+        contact_body_indices = torch.as_tensor(
+            motion_command.motion.contact_body_indices,
+            dtype=torch.long,
+            device=self.env.device,
+        )
+        contact_body_local_offsets = torch.as_tensor(
+            motion_command.motion.contact_body_local_offsets,
+            dtype=torch.float32,
+            device=self.env.device,
+        )
+        self.contact_body_indices = contact_body_indices[self.contact_label_columns]
+        self.contact_body_local_offsets = contact_body_local_offsets[self.contact_label_columns]
+
+        logger.info(
+            "Initialized ObjectContactTargetPointDistance: "
+            f"bodies={self.contact_body_names}, topk={motion_command.motion.contact_object_target_points_obj.shape[2]}"
         )
         self.initialized = True
 

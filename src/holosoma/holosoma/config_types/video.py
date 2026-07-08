@@ -132,6 +132,12 @@ class VideoConfig:
     use_recording_thread: bool = False
     """Whether to use background thread for video recording (MuJoCo-only)"""
 
+    async_encoding: bool = True
+    """Encode/save/upload finished videos off the simulation reset path."""
+
+    async_encoding_backend: Literal["process", "thread"] = "process"
+    """Async video encoding backend. Process isolates OpenCV/ffmpeg from training."""
+
     recording_thread_fps: float = 30.0
     """Target FPS for threaded recording."""
 

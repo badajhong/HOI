@@ -534,6 +534,7 @@ def build_retargeter_kwargs_from_config(
         "contact_visualization": retargeter_config.contact_visualization,
         "contact_source": retargeter_config.contact_source,
         "contact_threshold": retargeter_config.contact_threshold,
+        "contact_target_topk": retargeter_config.contact_target_topk,
         "contact_human_joint_regex": retargeter_config.contact_human_joint_regex,
         "debug": retargeter_config.debug,
         "w_nominal_tracking_init": retargeter_config.w_nominal_tracking_init,

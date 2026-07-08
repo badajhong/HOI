@@ -1223,3 +1223,5 @@ key: head_yaw, kp: 14.250623098, kd: 0.907222843
 │   └── /World/envs/env_0/Robot/Looks/material_light_grey/Shader
 └── /World/envs/env_0/Robot/Looks/material_white
 [32m2026-06-24 13:30:54.091[0m | [1mINFO    [0m | [36mholosoma.simulator.isaacsim.isaacsim[0m:[36m_setup_scene[0m:[36m420[0m - [1mIsaacSim: robot depth camera creation disabled by simulator config.[0m
+Segmentation fault (core dumped)
+Segmentation fault (core dumped)

@@ -185,3 +185,25 @@ nohup xvfb-run -a python src/holosoma/holosoma/train_agent.py \
     exp:r1-teacher \
     --training.num-envs 4096 \
     > train_output.log 2>&1 &
+
+nohup xvfb-run -a python src/holosoma/holosoma/train_agent.py \
+    exp:r1-teacher \
+    --training.num-envs 1024 \
+    --command.setup-terms.motion-command.params.motion-config.motion-file "train_r1/rl/smalltable/sub17_smalltable_010.npz" \
+    --command.setup-terms.motion-command.params.motion-config.motion-folder "" \
+    --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob 1.0 \
+    --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.object-pos '[0.0, 0.0, 0.0]' \
+    --robot.object.object-parm "" \
+    --randomization.setup-terms.randomize-object-rigid-body-material-startup.params.static-friction-range '[0.05, 0.05]' \
+    --randomization.setup-terms.randomize-object-rigid-body-material-startup.params.dynamic-friction-range '[0.05, 0.05]' \
+    --randomization.setup-terms.randomize-object-rigid-body-material-startup.params.restitution-range '[0.0, 0.0]' \
+    --randomization.setup-terms.randomize-object-rigid-body-mass-startup.params.mass-distribution-params '[1.0, 1.0]' \
+    --randomization.setup-terms.randomize-object-rigid-body-inertia-startup.params.inertia-distribution-params-dict.Ixx '[1.0, 1.0]' \
+    --randomization.setup-terms.randomize-object-rigid-body-inertia-startup.params.inertia-distribution-params-dict.Iyy '[1.0, 1.0]' \
+    --randomization.setup-terms.randomize-object-rigid-body-inertia-startup.params.inertia-distribution-params-dict.Izz '[1.0, 1.0]' \
+    --randomization.setup-terms.randomize-object-rigid-body-inertia-startup.params.inertia-distribution-params-dict.Ixy '[1.0, 1.0]' \
+    --randomization.setup-terms.randomize-object-rigid-body-inertia-startup.params.inertia-distribution-params-dict.Iyz '[1.0, 1.0]' \
+    --randomization.setup-terms.randomize-object-rigid-body-inertia-startup.params.inertia-distribution-params-dict.Ixz '[1.0, 1.0]' \
+    --logger.video.async-encoding True \
+    --logger.video.async-encoding-backend process \
+    > train_output_single.log 2>&1 &

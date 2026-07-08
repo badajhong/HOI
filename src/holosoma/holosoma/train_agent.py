@@ -132,8 +132,11 @@ def configure_logging(distributed_conf: MultGPUConfig | None = None, log_dir: Pa
     else:
         console_log_level = "ERROR"
     logger.add(sys.stdout, level=console_log_level, colorize=True)
-    logging.basicConfig(level=logging.DEBUG if is_main_process else logging.ERROR)
-    logging.getLogger().addHandler(LoguruLoggingBridge())
+    logging.basicConfig(
+        level=logging.DEBUG if is_main_process else logging.ERROR,
+        handlers=[LoguruLoggingBridge()],
+        force=True,
+    )
 
 
 def _extract_object_key_from_motion_name(npz_path: str) -> str:

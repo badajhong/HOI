@@ -15,9 +15,11 @@ from holosoma.ae_pro_joint_train import load_joint_model as load_pro_joint_model
 from holosoma.agents.modules.module_utils import setup_ppo_actor_module
 from holosoma.managers.command.terms.wbt import MotionCommand
 from holosoma.managers.object_contact import (
+    get_contact_target_point_distances,
     get_cached_object_surface_distances,
     load_sample_points_by_key,
-    resolve_body_indices,
+    resolve_contact_body_indices_and_offsets,
+    select_contact_body_columns,
 )
 from holosoma.managers.observation.base import ObservationTermBase
 from holosoma.utils.eval_utils import CheckpointConfig, load_saved_experiment_config
@@ -360,6 +362,7 @@ class ObjectContactCurrent(ObservationTermBase):
         self.initialized = False
         self.body_names: list[str] = []
         self.body_indices = torch.zeros(0, dtype=torch.long, device=env.device)
+        self.body_local_offsets = torch.zeros(0, 3, dtype=torch.float32, device=env.device)
         self.sample_points_by_key: dict[str | None, torch.Tensor] = {}
 
     def __call__(
@@ -392,6 +395,7 @@ class ObjectContactCurrent(ObservationTermBase):
             motion_command=motion_command,
             body_names=self.body_names,
             body_indices=self.body_indices,
+            body_local_offsets=self.body_local_offsets,
             sample_points_by_key=self.sample_points_by_key,
         )
 
@@ -417,7 +421,10 @@ class ObjectContactCurrent(ObservationTermBase):
     ) -> None:
         selected_body_names = self._resolve_body_names(motion_command, body_names, body_names_regex)
         self.body_names = selected_body_names
-        self.body_indices = resolve_body_indices(self.env, selected_body_names)
+        self.body_indices, self.body_local_offsets = resolve_contact_body_indices_and_offsets(
+            self.env,
+            selected_body_names,
+        )
         root, self.sample_points_by_key = load_sample_points_by_key(
             env=self.env,
             motion_command=motion_command,
@@ -480,6 +487,134 @@ class ObjectDistanceCurrent(ObjectContactCurrent):
             include_distance=True,
             **kwargs,
         )
+
+
+class ObjectContactTargetCurrent(ObservationTermBase):
+    """Current labeled contact-target features for each selected contact body.
+
+    Output layout per body is ``[active, rel_target_xyz, distance]`` by default.
+    The relative target vector is expressed in the current robot reference body
+    frame and clipped after normalization.
+    """
+
+    def __init__(self, cfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+        self.initialized = False
+        self.warned_missing_targets = False
+        self.contact_label_columns = torch.zeros(0, dtype=torch.long, device=env.device)
+        self.body_names: list[str] = []
+        self.body_indices = torch.zeros(0, dtype=torch.long, device=env.device)
+        self.body_local_offsets = torch.zeros(0, 3, dtype=torch.float32, device=env.device)
+
+    def __call__(
+        self,
+        env: WholeBodyTrackingManager,
+        *,
+        body_names: tuple[str, ...] | list[str] | str | None = None,
+        body_names_regex: str = ".*",
+        relative_clip: float = 0.25,
+        distance_clip: float = 0.5,
+        include_active: bool = True,
+        include_distance: bool = True,
+        fail_on_missing_targets: bool = True,
+        **kwargs,
+    ) -> torch.Tensor:
+        motion_command = _get_motion_command_and_assert_type(env)
+        if not self.initialized:
+            self._initialize(
+                motion_command,
+                body_names=body_names,
+                body_names_regex=body_names_regex,
+                fail_on_missing_targets=fail_on_missing_targets,
+            )
+
+        if self.contact_label_columns.numel() == 0:
+            return torch.zeros(env.num_envs, 0, dtype=torch.float32, device=env.device)
+
+        active = (
+            motion_command.contact_object_label[:, self.contact_label_columns]
+            & motion_command.contact_object_target_valid[:, self.contact_label_columns]
+        )
+        target_points_obj = motion_command.contact_object_target_points_obj[:, self.contact_label_columns]
+        distances, nearest_points_w, body_pos_w = get_contact_target_point_distances(
+            env=env,
+            motion_command=motion_command,
+            body_indices=self.body_indices,
+            body_local_offsets=self.body_local_offsets,
+            target_points_obj=target_points_obj,
+        )
+
+        rel_w = nearest_points_w - body_pos_w
+        ref_quat_w = motion_command.robot_ref_quat_w[:, None, :].expand(-1, rel_w.shape[1], -1)
+        rel_b = quat_rotate_inverse(
+            ref_quat_w.reshape(-1, 4),
+            rel_w.reshape(-1, 3),
+            w_last=True,
+        ).reshape_as(rel_w)
+
+        active_f = active.float()
+        rel_clip_tensor = torch.tensor(max(float(relative_clip), 1e-6), dtype=torch.float32, device=env.device)
+        rel_obs = torch.clamp(rel_b / rel_clip_tensor, min=-1.0, max=1.0) * active_f[:, :, None]
+
+        outputs: list[torch.Tensor] = []
+        if include_active:
+            outputs.append(active_f)
+        outputs.append(rel_obs.reshape(env.num_envs, -1))
+        if include_distance:
+            dist_clip_tensor = torch.tensor(max(float(distance_clip), 1e-6), dtype=torch.float32, device=env.device)
+            distance_obs = torch.clamp(distances / dist_clip_tensor, min=0.0, max=1.0) * active_f
+            outputs.append(distance_obs)
+        return torch.cat(outputs, dim=-1)
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        pass
+
+    def _initialize(
+        self,
+        motion_command: MotionCommand,
+        *,
+        body_names: tuple[str, ...] | list[str] | str | None,
+        body_names_regex: str,
+        fail_on_missing_targets: bool,
+    ) -> None:
+        if not motion_command.has_contact_labels or not motion_command.has_contact_target_points:
+            message = (
+                "ObjectContactTargetCurrent is enabled but motion files have no contact target points. "
+                "Regenerate motions with contact_object_target_points_obj labels."
+            )
+            if fail_on_missing_targets:
+                raise RuntimeError(message)
+            if not self.warned_missing_targets:
+                logger.warning(message)
+                self.warned_missing_targets = True
+            self.initialized = True
+            return
+
+        selected_names, selected_cols = select_contact_body_columns(
+            motion_command.motion.contact_body_names,
+            body_names=body_names,
+            body_names_regex=body_names_regex,
+        )
+        self.contact_label_columns = torch.tensor(selected_cols, dtype=torch.long, device=self.env.device)
+        self.body_names = selected_names
+
+        contact_body_indices = torch.as_tensor(
+            motion_command.motion.contact_body_indices,
+            dtype=torch.long,
+            device=self.env.device,
+        )
+        contact_body_local_offsets = torch.as_tensor(
+            motion_command.motion.contact_body_local_offsets,
+            dtype=torch.float32,
+            device=self.env.device,
+        )
+        self.body_indices = contact_body_indices[self.contact_label_columns]
+        self.body_local_offsets = contact_body_local_offsets[self.contact_label_columns]
+        logger.info(
+            "Initialized ObjectContactTargetCurrent observation: "
+            f"bodies={self.body_names}, topk={motion_command.motion.contact_object_target_points_obj.shape[2]}"
+        )
+        self.initialized = True
 
 
 def _normalize_ir_surface_feature_body_source(body_source: str) -> str:

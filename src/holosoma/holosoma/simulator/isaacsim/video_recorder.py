@@ -66,6 +66,7 @@ class IsaacSimVideoRecorder(VideoRecorderInterface):
 
         # IsaacSim-specific attributes using replicator
         self._render_product = None
+        self._render_product_path: str | None = None
         self._rgb_annotator = None
         self._camera_prim_path: str | None = None
 
@@ -127,12 +128,15 @@ class IsaacSimVideoRecorder(VideoRecorderInterface):
         # Create render product using replicator
         resolution = (self.config.width, self.config.height)
         self._render_product = rep.create.render_product(self._camera_prim_path, resolution)
+        self._render_product_path = (
+            self._render_product if isinstance(self._render_product, str) else self._render_product.path
+        )
 
         # Create RGB annotator
-        self._rgb_annotator = rep.AnnotatorRegistry.get_annotator(
-            "rgb", device=self.simulator.device, do_array_copy=False
-        )
-        self._rgb_annotator.attach([self._render_product])
+        # Keep video capture on the CPU-copy path used by IsaacLab's own rgb_array render helpers.
+        # The previous GPU zero-copy path could stall while synchronizing CUDA/replicator data to NumPy.
+        self._rgb_annotator = rep.AnnotatorRegistry.get_annotator("rgb", device="cpu")
+        self._rgb_annotator.attach([self._render_product_path])
 
         logger.debug(f"Created replicator camera at: {self._camera_prim_path}")
         logger.debug(f"Render product resolution: {resolution}")
@@ -162,22 +166,20 @@ class IsaacSimVideoRecorder(VideoRecorderInterface):
             # Get RGB data from replicator annotator
             rgb_data = self._rgb_annotator.get_data()
 
-            # Convert to numpy array (handle bytes, numpy arrays, and warp arrays)
+            # Convert to numpy array. With the CPU annotator IsaacSim usually returns
+            # a byte-like object with shape metadata; some versions return ndarray.
             if isinstance(rgb_data, np.ndarray):
-                # Already a numpy array
-                pass  # rgb_data is already in the correct format
-            elif hasattr(rgb_data, "numpy"):
-                # Warp array (when do_array_copy=False) - convert to numpy
-                rgb_data = rgb_data.numpy()
+                rgb_array = rgb_data
             else:
-                # Bytes data (default behavior) - convert to array
-                rgb_data = np.frombuffer(rgb_data, dtype=np.uint8).reshape(*rgb_data.shape)
+                rgb_array = np.frombuffer(rgb_data, dtype=np.uint8).reshape(*rgb_data.shape)
 
             # note: initially the renderer is warming up and returns empty data
-            if rgb_data.size == 0:
+            if rgb_array.size == 0:
                 rgb_array = np.zeros((self.config.height, self.config.width, 3), dtype=np.uint8)
+            elif rgb_array.ndim != 3 or rgb_array.shape[2] < 3:
+                raise RuntimeError(f"Unexpected RGB frame shape from IsaacSim annotator: {rgb_array.shape}")
             else:
-                rgb_array = rgb_data[:, :, :3]
+                rgb_array = rgb_array[:, :, :3].copy()
 
             # Apply command overlay using shared logic
             frame_with_overlay = self._apply_command_overlay(rgb_array)
@@ -232,8 +234,8 @@ class IsaacSimVideoRecorder(VideoRecorderInterface):
         if self._rgb_annotator is not None:
             try:
                 # Detach annotator from render product
-                if self._render_product is not None:
-                    self._rgb_annotator.detach([self._render_product])
+                if self._render_product_path is not None:
+                    self._rgb_annotator.detach([self._render_product_path])
                 self._rgb_annotator = None
             except Exception as e:
                 logger.warning(f"Error cleaning up RGB annotator: {e}")
@@ -247,6 +249,7 @@ class IsaacSimVideoRecorder(VideoRecorderInterface):
                 logger.warning(f"Error cleaning up render product: {e}")
 
         # Clear camera prim path
+        self._render_product_path = None
         self._camera_prim_path = None
 
         logger.debug("IsaacSim video recorder cleanup completed")

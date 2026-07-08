@@ -60,6 +60,7 @@ class WholeBodyTrackingManager(BaseTask):
     def _refresh_envs_after_reset(self, env_ids):
         self.simulator.set_actor_root_state_tensor(env_ids, self.simulator.all_root_states)
         self.simulator.set_dof_state_tensor(env_ids, self.simulator.dof_state)
+        self.simulator.write_state_updates()
         self.simulator.clear_contact_forces_history(env_ids)
         self.need_to_refresh_envs[env_ids] = False
         self.simulator.refresh_sim_tensors()
@@ -85,8 +86,6 @@ class WholeBodyTrackingManager(BaseTask):
         # -------------------------------- terms same with locomotion_manager.py [end]--------------------------------
         # Add tracking metrics to log_dict
         motion_command = self.command_manager.get_state("motion_command")
-        if hasattr(motion_command, "update_stable_state_reset_pool"):
-            motion_command.update_stable_state_reset_pool()
         motion_command.update_metrics()
         self.log_dict.update(motion_command.metrics)
         self._update_motion_start0_log_dict(motion_command)
@@ -115,12 +114,26 @@ class WholeBodyTrackingManager(BaseTask):
             return
 
         clip_ids = motion_command.clip_ids[env_ids]
-        clip_progress = (motion_command.time_steps[env_ids] - motion_command.clip_start_steps[env_ids]).to(
-            dtype=torch.float32
-        )
-        terminal_progress = (motion_command.clip_end_steps[env_ids] - motion_command.clip_start_steps[env_ids] - 2).to(
-            dtype=torch.float32
-        )
+        real_motion_clip_ranges = getattr(motion_command.motion, "real_motion_clip_ranges", None)
+        if real_motion_clip_ranges is not None and len(real_motion_clip_ranges) > 0:
+            real_starts = torch.tensor(
+                [clip_range[0] for clip_range in real_motion_clip_ranges],
+                dtype=torch.long,
+                device=self.device,
+            )
+            real_ends = torch.tensor(
+                [clip_range[1] for clip_range in real_motion_clip_ranges],
+                dtype=torch.long,
+                device=self.device,
+            )
+            completion_start_steps = real_starts[clip_ids]
+            completion_end_steps = real_ends[clip_ids]
+        else:
+            completion_start_steps = motion_command.clip_start_steps[env_ids]
+            completion_end_steps = motion_command.clip_end_steps[env_ids]
+
+        clip_progress = (motion_command.time_steps[env_ids] - completion_start_steps).to(dtype=torch.float32)
+        terminal_progress = (completion_end_steps - completion_start_steps - 2).to(dtype=torch.float32)
         terminal_progress = torch.clamp(terminal_progress, min=1.0)
         completion_percent = torch.clamp(clip_progress / terminal_progress, min=0.0, max=1.0) * 100.0
 

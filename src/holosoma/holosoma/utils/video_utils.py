@@ -1,6 +1,7 @@
 import subprocess
 import time
 import uuid
+from pathlib import Path
 
 import cv2
 import wandb
@@ -108,6 +109,23 @@ def format_command_labels(commands, env_id=0):
         labels.append(f"height={cmd[8]:.2f}")
 
     return ", ".join(labels) if labels else "Commands: No data"
+
+
+def log_video_to_wandb(video_path, *, cleanup_file=False):
+    """Upload an already encoded video to wandb, optionally removing it afterward."""
+    video_path = Path(video_path)
+    if not _is_wandb_available():
+        return False
+
+    try:
+        wandb.log({"Training rollout": wandb.Video(str(video_path), format="mp4")})
+    except Exception as e:
+        logger.warning(f"[VIDEO] wandb video upload failed; kept local video at {video_path}: {e}")
+        return False
+
+    if cleanup_file and video_path.exists():
+        video_path.unlink()
+    return True
 
 
 def create_video(video_frames, fps, save_dir, output_format="mp4", wandb_logging=True, episode_id=None):
@@ -219,11 +237,9 @@ def create_video(video_frames, fps, save_dir, output_format="mp4", wandb_logging
 
         # Step 3: Handle wandb upload if requested
         if wandb_logging and _is_wandb_available():
-            try:
-                wandb.log({"Training rollout": wandb.Video(str(final_video), format="mp4")})
-            except Exception as e:
+            uploaded = log_video_to_wandb(final_video, cleanup_file=False)
+            if not uploaded:
                 cleanup_files = False
-                logger.warning(f"[VIDEO] wandb video upload failed; kept local video at {final_video}: {e}")
 
         # Step 4: Cleanup temp files if needed
         if cleanup_files:

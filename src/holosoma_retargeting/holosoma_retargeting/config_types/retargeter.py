@@ -92,6 +92,9 @@ class RetargeterConfig:
     contact_threshold: float = 0.05
     """Object-contact distance threshold in meters for contact visualization."""
 
+    contact_target_topk: int = 5
+    """Number of nearest object surface target points saved per contact body."""
+
     contact_human_joint_regex: str = DEFAULT_CONTACT_HUMAN_JOINT_REGEX
     """Human joint regex used to select contact targets and map them to robot links."""
 

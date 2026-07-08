@@ -194,12 +194,12 @@ python examples/robot_retarget.py \
 python examples/robot_retarget.py \
   --data_path demo_data/OMOMO_new \
   --task-type object_interaction_contact \
-  --task-name sub1_suitcase_070 \
+  --task-name sub5_suitcase_000 \
   --data_format smplh \
   --task-config.object-name suitcase \
   --retargeter.debug \
   --retargeter.visualize \
   --robot r1 \
-  --retargeter.penetration-tolerance 0.1 \
+  --retargeter.penetration-tolerance 0.01 \
   --retargeter.contact-threshold 0.05
 ```
