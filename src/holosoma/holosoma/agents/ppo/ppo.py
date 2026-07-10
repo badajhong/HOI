@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import faulthandler
 import itertools
 import os
+import signal
+import threading
+import time
 from collections import defaultdict
 from collections.abc import MutableMapping
+from contextlib import contextmanager
+from pathlib import Path
 from typing import TypedDict
 
 import torch
@@ -36,6 +42,119 @@ from holosoma.utils.inference_helpers import (
 )
 
 console = Console()
+
+
+class _TrainingWatchdog:
+    """Emit stack dumps when training stops making visible progress."""
+
+    def __init__(self, log_dir: str | os.PathLike | None, *, is_main_process: bool) -> None:
+        self.enabled = False
+        self.timeout_s = float(os.environ.get("HOLOSOMA_TRAIN_WATCHDOG_SECONDS", "300"))
+        if not is_main_process or self.timeout_s <= 0:
+            return
+
+        self.repeat_s = float(os.environ.get("HOLOSOMA_TRAIN_WATCHDOG_REPEAT_SECONDS", str(self.timeout_s)))
+        self.repeat_s = max(30.0, self.repeat_s)
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._phase = "initializing"
+        self._iteration: int | None = None
+        self._phase_started_at = time.monotonic()
+        self._last_dump_at = 0.0
+
+        dump_path = Path(log_dir or ".") / "training_watchdog.log"
+        dump_path.parent.mkdir(parents=True, exist_ok=True)
+        self.dump_path = dump_path
+        self._dump_file = dump_path.open("a", buffering=1)
+
+        faulthandler.enable(file=self._dump_file, all_threads=True)
+        if hasattr(signal, "SIGUSR1"):
+            try:
+                faulthandler.register(signal.SIGUSR1, file=self._dump_file, all_threads=True, chain=False)
+            except Exception as exc:
+                logger.warning(f"[WATCHDOG] Could not register SIGUSR1 stack dump handler: {exc}")
+
+        self.enabled = True
+        self._thread = threading.Thread(target=self._run, name="TrainingWatchdog", daemon=True)
+        self._thread.start()
+        logger.info(
+            f"[WATCHDOG] Training watchdog enabled: timeout={self.timeout_s:.1f}s, "
+            f"stack_log={self.dump_path}. Send `kill -USR1 {os.getpid()}` to dump stacks on demand."
+        )
+
+    def close(self) -> None:
+        if not self.enabled:
+            return
+        self._stop_event.set()
+        self._thread.join(timeout=1.0)
+        try:
+            faulthandler.cancel_dump_traceback_later()
+        except Exception:
+            pass
+        if hasattr(signal, "SIGUSR1"):
+            try:
+                faulthandler.unregister(signal.SIGUSR1)
+            except Exception:
+                pass
+        self._dump_file.close()
+        self.enabled = False
+
+    def mark(self, phase: str, iteration: int | None = None) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            self._phase = phase
+            self._iteration = iteration
+            self._phase_started_at = time.monotonic()
+            self._schedule_traceback_later()
+        logger.debug(f"[WATCHDOG] phase={phase} iteration={iteration}")
+
+    def _schedule_traceback_later(self) -> None:
+        try:
+            faulthandler.cancel_dump_traceback_later()
+            faulthandler.dump_traceback_later(
+                self.timeout_s,
+                repeat=True,
+                file=self._dump_file,
+                exit=False,
+            )
+        except Exception as exc:
+            logger.warning(f"[WATCHDOG] Could not schedule faulthandler timeout dump: {exc}")
+
+    @contextmanager
+    def track(self, phase: str, iteration: int | None = None):
+        self.mark(phase, iteration)
+        try:
+            yield
+        finally:
+            self.mark(f"after_{phase}", iteration)
+
+    def _run(self) -> None:
+        poll_s = min(30.0, max(5.0, self.timeout_s / 10.0))
+        while not self._stop_event.wait(poll_s):
+            now = time.monotonic()
+            with self._lock:
+                phase = self._phase
+                iteration = self._iteration
+                elapsed = now - self._phase_started_at
+                should_dump = elapsed >= self.timeout_s and now - self._last_dump_at >= self.repeat_s
+                if should_dump:
+                    self._last_dump_at = now
+            if should_dump:
+                self._dump_stacks(phase=phase, iteration=iteration, elapsed_s=elapsed)
+
+    def _dump_stacks(self, *, phase: str, iteration: int | None, elapsed_s: float) -> None:
+        message = (
+            f"[WATCHDOG] No training phase progress for {elapsed_s:.1f}s "
+            f"(iteration={iteration}, phase={phase}). Dumping Python stacks to {self.dump_path}"
+        )
+        logger.error(message)
+        self._dump_file.write(
+            "\n"
+            f"===== {time.strftime('%Y-%m-%d %H:%M:%S')} {message} pid={os.getpid()} =====\n"
+        )
+        faulthandler.dump_traceback(file=self._dump_file, all_threads=True)
+        self._dump_file.flush()
 
 
 class Minibatch(TypedDict):
@@ -129,12 +248,14 @@ class PPO(BaseAlgo):
             is_main_process=self.is_main_process,
             num_gpus=self.gpu_world_size,
         )
+        self._training_watchdog = _TrainingWatchdog(self.log_dir, is_main_process=self.is_main_process)
 
         self._init_config()
 
         self.current_learning_iteration = 0
         self.eval_callbacks: list[RLEvalCallback] = []
-        _ = self.env.reset_all()
+        with self._training_watchdog.track("ppo_init_reset_all"):
+            _ = self.env.reset_all()
 
     def _init_config(self) -> None:
         self.algo_obs_dim_dict = self.env.observation_manager.get_obs_dims()
@@ -259,43 +380,55 @@ class PPO(BaseAlgo):
     def learn(self):
         self._train_mode()
 
-        obs_dict = self.env.reset_all()
+        try:
+            with self._training_watchdog.track("learn_reset_all"):
+                obs_dict = self.env.reset_all()
 
-        # Initialize environments with different episode length buffers
-        # Must happen AFTER reset_all() to avoid being overwritten by reset
-        if self.config.init_at_random_ep_len:
-            self.env.episode_length_buf = torch.randint_like(
-                self.env.episode_length_buf, high=int(self.env.max_episode_length)
-            )
-        for obs_key in obs_dict:
-            obs_dict[obs_key] = obs_dict[obs_key].to(self.device)
+            # Initialize environments with different episode length buffers
+            # Must happen AFTER reset_all() to avoid being overwritten by reset
+            if self.config.init_at_random_ep_len:
+                self.env.episode_length_buf = torch.randint_like(
+                    self.env.episode_length_buf, high=int(self.env.max_episode_length)
+                )
+            for obs_key in obs_dict:
+                obs_dict[obs_key] = obs_dict[obs_key].to(self.device)
 
-        for it in range(
-            self.current_learning_iteration,
-            self.current_learning_iteration + self.config.num_learning_iterations,
-        ):
-            self.current_learning_iteration = it
+            for it in range(
+                self.current_learning_iteration,
+                self.current_learning_iteration + self.config.num_learning_iterations,
+            ):
+                self.current_learning_iteration = it
 
-            # Synchronize curriculum metrics across GPUs before rollout
-            if self.is_multi_gpu:
-                self._synchronize_curriculum_metrics()
+                # Synchronize curriculum metrics across GPUs before rollout
+                if self.is_multi_gpu:
+                    with self._training_watchdog.track("curriculum_sync", it):
+                        self._synchronize_curriculum_metrics()
 
-            with self.logging_helper.record_collection_time():
-                obs_dict = self._rollout_step(obs_dict)
+                with self._training_watchdog.track("rollout", it):
+                    with self.logging_helper.record_collection_time():
+                        obs_dict = self._rollout_step(obs_dict)
 
-            with self.logging_helper.record_learn_time():
-                loss_dict = self._training_step()
+                with self._training_watchdog.track("training_step", it):
+                    with self.logging_helper.record_learn_time():
+                        loss_dict = self._training_step()
+
+                if self.is_main_process:
+                    with self._training_watchdog.track("post_epoch_logging", it):
+                        self._post_epoch_logging(it, loss_dict)
+
+                if it % self.config.save_interval == 0 and self.is_main_process:
+                    with self._training_watchdog.track("save_checkpoint", it):
+                        self.save(os.path.join(self.log_dir, f"model_{it:05d}.pt"))
+                        self.export(onnx_file_path=os.path.join(self.log_dir, f"model_{it:05d}.onnx"))
 
             if self.is_main_process:
-                self._post_epoch_logging(it, loss_dict)
-
-            if it % self.config.save_interval == 0 and self.is_main_process:
-                self.save(os.path.join(self.log_dir, f"model_{it:05d}.pt"))
-                self.export(onnx_file_path=os.path.join(self.log_dir, f"model_{it:05d}.onnx"))
-
-        if self.is_main_process:
-            self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration:05d}.pt"))
-            self.export(onnx_file_path=os.path.join(self.log_dir, f"model_{self.current_learning_iteration:05d}.onnx"))
+                with self._training_watchdog.track("final_save", self.current_learning_iteration):
+                    self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration:05d}.pt"))
+                    self.export(
+                        onnx_file_path=os.path.join(self.log_dir, f"model_{self.current_learning_iteration:05d}.onnx")
+                    )
+        finally:
+            self._training_watchdog.close()
 
     def _rollout_step(self, obs_dict):
         with torch.inference_mode():

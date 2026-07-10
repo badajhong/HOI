@@ -203,6 +203,12 @@ class VideoRecorderInterface(ABC):
         # Set recording state - this method now owns the recording flag
         self._current_episode = episode_id
         self._is_recording = True
+        logger.info(
+            "[VIDEO] start_recording "
+            f"episode={episode_id} total_episodes={self._total_episodes} "
+            f"async={self._encoding_executor is not None} backend={self._encoding_backend} "
+            f"threaded={self.config.use_recording_thread}"
+        )
         self._start_recording(episode_id)
 
     def capture_frame(self, env_id: int = 0) -> None:
@@ -242,6 +248,12 @@ class VideoRecorderInterface(ABC):
             self._capture_frame_impl()
             elapsed_ms = (time.perf_counter() - start_time) * 1000
             self._frame_times.append(elapsed_ms)
+            if elapsed_ms > 1000.0:
+                logger.warning(
+                    "[VIDEO] slow frame capture "
+                    f"episode={self._current_episode} frame={self._get_frame_count()} "
+                    f"elapsed_ms={elapsed_ms:.1f}"
+                )
 
     @abstractmethod
     def _capture_frame_impl(self) -> None:
@@ -309,10 +321,14 @@ class VideoRecorderInterface(ABC):
         if not self._is_recording:
             return
 
+        frame_count = self._get_frame_count()
+        logger.info(f"[VIDEO] stop_recording requested episode={self._current_episode} frames={frame_count}")
+
         # Clear recording state - this method now owns the recording flag
         self._is_recording = False
         try:
             self._stop_recording()
+            logger.info(f"[VIDEO] stop_recording finished episode={self._current_episode}")
         except Exception as e:
             logger.warning(f"Video recording failed; continuing training: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
@@ -461,6 +477,7 @@ class VideoRecorderInterface(ABC):
             If video encoding or saving fails.
         """
         if not self.video_frames:
+            logger.info(f"[VIDEO] no frames captured for episode={self._current_episode}; skipping encode")
             return
 
         try:
@@ -478,6 +495,13 @@ class VideoRecorderInterface(ABC):
             output_format = self.config.output_format
             upload_to_wandb = self.config.upload_to_wandb
             episode_id = self._current_episode
+            logger.info(
+                "[VIDEO] encode requested "
+                f"episode={episode_id} frames={video_array_uint8.shape[0]} "
+                f"shape={tuple(video_array_uint8.shape[1:])} fps={display_fps:.3f} "
+                f"format={output_format} upload_to_wandb={upload_to_wandb} "
+                f"async={self._encoding_executor is not None}"
+            )
             if self._encoding_executor is None:
                 self._encode_video_array(
                     video_array_uint8,
@@ -545,6 +569,7 @@ class VideoRecorderInterface(ABC):
 
         self._reap_encoding_futures()
         with self._encoding_lock:
+            pending_before = len(self._encoding_futures)
             if self._encoding_backend == "process":
                 future = self._encoding_executor.submit(
                     _encode_video_array_worker,
@@ -572,6 +597,11 @@ class VideoRecorderInterface(ABC):
                 )
                 future.add_done_callback(self._log_encoding_future_result)
             self._encoding_futures.append(future)
+            logger.info(
+                "[VIDEO] async encode submitted "
+                f"episode={episode_id} backend={self._encoding_backend} "
+                f"pending_before={pending_before} pending_after={len(self._encoding_futures)}"
+            )
 
     def _reap_encoding_futures(self) -> None:
         with self._encoding_lock:
@@ -585,8 +615,11 @@ class VideoRecorderInterface(ABC):
             logger.debug(f"Traceback: {traceback.format_exc()}")
             return
 
+        logger.info(f"[VIDEO] async encode finished video_path={video_path}")
         if upload_to_wandb and video_path:
+            logger.info(f"[VIDEO] wandb upload requested video_path={video_path}")
             log_video_to_wandb(video_path, cleanup_file=True)
+            logger.info(f"[VIDEO] wandb upload callback finished video_path={video_path}")
 
     def _cleanup_encoding_executor(self) -> None:
         if self._encoding_executor is None:

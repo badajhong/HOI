@@ -283,6 +283,7 @@ class ObjectContactLabelDistance(RewardTermBase):
         *,
         sample_points_root: str | None = None,
         threshold: float = 0.08,
+        distance_scale: float | None = None,
         contact_body_names_regex: str = ".*",
         fail_on_missing_labels: bool = True,
         **kwargs,
@@ -313,8 +314,10 @@ class ObjectContactLabelDistance(RewardTermBase):
             sample_points_by_key=self.sample_points_by_key,
         )
 
-        threshold_tensor = torch.tensor(max(float(threshold), 1e-6), dtype=torch.float32, device=env.device)
-        per_body_reward = torch.clamp(1.0 - distances / threshold_tensor, min=0.0, max=1.0)
+        if distance_scale is None:
+            distance_scale = threshold
+        scale_tensor = torch.tensor(max(float(distance_scale), 1e-6), dtype=torch.float32, device=env.device)
+        per_body_reward = torch.exp(-distances / scale_tensor)
         per_body_reward = per_body_reward * expected.float()
         denom = expected.float().sum(dim=1).clamp(min=1.0)
         reward = per_body_reward.sum(dim=1) / denom
@@ -407,7 +410,8 @@ class ObjectContactTargetPointDistance(RewardTermBase):
         self,
         env: WholeBodyTrackingManager,
         *,
-        margin: float = 0.12,
+        distance_scale: float | None = None,
+        margin: float | None = None,
         body_names: tuple[str, ...] | list[str] | str | None = None,
         contact_body_names_regex: str = ".*",
         fail_on_missing_targets: bool = True,
@@ -441,8 +445,10 @@ class ObjectContactTargetPointDistance(RewardTermBase):
             target_points_obj=target_points_obj,
         )
 
-        margin_tensor = torch.tensor(max(float(margin), 1e-6), dtype=torch.float32, device=env.device)
-        per_body_reward = torch.clamp(1.0 - distances / margin_tensor, min=0.0, max=1.0)
+        if distance_scale is None:
+            distance_scale = 0.12 if margin is None else margin
+        scale_tensor = torch.tensor(max(float(distance_scale), 1e-6), dtype=torch.float32, device=env.device)
+        per_body_reward = torch.exp(-distances / scale_tensor)
         per_body_reward = per_body_reward * active.float()
         denom = active.float().sum(dim=1).clamp(min=1.0)
         reward = per_body_reward.sum(dim=1) / denom

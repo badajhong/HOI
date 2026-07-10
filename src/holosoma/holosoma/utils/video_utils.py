@@ -115,16 +115,22 @@ def log_video_to_wandb(video_path, *, cleanup_file=False):
     """Upload an already encoded video to wandb, optionally removing it afterward."""
     video_path = Path(video_path)
     if not _is_wandb_available():
+        logger.info(f"[VIDEO] wandb is not initialized; keeping local video at {video_path}")
         return False
 
+    start = time.perf_counter()
+    logger.info(f"[VIDEO] wandb upload start path={video_path} cleanup_file={cleanup_file}")
     try:
         wandb.log({"Training rollout": wandb.Video(str(video_path), format="mp4")})
     except Exception as e:
         logger.warning(f"[VIDEO] wandb video upload failed; kept local video at {video_path}: {e}")
         return False
 
+    elapsed_s = time.perf_counter() - start
+    logger.info(f"[VIDEO] wandb upload success path={video_path} elapsed_s={elapsed_s:.2f}")
     if cleanup_file and video_path.exists():
         video_path.unlink()
+        logger.info(f"[VIDEO] removed uploaded local video path={video_path}")
     return True
 
 

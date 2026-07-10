@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import pathlib
 import statistics
+import sys
 import time
 from collections import deque
 from contextlib import contextmanager
@@ -93,6 +94,9 @@ class LoggingHelper:
         self.title: str = title
         self.is_main_process: bool = is_main_process
         self.num_gpus: int = num_gpus
+        disable_rich_live = os.environ.get("HOLOSOMA_DISABLE_RICH_LIVE", "").lower() in {"1", "true", "yes"}
+        self.use_rich_live: bool = bool(sys.stdout.isatty() and not disable_rich_live)
+        self.full_console_log_interval: int = int(os.environ.get("HOLOSOMA_TRAIN_FULL_LOG_INTERVAL", "100"))
 
         # Book keeping
         self.ep_infos: list[dict[str, Any]] = []
@@ -218,15 +222,77 @@ class LoggingHelper:
             fps=fps,
         )
 
-        # Use rich Live to update console
-        with Live(Panel(log_string, title=self.title), refresh_per_second=4, console=console):
-            pass
+        self._emit_console_output(
+            it=it,
+            log_string=log_string,
+            loss_dict=loss_dict,
+            env_log_dict=env_log_dict,
+            fps=fps,
+            iteration_time=iteration_time,
+        )
 
         # Clear episode infos after logging
         self.ep_infos.clear()
         self.raw_ep_infos.clear()
         self.learn_time = 0.0
         self.collection_time = 0.0
+
+    def _emit_console_output(
+        self,
+        *,
+        it: int,
+        log_string: str,
+        loss_dict: dict[str, float],
+        env_log_dict: dict[str, float],
+        fps: int,
+        iteration_time: float,
+    ) -> None:
+        if self.use_rich_live:
+            with Live(Panel(log_string, title=self.title), refresh_per_second=4, console=console):
+                pass
+            return
+
+        if self.full_console_log_interval > 0 and it % self.full_console_log_interval == 0:
+            print(log_string, flush=True)
+            return
+
+        print(
+            self._create_compact_console_output(
+                it=it,
+                loss_dict=loss_dict,
+                env_log_dict=env_log_dict,
+                fps=fps,
+                iteration_time=iteration_time,
+            ),
+            flush=True,
+        )
+
+    def _create_compact_console_output(
+        self,
+        *,
+        it: int,
+        loss_dict: dict[str, float],
+        env_log_dict: dict[str, float],
+        fps: int,
+        iteration_time: float,
+    ) -> str:
+        parts = [
+            f"iter={it}/{self.num_learning_iterations}",
+            f"fps={fps}",
+            f"iter_time={iteration_time:.2f}s",
+            f"total_steps={self.tot_timesteps}",
+        ]
+        if len(self.rewbuffer) > 0:
+            parts.append(f"mean_reward={statistics.mean(self.rewbuffer):.2f}")
+        if len(self.lenbuffer) > 0:
+            parts.append(f"mean_ep_len={statistics.mean(self.lenbuffer):.2f}")
+        if "KL" in loss_dict:
+            parts.append(f"kl={loss_dict['KL']:.4f}")
+        completion_items = [(k, v) for k, v in env_log_dict.items() if k.endswith("completion_percent_start0")]
+        if completion_items:
+            key, value = completion_items[0]
+            parts.append(f"{key}={value:.2f}")
+        return " | ".join(parts)
 
     def _log_episode_info(self) -> tuple[str, dict[str, float]]:
         """Log episode information and return formatted string.

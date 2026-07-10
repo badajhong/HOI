@@ -6,7 +6,8 @@ from holosoma.config_types.reward import RewardTermCfg
 from holosoma.config_values.wbt.g1.reward import g1_29dof_wbt_reward_w_object_multi_teacher
 from holosoma.config_values.wbt.r1.contact import (
     R1_OBJECT_CONTACT_BODY_NAMES,
-    R1_OBJECT_CONTACT_TARGET_MARGIN,
+    R1_OBJECT_CONTACT_LABEL_DISTANCE_SCALE,
+    R1_OBJECT_CONTACT_TARGET_DISTANCE_SCALE,
     R1_OBJECT_CONTACT_THRESHOLD,
 )
 
@@ -52,6 +53,7 @@ r1_26dof_wbt_reward_w_object_multi_teacher = replace(
             func="holosoma.managers.reward.terms.wbt:ObjectContactLabelDistance",
             params={
                 "threshold": R1_OBJECT_CONTACT_THRESHOLD,
+                "distance_scale": R1_OBJECT_CONTACT_LABEL_DISTANCE_SCALE,
                 "contact_body_names_regex": ".*",
                 "fail_on_missing_labels": True,
             },
@@ -60,11 +62,11 @@ r1_26dof_wbt_reward_w_object_multi_teacher = replace(
         "object_contact_target_point_distance": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:ObjectContactTargetPointDistance",
             params={
-                "margin": R1_OBJECT_CONTACT_TARGET_MARGIN,
+                "distance_scale": R1_OBJECT_CONTACT_TARGET_DISTANCE_SCALE,
                 "body_names": R1_OBJECT_CONTACT_BODY_NAMES,
                 "fail_on_missing_targets": True,
             },
-            weight=1.0,
+            weight=3.0,
         ),
     },
 )

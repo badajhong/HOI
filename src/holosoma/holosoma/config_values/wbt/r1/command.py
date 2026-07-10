@@ -43,7 +43,7 @@ motion_config_w_object_multi_teacher = replace(
     motion_config,
     motion_file="",
     motion_folder="train_r1/rl",
-    start_at_timestep_zero_prob=0.8,
+    start_at_timestep_zero_prob=0.6,
 )
 
 r1_26dof_wbt_command_w_object_multi_teacher = CommandManagerCfg(

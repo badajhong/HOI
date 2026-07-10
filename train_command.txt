@@ -189,9 +189,9 @@ nohup xvfb-run -a python src/holosoma/holosoma/train_agent.py \
 nohup xvfb-run -a python src/holosoma/holosoma/train_agent.py \
     exp:r1-teacher \
     --training.num-envs 1024 \
-    --command.setup-terms.motion-command.params.motion-config.motion-file "train_r1/rl/smalltable/sub17_smalltable_010.npz" \
+    --command.setup-terms.motion-command.params.motion-config.motion-file "train_r1/rl/whitechair/sub4_whitechair_029.npz" \
     --command.setup-terms.motion-command.params.motion-config.motion-folder "" \
-    --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob 1.0 \
+    --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob 0.6 \
     --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.object-pos '[0.0, 0.0, 0.0]' \
     --robot.object.object-parm "" \
     --randomization.setup-terms.randomize-object-rigid-body-material-startup.params.static-friction-range '[0.05, 0.05]' \
