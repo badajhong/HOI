@@ -188,11 +188,24 @@ nohup xvfb-run -a python src/holosoma/holosoma/train_agent.py \
 
 nohup xvfb-run -a python src/holosoma/holosoma/train_agent.py \
     exp:r1-teacher \
-    --training.num-envs 1024 \
+    --training.num-envs 2048 \
+    --algo.config.actor-learning-rate 3e-5 \
+    --algo.config.critic-learning-rate 3e-5 \
+    --algo.config.desired-kl 0.02 \
+    --termination.terms.bad-tracking.params.bad-object-pos-threshold 0.3 \
+    --termination.terms.bad-tracking.params.bad-motion-body-pos-threshold 0.35 \
     --command.setup-terms.motion-command.params.motion-config.motion-file "train_r1/rl/whitechair/sub4_whitechair_029.npz" \
     --command.setup-terms.motion-command.params.motion-config.motion-folder "" \
-    --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob 0.6 \
-    --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.object-pos '[0.0, 0.0, 0.0]' \
+    --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob 0.3 \
+    --command.setup-terms.motion-command.params.motion-config.use-adaptive-timesteps-sampler True \
+    --command.setup-terms.motion-command.params.motion-config.adaptive-timestep-sampling-ratio 0.5 \
+    --command.setup-terms.motion-command.params.motion-config.adaptive-timestep-lookback-steps 10 \
+    --command.setup-terms.motion-command.params.motion-config.hard-motion-sampling-ratio 0.5 \
+    --command.setup-terms.motion-command.params.motion-config.hard-motion-sampling-ema-alpha 0.1 \
+    --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.root-pos '[0.0, 0.0, 0.01]' \
+    --reward.terms.action-rate-l2.weight -0.25 \
+    --reward.terms.object-contact-label-distance.weight 3.0 \
+    --reward.terms.object-contact-target-point-distance.weight 4.0 \
     --robot.object.object-parm "" \
     --randomization.setup-terms.randomize-object-rigid-body-material-startup.params.static-friction-range '[0.05, 0.05]' \
     --randomization.setup-terms.randomize-object-rigid-body-material-startup.params.dynamic-friction-range '[0.05, 0.05]' \
@@ -207,3 +220,32 @@ nohup xvfb-run -a python src/holosoma/holosoma/train_agent.py \
     --logger.video.async-encoding True \
     --logger.video.async-encoding-backend process \
     > train_output_single.log 2>&1 &
+
+--command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.dof-pos 0.0
+--command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.root-pos '[0.0, 0.0, 0.01]'
+--command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.root-rot '[0.0, 0.0, 0.0]'
+--command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.root-lin-vel '[0.0, 0.0, 0.0]'
+--command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.root-ang-vel '[0.0, 0.0, 0.0]'
+
+
+nohup xvfb-run -a python src/holosoma/holosoma/train_agent.py \
+    exp:r1-teacher \
+    --training.num-envs 4096 \
+    --algo.config.actor-learning-rate 3e-5 \
+    --algo.config.critic-learning-rate 3e-5 \
+    --algo.config.desired-kl 0.02 \
+    --termination.terms.bad-tracking.params.bad-object-pos-threshold 0.3 \
+    --termination.terms.bad-tracking.params.bad-motion-body-pos-threshold 0.35 \
+    --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob 0.3 \
+    --command.setup-terms.motion-command.params.motion-config.use-adaptive-timesteps-sampler True \
+    --command.setup-terms.motion-command.params.motion-config.adaptive-timestep-sampling-ratio 0.5 \
+    --command.setup-terms.motion-command.params.motion-config.adaptive-timestep-lookback-steps 10 \
+    --command.setup-terms.motion-command.params.motion-config.hard-motion-sampling-ratio 0.5 \
+    --command.setup-terms.motion-command.params.motion-config.hard-motion-sampling-ema-alpha 0.1 \
+    --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.root-pos '[0.0, 0.0, 0.01]' \
+    --reward.terms.action-rate-l2.weight -0.25 \
+    --reward.terms.object-contact-label-distance.weight 3.0 \
+    --reward.terms.object-contact-target-point-distance.weight 4.0 \
+    --logger.video.async-encoding True \
+    --logger.video.async-encoding-backend process \
+    > train_output.log 2>&1 &

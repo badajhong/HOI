@@ -536,25 +536,44 @@ class ObjectContactTargetCurrent(ObservationTermBase):
             & motion_command.contact_object_target_valid[:, self.contact_label_columns]
         )
         target_points_obj = motion_command.contact_object_target_points_obj[:, self.contact_label_columns]
-        distances, nearest_points_w, body_pos_w = get_contact_target_point_distances(
-            env=env,
-            motion_command=motion_command,
-            body_indices=self.body_indices,
-            body_local_offsets=self.body_local_offsets,
-            target_points_obj=target_points_obj,
+        has_active = active.any(dim=1)
+        distances = torch.full(
+            active.shape,
+            float("inf"),
+            dtype=torch.float32,
+            device=env.device,
         )
-
-        rel_w = nearest_points_w - body_pos_w
-        ref_quat_w = motion_command.robot_ref_quat_w[:, None, :].expand(-1, rel_w.shape[1], -1)
-        rel_b = quat_rotate_inverse(
-            ref_quat_w.reshape(-1, 4),
-            rel_w.reshape(-1, 3),
-            w_last=True,
-        ).reshape_as(rel_w)
-
         active_f = active.float()
-        rel_clip_tensor = torch.tensor(max(float(relative_clip), 1e-6), dtype=torch.float32, device=env.device)
-        rel_obs = torch.clamp(rel_b / rel_clip_tensor, min=-1.0, max=1.0) * active_f[:, :, None]
+        rel_obs = torch.zeros(
+            env.num_envs,
+            self.contact_label_columns.numel(),
+            3,
+            dtype=torch.float32,
+            device=env.device,
+        )
+        if torch.any(has_active):
+            active_env_ids = has_active.nonzero(as_tuple=False).flatten()
+            active_distances, nearest_points_w, body_pos_w = get_contact_target_point_distances(
+                env=env,
+                motion_command=motion_command,
+                body_indices=self.body_indices,
+                body_local_offsets=self.body_local_offsets,
+                target_points_obj=target_points_obj[active_env_ids],
+                env_ids=active_env_ids,
+            )
+            distances[active_env_ids] = active_distances
+
+            rel_w = nearest_points_w - body_pos_w
+            ref_quat_w = motion_command.robot_ref_quat_w[active_env_ids, None, :].expand(-1, rel_w.shape[1], -1)
+            rel_b = quat_rotate_inverse(
+                ref_quat_w.reshape(-1, 4),
+                rel_w.reshape(-1, 3),
+                w_last=True,
+            ).reshape_as(rel_w)
+            rel_clip_tensor = torch.tensor(max(float(relative_clip), 1e-6), dtype=torch.float32, device=env.device)
+            rel_obs[active_env_ids] = (
+                torch.clamp(rel_b / rel_clip_tensor, min=-1.0, max=1.0) * active_f[active_env_ids, :, None]
+            )
 
         outputs: list[torch.Tensor] = []
         if include_active:

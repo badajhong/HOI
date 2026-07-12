@@ -233,9 +233,15 @@ def get_contact_body_positions_w(
     env,
     body_indices: torch.Tensor,
     body_local_offsets: torch.Tensor | None = None,
+    env_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """World positions for real body centers or virtual contact points."""
-    body_pos_w = env.simulator._rigid_body_pos[:, body_indices, :]
+    rigid_body_pos = env.simulator._rigid_body_pos
+    if env_ids is not None:
+        env_ids = env_ids.to(device=env.device, dtype=torch.long)
+        rigid_body_pos = rigid_body_pos[env_ids]
+
+    body_pos_w = rigid_body_pos[:, body_indices, :]
     if body_local_offsets is None or body_local_offsets.numel() == 0:
         return body_pos_w
 
@@ -243,13 +249,17 @@ def get_contact_body_positions_w(
     if torch.all(body_local_offsets == 0.0):
         return body_pos_w
 
-    body_quat_w = env.simulator._rigid_body_rot[:, body_indices, :]
-    offsets = body_local_offsets.unsqueeze(0).expand(env.num_envs, -1, -1)
+    rigid_body_rot = env.simulator._rigid_body_rot
+    if env_ids is not None:
+        rigid_body_rot = rigid_body_rot[env_ids]
+    body_quat_w = rigid_body_rot[:, body_indices, :]
+    num_envs = int(body_pos_w.shape[0])
+    offsets = body_local_offsets.unsqueeze(0).expand(num_envs, -1, -1)
     offsets_w = quat_apply(
         body_quat_w.reshape(-1, 4),
         offsets.reshape(-1, 3),
         w_last=True,
-    ).view(env.num_envs, body_indices.numel(), 3)
+    ).view(num_envs, body_indices.numel(), 3)
     return body_pos_w + offsets_w
 
 
@@ -258,6 +268,7 @@ def get_object_local_points_w(
     env,
     motion_command: MotionCommand,
     object_local_points: torch.Tensor,
+    env_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Transform object-local points to world frame using the live simulator object pose."""
     if object_local_points.ndim != 4 or object_local_points.shape[-1] != 3:
@@ -267,16 +278,28 @@ def get_object_local_points_w(
         )
 
     local_points = object_local_points.to(device=env.device, dtype=torch.float32)
+    env_ids = None if env_ids is None else env_ids.to(device=env.device, dtype=torch.long)
     object_scales = getattr(env, "object_scale_factors", None)
     if object_scales is not None:
-        local_points = local_points * object_scales.to(device=env.device, dtype=torch.float32)[:, None, None, :]
+        object_scales = object_scales.to(device=env.device, dtype=torch.float32)
+        if env_ids is not None:
+            object_scales = object_scales[env_ids]
+        local_points = local_points * object_scales[:, None, None, :]
 
     num_envs, num_bodies, num_points, _ = local_points.shape
     flat_points = local_points.reshape(num_envs, num_bodies * num_points, 3)
-    rot_w_from_obj = quaternion_to_matrix(motion_command.simulator_object_quat_w, w_last=True)
+    if env_ids is not None and hasattr(motion_command, "_active_object_states_w"):
+        object_states_w = motion_command._active_object_states_w(env_ids)
+        object_pos_w = object_states_w[:, :3]
+        object_quat_w = object_states_w[:, 3:7]
+    else:
+        object_pos_w = motion_command.simulator_object_pos_w
+        object_quat_w = motion_command.simulator_object_quat_w
+
+    rot_w_from_obj = quaternion_to_matrix(object_quat_w, w_last=True)
     points_w = (
         torch.bmm(flat_points, rot_w_from_obj.transpose(1, 2))
-        + motion_command.simulator_object_pos_w[:, None, :]
+        + object_pos_w[:, None, :]
     )
     return points_w.reshape(num_envs, num_bodies, num_points, 3)
 
@@ -288,6 +311,7 @@ def get_contact_target_point_distances(
     body_indices: torch.Tensor,
     body_local_offsets: torch.Tensor | None,
     target_points_obj: torch.Tensor,
+    env_ids: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Distances from contact bodies to their nearest labeled object target point.
 
@@ -300,6 +324,7 @@ def get_contact_target_point_distances(
         env=env,
         body_indices=body_indices,
         body_local_offsets=body_local_offsets,
+        env_ids=env_ids,
     )
     if target_points_obj.shape[2] == 0:
         distances = torch.full(
@@ -314,6 +339,7 @@ def get_contact_target_point_distances(
         env=env,
         motion_command=motion_command,
         object_local_points=target_points_obj,
+        env_ids=env_ids,
     )
     per_target_distances = torch.linalg.norm(body_pos_w[:, :, None, :] - target_points_w, dim=-1)
     distances, nearest_indices = torch.min(per_target_distances, dim=-1)
@@ -333,39 +359,54 @@ def get_cached_object_surface_distances(
     body_indices: torch.Tensor,
     body_local_offsets: torch.Tensor | None = None,
     sample_points_by_key: Mapping[str | None, torch.Tensor],
+    env_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Current min distance from each selected robot body to the active object surface.
 
     Distances are cached at env level so reward and observation terms can share the
     same robot-object distance computation within a simulation step.
     """
+    env_ids = None if env_ids is None else env_ids.to(device=env.device, dtype=torch.long)
+    use_cache = env_ids is None
     body_names_key = tuple(str(name) for name in body_names)
-    object_keys_key = tuple(sorted("__none__" if key is None else str(key) for key in sample_points_by_key))
-    offsets_key = ()
-    if body_local_offsets is not None and body_local_offsets.numel() > 0:
-        offsets_key = tuple(round(float(value), 6) for value in body_local_offsets.detach().cpu().flatten().tolist())
-    cache_key = (body_names_key, object_keys_key, offsets_key)
-    cache_generation = getattr(env, "_object_contact_surface_cache_generation", 0)
-    sim_step = getattr(env.simulator, "_sim_step_counter", None)
+    cache_key = None
+    cache = None
+    if use_cache:
+        object_keys_key = tuple(sorted("__none__" if key is None else str(key) for key in sample_points_by_key))
+        offsets_key = ()
+        if body_local_offsets is not None and body_local_offsets.numel() > 0:
+            offsets_key = tuple(
+                round(float(value), 6)
+                for value in body_local_offsets.detach().cpu().flatten().tolist()
+            )
+        cache_key = (body_names_key, object_keys_key, offsets_key)
+        cache_generation = getattr(env, "_object_contact_surface_cache_generation", 0)
+        sim_step = getattr(env.simulator, "_sim_step_counter", None)
 
-    cache = getattr(env, "_object_contact_surface_cache", None)
-    if cache is None:
-        cache = {}
-        env._object_contact_surface_cache = cache
+        cache = getattr(env, "_object_contact_surface_cache", None)
+        if cache is None:
+            cache = {}
+            env._object_contact_surface_cache = cache
 
-    cached = cache.get(cache_key)
-    if cached is not None:
-        cached_step, cached_generation, cached_distances = cached
-        if cached_step == sim_step and cached_generation == cache_generation:
-            return cached_distances
+        cached = cache.get(cache_key)
+        if cached is not None:
+            cached_step, cached_generation, cached_distances = cached
+            if cached_step == sim_step and cached_generation == cache_generation:
+                return cached_distances
 
     body_pos_w = get_contact_body_positions_w(
         env=env,
         body_indices=body_indices,
         body_local_offsets=body_local_offsets,
+        env_ids=env_ids,
     )
-    object_pos_w = motion_command.simulator_object_pos_w
-    object_quat_w = motion_command.simulator_object_quat_w
+    if env_ids is not None and hasattr(motion_command, "_active_object_states_w"):
+        object_states_w = motion_command._active_object_states_w(env_ids)
+        object_pos_w = object_states_w[:, :3]
+        object_quat_w = object_states_w[:, 3:7]
+    else:
+        object_pos_w = motion_command.simulator_object_pos_w
+        object_quat_w = motion_command.simulator_object_quat_w
 
     rot_w_from_obj = quaternion_to_matrix(object_quat_w, w_last=True)
     body_pos_obj = torch.bmm(
@@ -373,15 +414,36 @@ def get_cached_object_surface_distances(
         (body_pos_w - object_pos_w[:, None, :]).transpose(1, 2),
     ).transpose(1, 2)
 
+    num_envs = int(body_pos_w.shape[0])
     distances = torch.full(
-        (env.num_envs, len(body_names_key)),
+        (num_envs, len(body_names_key)),
         float("inf"),
         dtype=torch.float32,
         device=env.device,
     )
 
     object_scales = getattr(env, "object_scale_factors", None)
-    for object_key, mask in object_key_masks_for_envs(motion_command, env.num_envs, env.device):
+    if object_scales is not None:
+        object_scales = object_scales.to(device=env.device, dtype=torch.float32)
+        if env_ids is not None:
+            object_scales = object_scales[env_ids]
+
+    if env_ids is None:
+        object_masks = object_key_masks_for_envs(motion_command, env.num_envs, env.device)
+    else:
+        object_key_to_id = getattr(motion_command, "object_key_to_id", None) or {}
+        object_type_ids = getattr(motion_command, "object_type_ids", None)
+        if object_key_to_id and object_type_ids is not None:
+            selected_type_ids = object_type_ids[env_ids].to(device=env.device)
+            object_masks = (
+                (object_key, selected_type_ids == int(object_type_id))
+                for object_key, object_type_id in sorted(object_key_to_id.items(), key=lambda item: str(item[0]))
+            )
+        else:
+            key = motion_command.motion.clip_object_keys[0] if motion_command.motion.clip_object_keys else None
+            object_masks = ((key, torch.ones(num_envs, dtype=torch.bool, device=env.device)),)
+
+    for object_key, mask in object_masks:
         sample_points = sample_points_by_key.get(object_key)
         if sample_points is None:
             sample_points = sample_points_by_key.get(None)
@@ -390,13 +452,12 @@ def get_cached_object_surface_distances(
 
         local_points = sample_points.to(device=env.device, dtype=torch.float32)
         if object_scales is not None:
-            scaled_points = local_points.unsqueeze(0) * object_scales[mask].to(
-                device=env.device, dtype=torch.float32
-            ).unsqueeze(1)
+            scaled_points = local_points.unsqueeze(0) * object_scales[mask].unsqueeze(1)
             diff = body_pos_obj[mask, :, None, :] - scaled_points[:, None, :, :]
         else:
             diff = body_pos_obj[mask, :, None, :] - local_points[None, None, :, :]
         distances[mask] = torch.linalg.norm(diff, dim=-1).amin(dim=-1)
 
-    cache[cache_key] = (sim_step, cache_generation, distances)
+    if use_cache and cache is not None and cache_key is not None:
+        cache[cache_key] = (sim_step, cache_generation, distances)
     return distances

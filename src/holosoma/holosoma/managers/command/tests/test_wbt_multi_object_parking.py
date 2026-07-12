@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import torch
 
-from holosoma.managers.command.terms.wbt import INACTIVE_OBJECT_PARK_DEPTH_M, MotionCommand
+from holosoma.managers.command.terms.wbt import AdaptiveTimestepsSampler, INACTIVE_OBJECT_PARK_DEPTH_M, MotionCommand
 from holosoma.envs.wbt.wbt_manager import WholeBodyTrackingManager
 
 
@@ -137,6 +137,26 @@ def _make_transition_command() -> MotionCommand:
         def has_multiple_clips(self) -> bool:
             return len(self.clip_ranges) > 1
 
+        def validate_time_major_tensor_lengths(self) -> None:
+            expected_len = int(self.time_step_total)
+            for attr_name in (
+                "_joint_pos",
+                "_joint_vel",
+                "_body_pos_w",
+                "_body_quat_w",
+                "_body_lin_vel_w",
+                "_body_ang_vel_w",
+                "_object_pos_w",
+                "_object_quat_w",
+                "_object_lin_vel_w",
+                "_object_ang_vel_w",
+                "_contact_object_label",
+                "_contact_object_distance",
+                "_contact_object_target_points_obj",
+                "_contact_object_target_valid",
+            ):
+                assert int(getattr(self, attr_name).shape[0]) == expected_len
+
     motion = FakeMotion(
         has_object=True,
         has_contact_labels=True,
@@ -157,6 +177,11 @@ def _make_transition_command() -> MotionCommand:
         _object_ang_vel_w=torch.zeros(4, 3),
         _contact_object_label=torch.tensor([[True], [False], [False], [True]]),
         _contact_object_distance=torch.tensor([[0.1], [0.2], [0.3], [0.4]]),
+        _contact_object_target_points_obj=torch.tensor([10.0, 20.0, 30.0, 40.0])
+        .view(4, 1, 1, 1)
+        .expand(4, 1, 2, 3)
+        .clone(),
+        _contact_object_target_valid=torch.tensor([[True], [True], [False], [True]]),
         time_step_total=4,
     )
     command.motion = motion
@@ -226,6 +251,14 @@ def test_default_pose_transitions_are_added_to_every_motion_clip() -> None:
         command.motion._contact_object_distance.flatten(),
         torch.tensor([float("inf"), float("inf"), 0.1, 0.2, float("inf"), float("inf"), 0.3, 0.4]),
     )
+    torch.testing.assert_close(
+        command.motion._contact_object_target_valid.flatten(),
+        torch.tensor([False, False, True, True, False, False, False, True]),
+    )
+    torch.testing.assert_close(
+        command.motion._contact_object_target_points_obj[:, 0, 0, 0],
+        torch.tensor([0.0, 0.0, 10.0, 20.0, 0.0, 0.0, 30.0, 40.0]),
+    )
 
     command._add_transition_to_each_clip(num_steps=2, prepend=False)
 
@@ -250,6 +283,14 @@ def test_default_pose_transitions_are_added_to_every_motion_clip() -> None:
                 1077.0,
             ]
         ),
+    )
+    torch.testing.assert_close(
+        command.motion._contact_object_target_valid.flatten(),
+        torch.tensor([False, False, True, True, False, False, False, False, False, True, False, False]),
+    )
+    torch.testing.assert_close(
+        command.motion._contact_object_target_points_obj[:, 0, 0, 0],
+        torch.tensor([0.0, 0.0, 10.0, 20.0, 0.0, 0.0, 0.0, 0.0, 30.0, 40.0, 0.0, 0.0]),
     )
 
 
@@ -323,3 +364,18 @@ def test_completion_percent_start0_uses_real_motion_range_without_renaming_metri
 
     metric = env.log_dict["Motion/box/clip_a/completion_percent_start0"]
     torch.testing.assert_close(metric, torch.tensor([0.0, 0.0, 50.0, 100.0]))
+
+
+def test_adaptive_timestep_sampler_respects_clip_ranges() -> None:
+    sampler = AdaptiveTimestepsSampler(motion_time_step_total=100, device="cpu", env_fps=10)
+    sampler.bin_failed_count[:] = 1.0
+    sampler.bin_failed_count[8] = 100.0
+
+    starts = torch.tensor([0, 20, 80, 80], dtype=torch.long)
+    ends_exclusive = torch.tensor([10, 40, 90, 90], dtype=torch.long)
+
+    sampled = sampler.sample_time_steps_in_ranges(starts, ends_exclusive)
+
+    assert sampled.shape == starts.shape
+    assert torch.all(sampled >= starts)
+    assert torch.all(sampled < ends_exclusive)

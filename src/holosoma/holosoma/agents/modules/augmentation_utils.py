@@ -36,6 +36,8 @@ class SymmetryUtils:
         self.sub_observation_dims: Dict[str, int] = {}
         self.joint_index_map: torch.Tensor = torch.empty(0)
         self.sign_flip_mask: torch.Tensor = torch.empty(0)
+        self.action_joint_index_map: torch.Tensor = torch.empty(0)
+        self.action_sign_flip_mask: torch.Tensor = torch.empty(0)
 
         self._init_observation_config()
         self._init_robot_config()
@@ -166,6 +168,7 @@ class SymmetryUtils:
         dof_names = self.robot_config.dof_names
         joint_name_mapping = self.robot_config.symmetry_joint_names
         sign_flip_joints = self.robot_config.flip_sign_joint_names
+        action_dof_names = self._get_action_dof_names(dof_names)
 
         # Create name to index mapping
         name_to_idx = {name: idx for idx, name in enumerate(dof_names)}
@@ -188,6 +191,41 @@ class SymmetryUtils:
             device=self.env.device,
             dtype=torch.float,
         )
+
+        # Actions may control a subset of simulator DOFs (for example, R1 keeps
+        # head joints locked while the policy outputs only body/arm actions).
+        action_name_to_idx = {name: idx for idx, name in enumerate(action_dof_names)}
+        action_joint_index_mapping = {}
+        for joint1, joint2 in joint_name_mapping.items():
+            if joint1 in action_name_to_idx and joint2 in action_name_to_idx:
+                action_joint_index_mapping[action_name_to_idx[joint1]] = action_name_to_idx[joint2]
+
+        self.action_joint_index_map = torch.tensor(
+            [action_joint_index_mapping.get(i, i) for i in range(len(action_dof_names))],
+            device=self.env.device,
+            dtype=torch.long,
+        )
+        action_sign_flip_indices = {action_name_to_idx[name] for name in sign_flip_joints if name in action_name_to_idx}
+        self.action_sign_flip_mask = torch.tensor(
+            [-1.0 if i in action_sign_flip_indices else 1.0 for i in range(len(action_dof_names))],
+            device=self.env.device,
+            dtype=torch.float,
+        )
+
+    def _get_action_dof_names(self, dof_names: list[str]) -> list[str]:
+        action_manager = getattr(self.env, "action_manager", None)
+        if action_manager is None:
+            return list(dof_names)
+
+        try:
+            joint_control = action_manager.get_term("joint_control")
+        except KeyError:
+            return list(dof_names)
+
+        action_dof_names = getattr(joint_control, "action_dof_names", None)
+        if action_dof_names is None:
+            return list(dof_names)
+        return list(action_dof_names)
 
     def augment_observations(self, obs: torch.Tensor, env: Any, obs_list: Sequence[str]) -> torch.Tensor:
         """Applies x-z plane symmetry transformation for observation data augmentation.
@@ -292,7 +330,7 @@ class SymmetryUtils:
             Joint mappings are applied and signs are flipped as appropriate.
             Returns [a_mapped0 * sign0, a_mapped1 * sign1, ..., a_mappedN * signN] (mirrored and sign-flipped).
         """
-        return action[..., self.joint_index_map] * self.sign_flip_mask
+        return action[..., self.action_joint_index_map] * self.action_sign_flip_mask
 
     def mirror_obs_base_lin_vel(self, base_lin_vel: torch.Tensor) -> torch.Tensor:
         """Mirrors the base linear velocity in robot's base frame.
@@ -523,7 +561,7 @@ class SymmetryUtils:
             Mirrored actions with same transformation as joint positions.
             Outputs: [a_mapped0 * sign0, a_mapped1 * sign1, ..., a_mappedN * signN] (mirrored and sign-flipped).
         """
-        return actions[..., self.joint_index_map] * self.sign_flip_mask
+        return actions[..., self.action_joint_index_map] * self.action_sign_flip_mask
 
     def mirror_obs_ee_apply_force(self, ee_apply_force: torch.Tensor) -> torch.Tensor:
         """Mirrors the end-effector applied forces in base frame.

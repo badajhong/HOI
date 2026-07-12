@@ -33,29 +33,39 @@ class JointPositionActionTerm(ActionTermBase):
         """
         super().__init__(cfg, env)
 
-        # Get action dimension from environment
-        self._action_dim = env.num_dof
+        self._action_dof_names = self._resolve_action_dof_names(cfg, env)
+        self._action_dof_indices = torch.tensor(
+            [env.dof_names.index(name) for name in self._action_dof_names],
+            dtype=torch.long,
+            device=env.device,
+        )
+
+        # Policy actions may control a subset of simulator DOFs. Torque buffers
+        # stay full-size so uncontrolled joints can still be held by PD.
+        self._action_dim = len(self._action_dof_names)
+        self._sim_action_dim = env.num_dof
 
         # Initialize action buffers
         self._raw_actions = torch.zeros(env.num_envs, self._action_dim, device=env.device)
         self._processed_actions = torch.zeros(env.num_envs, self._action_dim, device=env.device)
         self._actions_after_delay = torch.zeros(env.num_envs, self._action_dim, device=env.device)
+        self._actions_after_delay_full = torch.zeros(env.num_envs, self._sim_action_dim, device=env.device)
 
         # Initialize torque buffer
-        self.torques = torch.zeros(env.num_envs, self._action_dim, device=env.device)
+        self.torques = torch.zeros(env.num_envs, self._sim_action_dim, device=env.device)
 
         # Cache previous DOF velocities for derivative control
         self._prev_dof_vel = torch.zeros(env.num_envs, env.num_dof, device=env.device)
 
         # Default actuator scaling (may be overridden by randomization terms)
-        self._kp_scale = torch.ones(env.num_envs, self._action_dim, device=env.device)
+        self._kp_scale = torch.ones(env.num_envs, self._sim_action_dim, device=env.device)
         self._kd_scale = torch.ones_like(self._kp_scale)
         self._rfi_lim_scale = torch.ones_like(self._kp_scale)
         self._rfi_lim: float = 0.0
         self._randomize_torque_rfi: bool = False
 
         # PD gains and action scales
-        self.p_gains = torch.zeros(self._action_dim, dtype=torch.float, device=env.device)
+        self.p_gains = torch.zeros(self._sim_action_dim, dtype=torch.float, device=env.device)
         self.d_gains = torch.zeros_like(self.p_gains)
         self.i_gains = torch.zeros_like(self.p_gains)
         self.action_scales = torch.zeros_like(self.p_gains)
@@ -97,6 +107,11 @@ class JointPositionActionTerm(ActionTermBase):
     def action_dim(self) -> int:
         """Dimension of the action term."""
         return self._action_dim
+
+    @property
+    def action_dof_names(self) -> list[str]:
+        """Simulator DOF names controlled by the policy action vector."""
+        return list(self._action_dof_names)
 
     def process_actions(self, actions: torch.Tensor) -> None:
         """Process raw actions: clip and apply delay if configured.
@@ -159,10 +174,13 @@ class JointPositionActionTerm(ActionTermBase):
             actions: Action tensor [num_envs, action_dim]
 
         Returns:
-            Torque tensor [num_envs, action_dim]
+            Torque tensor [num_envs, num_dof]
         """
+        self._actions_after_delay_full.zero_()
+        self._actions_after_delay_full[:, self._action_dof_indices] = actions
+
         # Scale actions
-        actions_scaled = actions * self.action_scales
+        actions_scaled = self._actions_after_delay_full * self.action_scales
 
         # Compute torques based on control type
         control_type = self.env.robot_config.control.control_type
@@ -265,6 +283,29 @@ class JointPositionActionTerm(ActionTermBase):
 
     # ------------------------------------------------------------------
     # Internal helpers
+
+    def _resolve_action_dof_names(self, cfg: ActionTermCfg, env: Any) -> list[str]:
+        params = getattr(cfg, "params", {}) or {}
+        action_dof_names = params.get("action_dof_names", params.get("controlled_dof_names"))
+        if action_dof_names is None:
+            return list(env.dof_names)
+
+        action_dof_names = list(action_dof_names)
+        if not action_dof_names:
+            raise ValueError("JointPositionActionTerm requires at least one action DOF.")
+
+        missing_names = [name for name in action_dof_names if name not in env.dof_names]
+        if missing_names:
+            raise ValueError(
+                "JointPositionActionTerm action DOFs must exist in env.dof_names. "
+                f"Missing: {missing_names}"
+            )
+
+        duplicate_names = sorted({name for name in action_dof_names if action_dof_names.count(name) > 1})
+        if duplicate_names:
+            raise ValueError(f"JointPositionActionTerm action DOFs contain duplicates: {duplicate_names}")
+
+        return action_dof_names
 
     def _attach_actuator_randomizer_scales(self) -> None:
         """Attach shared actuator randomizer buffers if they exist."""

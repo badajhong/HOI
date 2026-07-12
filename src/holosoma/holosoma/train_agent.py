@@ -124,7 +124,8 @@ def configure_logging(distributed_conf: MultGPUConfig | None = None, log_dir: Pa
     if log_dir is not None:
         fname = f"train_rank_{distributed_conf['global_rank']:02d}.log" if distributed_conf is not None else "train.log"
         log_path = log_dir / fname
-        logger.add(str(log_path), level="DEBUG")
+        file_log_level = os.environ.get("LOGURU_FILE_LEVEL", os.environ.get("LOGURU_LEVEL", "INFO")).upper()
+        logger.add(str(log_path), level=file_log_level)
 
     # Get log level from LOGURU_LEVEL environment variable or use INFO as default in rank0
     if is_main_process:

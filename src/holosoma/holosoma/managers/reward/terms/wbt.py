@@ -305,13 +305,21 @@ class ObjectContactLabelDistance(RewardTermBase):
         if not torch.any(has_expected):
             return torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
 
-        distances = get_cached_object_surface_distances(
+        active_env_ids = has_expected.nonzero(as_tuple=False).flatten()
+        distances = torch.full(
+            (env.num_envs, self.contact_label_columns.numel()),
+            float("inf"),
+            dtype=torch.float32,
+            device=env.device,
+        )
+        distances[active_env_ids] = get_cached_object_surface_distances(
             env=env,
             motion_command=motion_command,
             body_names=self.contact_body_names,
             body_indices=self.contact_body_indices,
             body_local_offsets=self.contact_body_local_offsets,
             sample_points_by_key=self.sample_points_by_key,
+            env_ids=active_env_ids,
         )
 
         if distance_scale is None:
@@ -436,14 +444,23 @@ class ObjectContactTargetPointDistance(RewardTermBase):
         if not torch.any(has_active):
             return torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
 
+        active_env_ids = has_active.nonzero(as_tuple=False).flatten()
         target_points_obj = motion_command.contact_object_target_points_obj[:, self.contact_label_columns]
-        distances, _, _ = get_contact_target_point_distances(
+        distances = torch.full(
+            (env.num_envs, self.contact_label_columns.numel()),
+            float("inf"),
+            dtype=torch.float32,
+            device=env.device,
+        )
+        active_distances, _, _ = get_contact_target_point_distances(
             env=env,
             motion_command=motion_command,
             body_indices=self.contact_body_indices,
             body_local_offsets=self.contact_body_local_offsets,
-            target_points_obj=target_points_obj,
+            target_points_obj=target_points_obj[active_env_ids],
+            env_ids=active_env_ids,
         )
+        distances[active_env_ids] = active_distances
 
         if distance_scale is None:
             distance_scale = 0.12 if margin is None else margin

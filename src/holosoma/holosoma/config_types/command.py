@@ -117,6 +117,12 @@ class MotionConfig:
     use_adaptive_timesteps_sampler: bool = False
     """During training, whether to prioritize training on motion segments where the robot fails often."""
 
+    adaptive_timestep_lookback_steps: int = 0
+    """When adaptive timestep sampling is enabled, start this many frames before the sampled hard timestep."""
+
+    adaptive_timestep_sampling_ratio: float = 0.0
+    """Fraction of resets sampled from adaptive hard timesteps; remaining non-start-zero resets stay uniform random."""
+
     hard_motion_sampling_ratio: float = 0.0
     """Fraction of reset environments sampled from low-completion motions.
 

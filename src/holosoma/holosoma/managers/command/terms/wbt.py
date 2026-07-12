@@ -162,6 +162,7 @@ class MotionLoader:
         self.time_step_total = self._joint_pos.shape[0]
         if not hasattr(self, "real_motion_clip_ranges"):
             self.real_motion_clip_ranges = list(self.clip_ranges)
+        self.validate_time_major_tensor_lengths()
 
     def _get_index_of_a_in_b(self, a_names: List[str], b_names: List[str], device: str = "cpu") -> torch.Tensor:
         indexes = []
@@ -743,6 +744,48 @@ class MotionLoader:
     def contact_object_target_valid(self) -> torch.Tensor:
         return self._contact_object_target_valid[:]
 
+    def validate_time_major_tensor_lengths(self) -> None:
+        """Ensure every per-frame tensor can be indexed by motion timesteps."""
+        expected_len = int(self.time_step_total)
+        tensors: list[tuple[str, torch.Tensor]] = [
+            ("_joint_pos", self._joint_pos),
+            ("_joint_vel", self._joint_vel),
+            ("_body_pos_w", self._body_pos_w),
+            ("_body_quat_w", self._body_quat_w),
+            ("_body_lin_vel_w", self._body_lin_vel_w),
+            ("_body_ang_vel_w", self._body_ang_vel_w),
+        ]
+        if self.has_object:
+            tensors.extend(
+                [
+                    ("_object_pos_w", self._object_pos_w),
+                    ("_object_quat_w", self._object_quat_w),
+                    ("_object_lin_vel_w", self._object_lin_vel_w),
+                    ("_object_ang_vel_w", self._object_ang_vel_w),
+                ]
+            )
+        if self.has_contact_labels:
+            tensors.extend(
+                [
+                    ("_contact_object_label", self._contact_object_label),
+                    ("_contact_object_distance", self._contact_object_distance),
+                    ("_contact_object_target_points_obj", self._contact_object_target_points_obj),
+                    ("_contact_object_target_valid", self._contact_object_target_valid),
+                ]
+            )
+
+        mismatches = [
+            f"{name}={int(tensor.shape[0])}"
+            for name, tensor in tensors
+            if int(tensor.shape[0]) != expected_len
+        ]
+        if mismatches:
+            raise ValueError(
+                "Motion per-frame tensor length mismatch after loading/augmentation. "
+                f"Expected {expected_len} frames from time_step_total, got: {', '.join(mismatches)}. "
+                "This would make timestep indexing invalid; check contact target arrays and transition augmentation."
+            )
+
     def extend_with_segments(self, segments: dict[str, torch.Tensor], prepend: bool) -> MotionLoader:
         """Merge interpolated segments with motion data, mutating this MotionLoader."""
         concat_targets = [
@@ -864,6 +907,7 @@ class MotionLoader:
             self.clip_ranges[-1] = (last_start, last_end + seg_len)
 
         self.time_step_total = self._joint_pos.shape[0]
+        self.validate_time_major_tensor_lengths()
         return self
 
 
@@ -945,6 +989,69 @@ class AdaptiveTimestepsSampler:
         sampled_bins = torch.multinomial(self.sampling_probabilities, num_samples, replacement=True)
         # inside of each bin, randomly sample a time step, ignoring the borders
         return (sampled_bins + torch.rand(num_samples, device=self.device)) / self.num_bins
+
+    def sample_time_steps_in_ranges(
+        self,
+        range_starts: torch.Tensor,
+        range_ends_exclusive: torch.Tensor,
+    ) -> torch.Tensor:
+        """Sample absolute timesteps from adaptive bins, constrained to each provided range."""
+        range_starts = range_starts.to(device=self.device, dtype=torch.long).view(-1)
+        range_ends_exclusive = range_ends_exclusive.to(device=self.device, dtype=torch.long).view(-1)
+        if range_starts.numel() == 0:
+            return torch.empty(0, dtype=torch.long, device=self.device)
+        if range_starts.shape != range_ends_exclusive.shape:
+            raise ValueError(
+                "range_starts and range_ends_exclusive must have the same shape, "
+                f"got {tuple(range_starts.shape)} and {tuple(range_ends_exclusive.shape)}"
+            )
+        if torch.any(range_ends_exclusive <= range_starts):
+            raise ValueError("Adaptive timestep sampling ranges must be non-empty.")
+
+        sampled_time_steps = torch.empty_like(range_starts)
+        probabilities = self.sampling_probabilities
+        bin_edges = torch.linspace(
+            0.0,
+            float(self.motion_time_step_total),
+            self.num_bins + 1,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        unique_ranges = torch.unique(torch.stack([range_starts, range_ends_exclusive], dim=1), dim=0)
+
+        for range_pair in unique_ranges:
+            range_start = int(range_pair[0].item())
+            range_end = int(range_pair[1].item())
+            mask = (range_starts == range_start) & (range_ends_exclusive == range_end)
+            num_samples = int(mask.sum().item())
+            if num_samples == 0:
+                continue
+
+            range_start_f = torch.tensor(float(range_start), device=self.device)
+            range_end_f = torch.tensor(float(range_end), device=self.device)
+            overlap_starts = torch.maximum(bin_edges[:-1], range_start_f)
+            overlap_ends = torch.minimum(bin_edges[1:], range_end_f)
+            overlap_lengths = torch.clamp(overlap_ends - overlap_starts, min=0.0)
+            range_probabilities = probabilities * overlap_lengths
+
+            if range_probabilities.sum() <= 0.0:
+                sampled = range_start + (
+                    torch.rand(num_samples, device=self.device) * float(range_end - range_start)
+                ).long()
+            else:
+                sampled_bins = torch.multinomial(
+                    range_probabilities / range_probabilities.sum(),
+                    num_samples,
+                    replacement=True,
+                )
+                sampled_float = overlap_starts[sampled_bins] + (
+                    torch.rand(num_samples, device=self.device) * overlap_lengths[sampled_bins]
+                )
+                sampled = torch.floor(sampled_float).long()
+
+            sampled_time_steps[mask] = torch.clamp(sampled, min=range_start, max=range_end - 1)
+
+        return sampled_time_steps
 
     def get_stats(self):
         # Metrics
@@ -1111,10 +1218,24 @@ class MotionCommand(CommandTermBase):
         self.init_pose_cfg: NoiseToInitialPoseConfig = self.motion_cfg.noise_to_initial_pose
         self.hard_motion_sampling_ratio = float(self.motion_cfg.hard_motion_sampling_ratio)
         self.hard_motion_sampling_ema_alpha = float(self.motion_cfg.hard_motion_sampling_ema_alpha)
+        self.adaptive_timestep_sampling_ratio = float(self.motion_cfg.adaptive_timestep_sampling_ratio)
 
         if not 0.0 <= self.hard_motion_sampling_ratio <= 1.0:
             raise ValueError(
                 f"motion_config.hard_motion_sampling_ratio must be in [0, 1], got {self.hard_motion_sampling_ratio}."
+            )
+        if not 0.0 <= self.adaptive_timestep_sampling_ratio <= 1.0:
+            raise ValueError(
+                "motion_config.adaptive_timestep_sampling_ratio must be in [0, 1], "
+                f"got {self.adaptive_timestep_sampling_ratio}."
+            )
+        if (
+            self.motion_cfg.use_adaptive_timesteps_sampler
+            and self.motion_cfg.start_at_timestep_zero_prob + self.adaptive_timestep_sampling_ratio > 1.0
+        ):
+            raise ValueError(
+                "motion_config.start_at_timestep_zero_prob + adaptive_timestep_sampling_ratio must be <= 1. "
+                f"got {self.motion_cfg.start_at_timestep_zero_prob} + {self.adaptive_timestep_sampling_ratio}."
             )
         if not 0.0 < self.hard_motion_sampling_ema_alpha <= 1.0:
             raise ValueError(
@@ -1219,9 +1340,9 @@ class MotionCommand(CommandTermBase):
                 self.motion.time_step_total, self.device, int(1 / (self._env.dt))
             )
             if self.motion.has_multiple_clips:
-                logger.warning(
-                    "Adaptive timestep sampler currently uses concatenated global indices. "
-                    "For multi-clip runs, reset sampling will use clip-local uniform sampling."
+                logger.info(
+                    "Adaptive timestep sampler enabled for multi-clip motion. "
+                    "Reset sampling keeps selected clips fixed and samples hard timesteps inside each clip range."
                 )
 
         # 5. metrics
@@ -1263,15 +1384,38 @@ class MotionCommand(CommandTermBase):
         if self.motion.has_object:
             self.object_type_ids[env_ids] = self.object_type_id_per_clip[sampled_clip_ids]
 
-        # Handle start_at_timestep_zero_prob (clip-local start, not global index 0).
-        prob = self.motion_cfg.start_at_timestep_zero_prob
-        if prob >= 1.0:
-            self.time_steps[env_ids] = sampled_starts
-        elif prob > 0.0:
+        # Handle start/adaptive/uniform sampling as probability bands.
+        start_zero_prob = self.motion_cfg.start_at_timestep_zero_prob
+        adaptive_available = (
+            self.motion_cfg.use_adaptive_timesteps_sampler
+            and self.adaptive_timestep_sampling_ratio > 0.0
+            and not self._env.is_evaluating
+        )
+        adaptive_prob = self.adaptive_timestep_sampling_ratio if adaptive_available else 0.0
+        sampling_rand = torch.rand(num_resets, device=self.device)
+
+        start_zero_mask = sampling_rand < start_zero_prob
+        if start_zero_mask.any():
             subset = self.time_steps[env_ids]
-            rand_vals = torch.rand_like(subset, dtype=torch.float32)
-            subset = torch.where(rand_vals < prob, sampled_starts, subset)
+            subset[start_zero_mask] = sampled_starts[start_zero_mask]
             self.time_steps[env_ids] = subset
+
+        if adaptive_available:
+            adaptive_mask = (sampling_rand >= start_zero_prob) & (sampling_rand < start_zero_prob + adaptive_prob)
+            if adaptive_mask.any():
+                adaptive_time_steps = self.adaptive_timesteps_sampler.sample_time_steps_in_ranges(
+                    sampled_starts[adaptive_mask],
+                    sampled_ends[adaptive_mask],
+                )
+                lookback_steps = max(0, int(self.motion_cfg.adaptive_timestep_lookback_steps))
+                if lookback_steps > 0:
+                    adaptive_time_steps = torch.maximum(
+                        adaptive_time_steps - lookback_steps,
+                        sampled_starts[adaptive_mask],
+                    )
+                subset = self.time_steps[env_ids]
+                subset[adaptive_mask] = adaptive_time_steps
+                self.time_steps[env_ids] = subset
 
         # Clamp starts to be at most clip_end - 2 for safe step() increment.
         max_safe = torch.clamp(self.clip_end_steps[env_ids] - 2, min=self.clip_start_steps[env_ids])
@@ -1732,24 +1876,46 @@ class MotionCommand(CommandTermBase):
     #########################################################################################
     ## Object from simulator
     #########################################################################################
-    def _active_object_states_w(self) -> torch.Tensor:
+    def _object_actor_states_w(self, actor_name: str, env_ids: torch.Tensor) -> torch.Tensor:
+        state_adapter = getattr(self._env.simulator, "_state_adapter", None)
+        if state_adapter is not None and hasattr(state_adapter, "get_object_states"):
+            return state_adapter.get_object_states(actor_name, env_ids)[:, :13]
+
+        rigid_objects = getattr(getattr(self._env.simulator, "scene", None), "rigid_objects", {})
+        rigid_object = rigid_objects.get(actor_name) if hasattr(rigid_objects, "get") else None
+        if rigid_object is not None:
+            raw_states_wxyz = rigid_object.data.root_state_w[env_ids]
+            states_xyzw = raw_states_wxyz.clone()
+            states_xyzw[:, 3:7] = raw_states_wxyz[:, [4, 5, 6, 3]]
+            return states_xyzw
+
+        actor_indices = self._env.simulator.get_actor_indices(actor_name, env_ids=None)
+        return self._env.simulator.all_root_states[actor_indices[env_ids], :13]
+
+    def _active_object_states_w(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         """Return active object states in environment order.
 
-        AllRootStatesProxy groups mixed actor indices by object name internally.  For
-        multi-object motion training we need one active actor per environment, so gather
-        each object actor separately and scatter the result back to env order.
+        Multi-object motion training needs one active actor per environment.  Read
+        concrete rigid-object tensors directly when possible to avoid routing sparse
+        mixed-object reads through the flat AllRootStatesProxy index space.
         """
+        env_ids = self._ensure_index_tensor(env_ids)
+        if env_ids.numel() == 0:
+            return torch.empty(0, 13, device=self.device, dtype=torch.float32)
+
         if self.object_name_to_indices:
-            states = torch.empty(self.num_envs, 13, device=self.device, dtype=torch.float32)
-            for object_key, object_indices in self.object_name_to_indices.items():
+            states = torch.empty(env_ids.numel(), 13, device=self.device, dtype=torch.float32)
+            selected_object_type_ids = self.object_type_ids[env_ids]
+            for object_key in sorted(self.object_name_to_indices):
                 object_type_id = self.object_key_to_id[object_key]
-                env_ids = (self.object_type_ids == object_type_id).nonzero(as_tuple=False).flatten()
-                if env_ids.numel() == 0:
+                mask = selected_object_type_ids == object_type_id
+                object_env_ids = env_ids[mask]
+                if object_env_ids.numel() == 0:
                     continue
-                states[env_ids] = self._env.simulator.all_root_states[object_indices[env_ids], :13]
+                states[mask] = self._object_actor_states_w(f"object_{object_key}", object_env_ids)
             return states
 
-        return self._env.simulator.all_root_states[self.active_object_indices, :13]
+        return self._object_actor_states_w(self.object_name, env_ids)
 
     @property
     def simulator_object_pos_w(self) -> torch.Tensor:
@@ -2265,6 +2431,8 @@ class MotionCommand(CommandTermBase):
         new_chunks: dict[str, list[torch.Tensor]] = {attr_name: [] for _, attr_name in concat_targets}
         new_contact_label_chunks: list[torch.Tensor] = []
         new_contact_distance_chunks: list[torch.Tensor] = []
+        new_contact_target_points_chunks: list[torch.Tensor] = []
+        new_contact_target_valid_chunks: list[torch.Tensor] = []
         new_clip_ranges: list[tuple[int, int]] = []
         new_real_motion_clip_ranges: list[tuple[int, int]] = []
         running_start = 0
@@ -2322,12 +2490,32 @@ class MotionCommand(CommandTermBase):
                 )
                 clip_contact_label = self.motion._contact_object_label[clip_start:clip_end]
                 clip_contact_distance = self.motion._contact_object_distance[clip_start:clip_end]
+                contact_target_points = torch.zeros(
+                    transition_len,
+                    len(self.motion.contact_body_names),
+                    self.motion._contact_object_target_points_obj.shape[2],
+                    3,
+                    dtype=self.motion._contact_object_target_points_obj.dtype,
+                    device=self.motion._contact_object_target_points_obj.device,
+                )
+                contact_target_valid = torch.zeros(
+                    transition_len,
+                    len(self.motion.contact_body_names),
+                    dtype=torch.bool,
+                    device=self.motion._contact_object_target_valid.device,
+                )
+                clip_contact_target_points = self.motion._contact_object_target_points_obj[clip_start:clip_end]
+                clip_contact_target_valid = self.motion._contact_object_target_valid[clip_start:clip_end]
                 if prepend:
                     new_contact_label_chunks.extend([contact_label, clip_contact_label])
                     new_contact_distance_chunks.extend([contact_distance, clip_contact_distance])
+                    new_contact_target_points_chunks.extend([contact_target_points, clip_contact_target_points])
+                    new_contact_target_valid_chunks.extend([contact_target_valid, clip_contact_target_valid])
                 else:
                     new_contact_label_chunks.extend([clip_contact_label, contact_label])
                     new_contact_distance_chunks.extend([clip_contact_distance, contact_distance])
+                    new_contact_target_points_chunks.extend([clip_contact_target_points, contact_target_points])
+                    new_contact_target_valid_chunks.extend([clip_contact_target_valid, contact_target_valid])
 
             new_clip_end = running_start + transition_len + clip_len
             new_clip_ranges.append((running_start, new_clip_end))
@@ -2350,9 +2538,12 @@ class MotionCommand(CommandTermBase):
         if self.motion.has_contact_labels:
             self.motion._contact_object_label = torch.cat(new_contact_label_chunks, dim=0)
             self.motion._contact_object_distance = torch.cat(new_contact_distance_chunks, dim=0)
+            self.motion._contact_object_target_points_obj = torch.cat(new_contact_target_points_chunks, dim=0)
+            self.motion._contact_object_target_valid = torch.cat(new_contact_target_valid_chunks, dim=0)
         self.motion.clip_ranges = new_clip_ranges
         self.motion.real_motion_clip_ranges = new_real_motion_clip_ranges
         self.motion.time_step_total = self.motion._joint_pos.shape[0]
+        self.motion.validate_time_major_tensor_lengths()
 
     def _slerp_quat_sequence(self, start: torch.Tensor, end: torch.Tensor, alphas: torch.Tensor) -> torch.Tensor:
         """Spherically interpolate quaternions across multiple time steps."""

@@ -1,7 +1,7 @@
 <?xml version="1.0" ?>
-<robot name="resmimicchair.urdf">
+<robot name="plasticbox.urdf">
   <dynamics damping="0.5" friction="0.9"/>
-  <link name="baseLink">
+  <link name="plasticbox_link">
     <inertial>
       <mass value="0.1"/>
       <origin xyz="0 0 0"/>
@@ -16,16 +16,16 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="objects/resmimicchair/resmimicchair.obj" scale="1.0 1.0 1.0"/>
+        <mesh filename="objects/plasticbox/plasticbox.obj" scale="1.0 1.0 1.0"/>
       </geometry>
-      <material name="mat">
+       <material name="mat">
         <color rgba="0.7 0.8 0.9 1"/>
       </material>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="objects/resmimicchair/resmimicchair.obj" scale="1.0 1.0 1.0"/>
+	 	<mesh filename="objects/plasticbox/plasticbox.obj" scale="1.0 1.0 1.0"/>
       </geometry>
     </collision>
   </link>

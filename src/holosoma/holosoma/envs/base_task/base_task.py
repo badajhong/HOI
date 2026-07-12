@@ -215,6 +215,10 @@ class BaseTask:
         # Initialize remaining managers
         self.observation_manager = ObservationManager(observation_config, self, self.device)
         self.action_manager = ActionManager(action_config, self, self.device)
+        assert self.action_manager.total_action_dim == self.dim_actions, (
+            f"Action manager dimension ({self.action_manager.total_action_dim}) must match "
+            f"robot action dimension ({self.dim_actions})"
+        )
         self.reward_manager = RewardManager(reward_config, self, self.device)
         self.termination_manager = TerminationManager(termination_config, self, self.device)
         # For IsaacSim, initialize randomization_manager now
@@ -394,8 +398,8 @@ class BaseTask:
         )
 
         # check dimensions
-        assert self.num_dof == self.dim_actions, (
-            f"Number of DOFs ({self.num_dof}) must be equal to number of actions ({self.dim_actions})"
+        assert self.dim_actions <= self.num_dof, (
+            f"Number of actions ({self.dim_actions}) must not exceed number of DOFs ({self.num_dof})"
         )
 
         # other properties
