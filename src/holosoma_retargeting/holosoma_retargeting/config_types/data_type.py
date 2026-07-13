@@ -264,6 +264,7 @@ JOINTS_MAPPINGS = {
     },
     ("smplh", "r1"): {
         "Pelvis": "pelvis_link",
+        "Head": "head_yaw_link",
         "L_Hip": "left_hip_pitch_link",
         "R_Hip": "right_hip_pitch_link",
         "L_Knee": "left_knee_link",

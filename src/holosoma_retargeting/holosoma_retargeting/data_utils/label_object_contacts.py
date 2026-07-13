@@ -36,7 +36,7 @@ DEFAULT_OBJECT_ROOTS = (
 )
 
 DEFAULT_HUMAN_JOINT_REGEX = (
-    r"^(L|R)_(Wrist|HandCenter|Index[123]|Middle[123]|Pinky[123]|Ring[123]|Thumb[123]|Toe|Ankle)$"
+    r"^(Head|(L|R)_(HandCenter|Index[123]|Middle[123]|Pinky[123]|Ring[123]|Thumb[123]|Toe|Ankle))$"
 )
 
 SMPLH_HAND_CENTER_JOINTS = {

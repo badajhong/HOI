@@ -52,7 +52,9 @@ class InteractionMeshRetargeter:
         "right_hand_contact_link": ("right_wrist_roll_link", np.array([0.07, 0.0, 0.0], dtype=np.float64)),
     }
 
-    FOOT_CONTACT_VISUAL_ALIASES = {
+    CONTACT_VISUAL_ALIASES = {
+        "left_hand_contact_link": ("left_wrist_roll_link",),
+        "right_hand_contact_link": ("right_wrist_roll_link",),
         "left_ankle_constraint_A_link": ("left_ankle_roll_link",),
         "left_ankle_constraint_B_link": ("left_ankle_roll_link",),
         "left_foot_front_outer_link": ("left_ankle_roll_link",),
@@ -414,11 +416,12 @@ class InteractionMeshRetargeter:
         return None
 
     def _resolve_contact_body_base_and_offset(self, body_name: str) -> tuple[int, np.ndarray] | None:
+        body_id = mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+        if body_id != -1:
+            return body_id, np.zeros(3, dtype=np.float64)
+
         virtual_spec = self.VIRTUAL_CONTACT_BODY_SPECS.get(body_name)
         if virtual_spec is None:
-            body_id = mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, body_name)
-            if body_id != -1:
-                return body_id, np.zeros(3, dtype=np.float64)
             return None
 
         parent_body_name, local_offset = virtual_spec
@@ -428,6 +431,10 @@ class InteractionMeshRetargeter:
         return parent_body_id, np.asarray(local_offset, dtype=np.float64)
 
     def _contact_body_parent_name(self, body_name: str) -> str:
+        body_id = mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+        if body_id != -1:
+            return body_name
+
         virtual_spec = self.VIRTUAL_CONTACT_BODY_SPECS.get(body_name)
         if virtual_spec is None:
             return body_name
@@ -591,53 +598,6 @@ class InteractionMeshRetargeter:
             )
         return self._object_surface_topk_from_local_queries(query_points_local, object_points_local, topk=topk)
 
-    def _mujoco_geom_names(self) -> list[str]:
-        if not hasattr(self, "_geom_names") or len(self._geom_names) != self.robot_model.ngeom:
-            self._geom_names = [
-                mujoco.mj_id2name(self.robot_model, mujoco.mjtObj.mjOBJ_GEOM, g) or ""
-                for g in range(self.robot_model.ngeom)
-            ]
-        return self._geom_names
-
-    def _mujoco_body_names(self) -> list[str]:
-        if not hasattr(self, "_body_names") or len(self._body_names) != self.robot_model.nbody:
-            self._body_names = [
-                mujoco.mj_id2name(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, b) or ""
-                for b in range(self.robot_model.nbody)
-            ]
-        return self._body_names
-
-    def _contact_object_geom_ids(self) -> list[int]:
-        token = self.object_name.lower()
-        geom_names = self._mujoco_geom_names()
-        body_names = self._mujoco_body_names()
-        geom_ids = []
-        for geom_id, geom_name in enumerate(geom_names):
-            body_name = body_names[int(self.robot_model.geom_bodyid[geom_id])]
-            if token in geom_name.lower() or token in body_name.lower():
-                geom_ids.append(geom_id)
-        return geom_ids
-
-    def _contact_robot_geom_ids_by_body(self, robot_names: list[str]) -> list[list[int]]:
-        object_geom_ids = set(self._contact_object_geom_ids())
-        geom_ids_by_body: list[list[int]] = []
-        for robot_name in robot_names:
-            if robot_name in self.VIRTUAL_CONTACT_BODY_SPECS:
-                geom_ids_by_body.append([])
-                continue
-            body_id = mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, robot_name)
-            if body_id == -1:
-                geom_ids_by_body.append([])
-                continue
-            geom_ids_by_body.append(
-                [
-                    geom_id
-                    for geom_id in range(self.robot_model.ngeom)
-                    if int(self.robot_model.geom_bodyid[geom_id]) == body_id and geom_id not in object_geom_ids
-                ]
-            )
-        return geom_ids_by_body
-
     def _get_robot_contact_positions(self, q: np.ndarray, body_names: list[str]) -> np.ndarray:
         q = np.asarray(q, dtype=np.float64)
         if q.shape[0] == self.robot_data.qpos.shape[0]:
@@ -660,68 +620,7 @@ class InteractionMeshRetargeter:
             positions.append(self._contact_body_marker_position(body_id, local_offset))
         return np.asarray(positions, dtype=np.float64)
 
-    def _robot_object_geom_distances(
-        self,
-        qpos_sequence: np.ndarray,
-        robot_names: list[str],
-        object_points_local: np.ndarray,
-    ) -> np.ndarray:
-        qpos_sequence = np.asarray(qpos_sequence, dtype=np.float64)
-        object_geom_ids = self._contact_object_geom_ids()
-        if not object_geom_ids:
-            body_positions = np.stack([self._get_robot_contact_positions(q, robot_names) for q in qpos_sequence], axis=0)
-            sample_points = self._contact_sample_points(object_points_local)
-            return self._distances_to_object_surface(body_positions, qpos_sequence, sample_points)
-
-        geom_ids_by_body = self._contact_robot_geom_ids_by_body(robot_names)
-        distances = np.full((qpos_sequence.shape[0], len(robot_names)), np.inf, dtype=np.float32)
-        distance_cutoff = max(float(self.contact_threshold) + 1e-6, float(self.collision_detection_threshold), 1.0)
-        fromto = np.zeros(6, dtype=np.float64)
-
-        for frame_idx, q in enumerate(qpos_sequence):
-            if q.shape[0] != self.robot_data.qpos.shape[0]:
-                raise ValueError(
-                    f"qpos frame has length {q.shape[0]}, expected {self.robot_data.qpos.shape[0]} for contact labels."
-                )
-            self.robot_data.qpos[:] = q
-            mujoco.mj_forward(self.robot_model, self.robot_data)
-
-            for body_col, robot_geom_ids in enumerate(geom_ids_by_body):
-                min_dist = np.inf
-                for robot_geom_id in robot_geom_ids:
-                    for object_geom_id in object_geom_ids:
-                        fromto[:] = 0.0
-                        dist = mujoco.mj_geomDistance(
-                            self.robot_model,
-                            self.robot_data,
-                            robot_geom_id,
-                            object_geom_id,
-                            distance_cutoff,
-                            fromto,
-                        )
-                        min_dist = min(min_dist, float(dist))
-                        if min_dist <= self.contact_threshold:
-                            break
-                    if min_dist <= self.contact_threshold:
-                        break
-                distances[frame_idx, body_col] = min_dist
-
-        fallback_cols = [idx for idx, geom_ids in enumerate(geom_ids_by_body) if not geom_ids]
-        if fallback_cols:
-            fallback_names = [robot_names[idx] for idx in fallback_cols]
-            body_positions = np.stack(
-                [self._get_robot_contact_positions(q, fallback_names) for q in qpos_sequence],
-                axis=0,
-            )
-            sample_points = self._contact_sample_points(object_points_local)
-            distances[:, fallback_cols] = self._distances_to_object_surface(
-                body_positions,
-                qpos_sequence,
-                sample_points,
-            )
-        return distances
-
-    def _robot_object_geom_contact_targets(
+    def _robot_object_surface_contact_targets(
         self,
         qpos_sequence: np.ndarray,
         robot_names: list[str],
@@ -731,99 +630,17 @@ class InteractionMeshRetargeter:
         sample_points = self._contact_sample_points(object_points_local)
         topk = self.contact_target_topk
 
-        fallback_positions = np.stack(
+        body_positions = np.stack(
             [self._get_robot_contact_positions(q, robot_names) for q in qpos_sequence],
             axis=0,
         )
-        fallback_topk_distances, fallback_topk_indices, fallback_target_points = (
-            self._object_surface_topk_from_world_points(
-                fallback_positions,
-                qpos_sequence,
-                sample_points,
-                topk=topk,
-            )
-        )
-
-        object_geom_ids = self._contact_object_geom_ids()
-        if not object_geom_ids:
-            return (
-                fallback_topk_distances[..., 0],
-                fallback_target_points,
-                fallback_topk_distances,
-                fallback_topk_indices,
-            )
-
-        geom_ids_by_body = self._contact_robot_geom_ids_by_body(robot_names)
-        distances = np.full((qpos_sequence.shape[0], len(robot_names)), np.inf, dtype=np.float32)
-        query_points_obj = np.empty((qpos_sequence.shape[0], len(robot_names), 3), dtype=np.float64)
-
-        fallback_query_distances = fallback_topk_distances[..., 0]
-        for frame_idx, q in enumerate(qpos_sequence):
-            if q.shape[0] != self.robot_data.qpos.shape[0]:
-                raise ValueError(
-                    f"qpos frame has length {q.shape[0]}, expected {self.robot_data.qpos.shape[0]} "
-                    "for contact labels."
-                )
-
-            self.robot_data.qpos[:] = q
-            mujoco.mj_forward(self.robot_model, self.robot_data)
-
-            if self.has_dynamic_object and q.shape[0] >= 7:
-                object_pos = q[-7:-4]
-                object_quat = q[-4:]
-            else:
-                object_pos = np.zeros(3)
-                object_quat = np.array([1.0, 0.0, 0.0, 0.0])
-
-            fallback_local = transform_points_world_to_local(
-                object_quat,
-                object_pos,
-                fallback_positions[frame_idx],
-            )
-            query_points_obj[frame_idx] = fallback_local
-            distances[frame_idx] = fallback_query_distances[frame_idx]
-
-            distance_cutoff = max(float(self.contact_threshold) + 1e-6, float(self.collision_detection_threshold), 1.0)
-            fromto = np.zeros(6, dtype=np.float64)
-            for body_col, robot_geom_ids in enumerate(geom_ids_by_body):
-                if not robot_geom_ids:
-                    continue
-
-                min_dist = np.inf
-                best_object_point_w: np.ndarray | None = None
-                for robot_geom_id in robot_geom_ids:
-                    for object_geom_id in object_geom_ids:
-                        fromto[:] = 0.0
-                        dist = mujoco.mj_geomDistance(
-                            self.robot_model,
-                            self.robot_data,
-                            robot_geom_id,
-                            object_geom_id,
-                            distance_cutoff,
-                            fromto,
-                        )
-                        if float(dist) < min_dist:
-                            min_dist = float(dist)
-                            best_object_point_w = fromto[3:].copy()
-                        if min_dist <= self.contact_threshold:
-                            break
-                    if min_dist <= self.contact_threshold:
-                        break
-
-                distances[frame_idx, body_col] = min_dist
-                if best_object_point_w is not None and min_dist < distance_cutoff:
-                    query_points_obj[frame_idx, body_col] = transform_points_world_to_local(
-                        object_quat,
-                        object_pos,
-                        best_object_point_w[None, :],
-                    )[0]
-
-        target_distances, target_indices, target_points = self._object_surface_topk_from_local_queries(
-            query_points_obj,
+        target_distances, target_indices, target_points = self._object_surface_topk_from_world_points(
+            body_positions,
+            qpos_sequence,
             sample_points,
             topk=topk,
         )
-        return distances, target_points, target_distances, target_indices
+        return target_distances[..., 0], target_points, target_distances, target_indices
 
     def _compute_contact_labels(
         self,
@@ -926,7 +743,7 @@ class InteractionMeshRetargeter:
             }
 
         robot_distances, robot_target_points, robot_target_distances, robot_target_indices = (
-            self._robot_object_geom_contact_targets(qpos_sequence, robot_names, object_points_local)
+            self._robot_object_surface_contact_targets(qpos_sequence, robot_names, object_points_local)
         )
         robot_labels = robot_distances <= self.contact_threshold
         return {
@@ -951,7 +768,7 @@ class InteractionMeshRetargeter:
             "contact_object_target_indices": robot_target_indices,
             "contact_object_target_valid": robot_labels,
             "contact_object_target_topk": np.asarray(self.contact_target_topk, dtype=np.int32),
-            "contact_object_source": np.asarray("retarget_robot_geom"),
+            "contact_object_source": np.asarray("retarget_robot_surface_sample"),
             "contact_object_threshold_m": np.asarray(self.contact_threshold, dtype=np.float32),
             "contact_human_joint_names": np.asarray(human_names),
             "contact_human_joint_indices": np.asarray(human_indices, dtype=np.int32),
@@ -1148,7 +965,7 @@ class InteractionMeshRetargeter:
                     if contact_arrays and "contact_object_names" in contact_arrays
                     else None
                 ),
-                contact_visual_link_aliases=self.FOOT_CONTACT_VISUAL_ALIASES,
+                contact_visual_link_aliases=self.CONTACT_VISUAL_ALIASES,
             )
 
             # 4) optional: visibility toggle

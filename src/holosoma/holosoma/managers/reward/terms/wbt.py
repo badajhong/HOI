@@ -15,6 +15,7 @@ from holosoma.managers.object_contact import (
     get_cached_object_surface_distances,
     load_sample_points_by_key,
     object_key_masks_for_envs,
+    resolve_contact_body_indices_and_offsets,
     select_contact_body_columns,
 )
 from holosoma.managers.reward.base import RewardTermBase
@@ -273,6 +274,7 @@ class ObjectContactLabelDistance(RewardTermBase):
         self.warned_missing_labels = False
         self.sample_points_by_key: dict[str | None, torch.Tensor] = {}
         self.contact_label_columns = torch.zeros(0, dtype=torch.long, device=env.device)
+        self.has_contact_label_column = torch.zeros(0, dtype=torch.bool, device=env.device)
         self.contact_body_names: list[str] = []
         self.contact_body_indices = torch.zeros(0, dtype=torch.long, device=env.device)
         self.contact_body_local_offsets = torch.zeros(0, 3, dtype=torch.float32, device=env.device)
@@ -297,7 +299,7 @@ class ObjectContactLabelDistance(RewardTermBase):
                 fail_on_missing_labels=fail_on_missing_labels,
             )
 
-        if not motion_command.has_contact_labels or self.contact_label_columns.numel() == 0:
+        if not motion_command.has_contact_labels or not self.contact_body_names:
             return torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
 
         expected = motion_command.contact_object_label[:, self.contact_label_columns]
@@ -519,6 +521,81 @@ class ObjectContactTargetPointDistance(RewardTermBase):
         logger.info(
             "Initialized ObjectContactTargetPointDistance: "
             f"bodies={self.contact_body_names}, topk={motion_command.motion.contact_object_target_points_obj.shape[2]}"
+        )
+        self.initialized = True
+
+
+class ObjectBodyProximityPenalty(RewardTermBase):
+    """Penalize selected robot bodies for being near the active object surface, ignoring contact labels."""
+
+    def __init__(self, cfg: RewardTermCfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+        self.env = env
+        self.initialized = False
+        self.sample_points_by_key: dict[str | None, torch.Tensor] = {}
+        self.body_names: list[str] = []
+        self.body_indices = torch.zeros(0, dtype=torch.long, device=env.device)
+        self.body_local_offsets = torch.zeros(0, 3, dtype=torch.float32, device=env.device)
+
+    def __call__(
+        self,
+        env: WholeBodyTrackingManager,
+        *,
+        sample_points_root: str | None = None,
+        body_names: tuple[str, ...] | list[str] | str = (),
+        distance_scale: float = 0.02,
+        distance_cutoff: float = 0.08,
+        **kwargs,
+    ) -> torch.Tensor:
+        motion_command = _get_motion_command_and_assert_type(env)
+        if not self.initialized:
+            self._initialize(
+                motion_command,
+                sample_points_root=sample_points_root,
+                body_names=body_names,
+            )
+
+        if not self.body_names:
+            return torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
+
+        distances = get_cached_object_surface_distances(
+            env=env,
+            motion_command=motion_command,
+            body_names=self.body_names,
+            body_indices=self.body_indices,
+            body_local_offsets=self.body_local_offsets,
+            sample_points_by_key=self.sample_points_by_key,
+        )
+        scale_tensor = torch.tensor(max(float(distance_scale), 1e-6), dtype=torch.float32, device=env.device)
+        cutoff = float(distance_cutoff)
+        close_mask = distances <= cutoff if cutoff > 0.0 else torch.ones_like(distances, dtype=torch.bool)
+        return (torch.exp(-distances / scale_tensor) * close_mask.float()).sum(dim=1)
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        pass
+
+    def _initialize(
+        self,
+        motion_command: MotionCommand,
+        *,
+        sample_points_root: str | None,
+        body_names: tuple[str, ...] | list[str] | str,
+    ) -> None:
+        self.body_names = [str(body_names)] if isinstance(body_names, str) else [str(name) for name in body_names]
+        self.body_indices, self.body_local_offsets = resolve_contact_body_indices_and_offsets(
+            self.env,
+            self.body_names,
+        )
+        root, self.sample_points_by_key = load_sample_points_by_key(
+            env=self.env,
+            motion_command=motion_command,
+            sample_points_root=sample_points_root,
+        )
+
+        logger.info(
+            "Initialized ObjectBodyProximityPenalty: "
+            f"bodies={self.body_names}, objects={list(self.sample_points_by_key.keys())}, "
+            f"sample_points_root={root}"
         )
         self.initialized = True
 

@@ -9,6 +9,9 @@ from holosoma.config_values.wbt.r1.contact import (
     R1_OBJECT_CONTACT_LABEL_DISTANCE_SCALE,
     R1_OBJECT_CONTACT_TARGET_DISTANCE_SCALE,
     R1_OBJECT_CONTACT_THRESHOLD,
+    R1_OBJECT_HEAD_PROXIMITY_BODY_NAMES,
+    R1_OBJECT_HEAD_PROXIMITY_DISTANCE_CUTOFF,
+    R1_OBJECT_HEAD_PROXIMITY_DISTANCE_SCALE,
 )
 
 r1_26dof_wbt_reward_w_object_multi_teacher = replace(
@@ -54,7 +57,7 @@ r1_26dof_wbt_reward_w_object_multi_teacher = replace(
             params={
                 "threshold": R1_OBJECT_CONTACT_THRESHOLD,
                 "distance_scale": R1_OBJECT_CONTACT_LABEL_DISTANCE_SCALE,
-                "contact_body_names_regex": ".*",
+                "contact_body_names_regex": r"^(?!left_wrist_roll_link$|right_wrist_roll_link$|head_yaw_link$).*",
                 "fail_on_missing_labels": True,
             },
             weight=2.0,
@@ -67,6 +70,15 @@ r1_26dof_wbt_reward_w_object_multi_teacher = replace(
                 "fail_on_missing_targets": True,
             },
             weight=3.0,
+        ),
+        "object_head_proximity_penalty": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:ObjectBodyProximityPenalty",
+            params={
+                "body_names": R1_OBJECT_HEAD_PROXIMITY_BODY_NAMES,
+                "distance_scale": R1_OBJECT_HEAD_PROXIMITY_DISTANCE_SCALE,
+                "distance_cutoff": R1_OBJECT_HEAD_PROXIMITY_DISTANCE_CUTOFF,
+            },
+            weight=-1.0,
         ),
     },
 )

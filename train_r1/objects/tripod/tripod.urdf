@@ -1,5 +1,5 @@
 <?xml version="1.0" ?>
-<robot name="tripod.urdf">
+<robot name="tripod">
   <dynamics damping="0.5" friction="0.9"/>
   <link name="baseLink">
     <inertial>
