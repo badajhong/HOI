@@ -194,7 +194,7 @@ python examples/robot_retarget.py \
 python src/holosoma_retargeting/holosoma_retargeting/examples/robot_retarget.py \
   --data_path demo_data/OMOMO_new \
   --task-type object_interaction_contact \
-  --task-name sub1_suitcase_070 \
+  --task-name sub5_suitcase_016 \
   --data_format smplh \
   --task-config.object-name suitcase \
   --retargeter.debug \
@@ -215,7 +215,9 @@ python src/holosoma_retargeting/holosoma_retargeting/examples/robot_retarget.py 
   --retargeter.debug \
   --retargeter.visualize \
   --robot r1 \
-  --retargeter.penetration-tolerance 0.05 \
+  --retargeter.penetration-tolerance 0.0 \
+  --retargeter.surface-penetration-tolerance 0.00 \
+  --retargeter.object-penetration-tolerance 0.05 \
   --retargeter.contact-threshold 0.1 \
   --retargeter.contact-source robot
 ```
@@ -224,13 +226,31 @@ python src/holosoma_retargeting/holosoma_retargeting/examples/robot_retarget.py 
 python src/holosoma_retargeting/holosoma_retargeting/examples/robot_retarget.py \
   --data_path demo_data/OMOMO_new \
   --task-type object_interaction_contact \
-  --task-name sub17_smalltable_010 \
+  --task-name sub5_suitcase_000 \
   --data_format smplh \
-  --task-config.object-name smalltable \
+  --task-config.object-name suitcase \
   --retargeter.debug \
   --retargeter.visualize \
   --robot r1 \
-  --retargeter.penetration-tolerance 0.05 \
+  --retargeter.penetration-tolerance 0.0 \
+  --retargeter.surface-penetration-tolerance 0.00 \
+  --retargeter.object-penetration-tolerance 0.01 \
+  --retargeter.contact-threshold 0.1 \
+  --retargeter.contact-source robot
+```
+```bash
+python src/holosoma_retargeting/holosoma_retargeting/examples/robot_retarget.py \
+  --data_path demo_data/OMOMO_new \
+  --task-type object_interaction_contact \
+  --task-name sub4_whitechair_029 \
+  --data_format smplh \
+  --task-config.object-name whitechair \
+  --retargeter.debug \
+  --retargeter.visualize \
+  --robot r1 \
+  --retargeter.penetration-tolerance 0.0 \
+  --retargeter.surface-penetration-tolerance 0.00 \
+  --retargeter.object-penetration-tolerance 0.05 \
   --retargeter.contact-threshold 0.1 \
   --retargeter.contact-source robot
 ```

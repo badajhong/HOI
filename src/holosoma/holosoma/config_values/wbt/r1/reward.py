@@ -57,7 +57,7 @@ r1_26dof_wbt_reward_w_object_multi_teacher = replace(
             params={
                 "threshold": R1_OBJECT_CONTACT_THRESHOLD,
                 "distance_scale": R1_OBJECT_CONTACT_LABEL_DISTANCE_SCALE,
-                "contact_body_names_regex": r"^(?!left_wrist_roll_link$|right_wrist_roll_link$|head_yaw_link$).*",
+                "contact_body_names_regex": r"^(?!head_yaw_link$).*",
                 "fail_on_missing_labels": True,
             },
             weight=2.0,

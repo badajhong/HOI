@@ -17,8 +17,8 @@ if TYPE_CHECKING:
 
 
 VIRTUAL_CONTACT_BODY_SPECS: dict[str, tuple[str, tuple[float, float, float]]] = {
-    "left_hand_contact_link": ("left_wrist_roll_link", (0.07, 0.0, 0.0)),
-    "right_hand_contact_link": ("right_wrist_roll_link", (0.07, 0.0, 0.0)),
+    "left_hand_contact_link": ("left_wrist_roll_link", (0.1, 0.0, 0.0)),
+    "right_hand_contact_link": ("right_wrist_roll_link", (0.1, 0.0, 0.0)),
 }
 
 

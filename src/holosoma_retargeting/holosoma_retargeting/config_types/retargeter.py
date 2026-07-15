@@ -8,7 +8,7 @@ from typing import Literal
 
 DEFAULT_CONTACT_HUMAN_JOINT_REGEX = (
     r"^(Pelvis|Head|L_Hip|R_Hip|L_Knee|R_Knee|L_Shoulder|R_Shoulder|L_Elbow|R_Elbow|"
-    r"L_Ankle|R_Ankle|L_Toe|R_Toe|L_HandCenter|R_HandCenter|"
+    r"L_Wrist|R_Wrist|L_Ankle|R_Ankle|L_Toe|R_Toe|L_HandCenter|R_HandCenter|"
     r"L_Index[123]|L_Middle[123]|L_Pinky[123]|L_Ring[123]|L_Thumb[123]|"
     r"R_Index[123]|R_Middle[123]|R_Pinky[123]|R_Ring[123]|R_Thumb[123])$"
 )

@@ -59,7 +59,7 @@ run_task() {
     --retargeter.penetration-tolerance 0.0
     --retargeter.surface-penetration-tolerance 0.00
     --retargeter.object-penetration-tolerance "${object_penetration_tolerance}"
-    --retargeter.contact-threshold 0.05
+    --retargeter.contact-threshold 0.1
     --retargeter.contact-source robot
     --retargeter.contact-target-topk "${CONTACT_TARGET_TOPK}"
   )
@@ -91,7 +91,7 @@ run_task() {
 }
 
 run_task sub1_suitcase_050 suitcase 0.01
-run_task sub1_suitcase_070 suitcase 0.01
+# run_task sub1_suitcase_070 suitcase 0.01
 run_task sub5_suitcase_000 suitcase 0.01
 
 run_task sub17_smalltable_014 smalltable 0.01

@@ -48,13 +48,11 @@ class InteractionMeshRetargeter:
     """
 
     VIRTUAL_CONTACT_BODY_SPECS = {
-        "left_hand_contact_link": ("left_wrist_roll_link", np.array([0.07, 0.0, 0.0], dtype=np.float64)),
-        "right_hand_contact_link": ("right_wrist_roll_link", np.array([0.07, 0.0, 0.0], dtype=np.float64)),
+        "left_hand_contact_link": ("left_wrist_roll_link", np.array([0.1, 0.0, 0.0], dtype=np.float64)),
+        "right_hand_contact_link": ("right_wrist_roll_link", np.array([0.1, 0.0, 0.0], dtype=np.float64)),
     }
 
     CONTACT_VISUAL_ALIASES = {
-        "left_hand_contact_link": ("left_wrist_roll_link",),
-        "right_hand_contact_link": ("right_wrist_roll_link",),
         "left_ankle_constraint_A_link": ("left_ankle_roll_link",),
         "left_ankle_constraint_B_link": ("left_ankle_roll_link",),
         "left_foot_front_outer_link": ("left_ankle_roll_link",),
