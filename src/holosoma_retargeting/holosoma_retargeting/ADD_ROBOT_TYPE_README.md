@@ -254,3 +254,21 @@ python src/holosoma_retargeting/holosoma_retargeting/examples/robot_retarget.py 
   --retargeter.contact-threshold 0.1 \
   --retargeter.contact-source robot
 ```
+
+```bash
+python src/holosoma_retargeting/holosoma_retargeting/examples/robot_retarget.py \
+  --data_path demo_data/OMOMO_new \
+  --task-type object_interaction_contact \
+  --task-name sub7_largebox_000 \
+  --data_format smplh \
+  --task-config.object-name largebox \
+  --retargeter.debug \
+  --retargeter.visualize \
+  --robot r1 \
+  --retargeter.penetration-tolerance 0.0 \
+  --retargeter.surface-penetration-tolerance 0.00 \
+  --retargeter.object-penetration-tolerance 0.05 \
+  --retargeter.contact-threshold 0.1 \
+  --retargeter.contact-source robot \
+  --debug.hand
+```

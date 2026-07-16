@@ -17,6 +17,7 @@ from holosoma.managers.command.terms.wbt import MotionCommand
 from holosoma.managers.object_contact import (
     get_contact_target_point_distances,
     get_cached_object_surface_distances,
+    limit_contact_target_topk,
     load_sample_points_by_key,
     resolve_contact_body_indices_and_offsets,
     select_contact_body_columns,
@@ -516,6 +517,7 @@ class ObjectContactTargetCurrent(ObservationTermBase):
         distance_clip: float = 0.5,
         include_active: bool = True,
         include_distance: bool = True,
+        target_topk: int | None = None,
         fail_on_missing_targets: bool = True,
         **kwargs,
     ) -> torch.Tensor:
@@ -536,6 +538,7 @@ class ObjectContactTargetCurrent(ObservationTermBase):
             & motion_command.contact_object_target_valid[:, self.contact_label_columns]
         )
         target_points_obj = motion_command.contact_object_target_points_obj[:, self.contact_label_columns]
+        target_points_obj = limit_contact_target_topk(target_points_obj, target_topk)
         has_active = active.any(dim=1)
         distances = torch.full(
             active.shape,

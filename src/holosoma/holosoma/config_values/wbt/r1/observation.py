@@ -10,6 +10,7 @@ from holosoma.config_values.wbt.r1.contact import (
     R1_OBJECT_CONTACT_BODY_NAMES,
     R1_OBJECT_CONTACT_DISTANCE_CLIP,
     R1_OBJECT_CONTACT_TARGET_RELATIVE_CLIP,
+    R1_OBJECT_CONTACT_TARGET_TOPK,
 )
 
 object_randomization_privileged_term = ObsTermCfg(
@@ -46,6 +47,7 @@ object_contact_target_current_term = ObsTermCfg(
         "distance_clip": R1_OBJECT_CONTACT_DISTANCE_CLIP,
         "include_active": True,
         "include_distance": True,
+        "target_topk": R1_OBJECT_CONTACT_TARGET_TOPK,
         "fail_on_missing_targets": True,
     },
     scale=1.0,

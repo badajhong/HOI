@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Mapping, Sequence
 
 import torch
 from loguru import logger
@@ -13,6 +13,8 @@ from holosoma.managers.command.terms.wbt import MotionCommand
 from holosoma.managers.object_contact import (
     get_contact_target_point_distances,
     get_cached_object_surface_distances,
+    get_nearest_object_surface_points_obj,
+    limit_contact_target_topk,
     load_sample_points_by_key,
     object_key_masks_for_envs,
     resolve_contact_body_indices_and_offsets,
@@ -424,6 +426,7 @@ class ObjectContactTargetPointDistance(RewardTermBase):
         margin: float | None = None,
         body_names: tuple[str, ...] | list[str] | str | None = None,
         contact_body_names_regex: str = ".*",
+        target_topk: int | None = None,
         fail_on_missing_targets: bool = True,
         **kwargs,
     ) -> torch.Tensor:
@@ -448,6 +451,7 @@ class ObjectContactTargetPointDistance(RewardTermBase):
 
         active_env_ids = has_active.nonzero(as_tuple=False).flatten()
         target_points_obj = motion_command.contact_object_target_points_obj[:, self.contact_label_columns]
+        target_points_obj = limit_contact_target_topk(target_points_obj, target_topk)
         distances = torch.full(
             (env.num_envs, self.contact_label_columns.numel()),
             float("inf"),
@@ -486,7 +490,7 @@ class ObjectContactTargetPointDistance(RewardTermBase):
     ) -> None:
         if not motion_command.has_contact_labels or not motion_command.has_contact_target_points:
             message = (
-                "ObjectContactTargetPointDistance is enabled but motion files have no contact target points. "
+                f"{self.__class__.__name__} is enabled but motion files have no contact target points. "
                 "Regenerate motions with contact_object_target_points_obj labels."
             )
             if fail_on_missing_targets:
@@ -519,10 +523,179 @@ class ObjectContactTargetPointDistance(RewardTermBase):
         self.contact_body_local_offsets = contact_body_local_offsets[self.contact_label_columns]
 
         logger.info(
-            "Initialized ObjectContactTargetPointDistance: "
+            f"Initialized {self.__class__.__name__}: "
             f"bodies={self.contact_body_names}, topk={motion_command.motion.contact_object_target_points_obj.shape[2]}"
         )
         self.initialized = True
+
+
+class ObjectContactTargetPointCoverage(ObjectContactTargetPointDistance):
+    """Reward how many labeled contact bodies are close enough to their target points."""
+
+    def __call__(
+        self,
+        env: WholeBodyTrackingManager,
+        *,
+        distance_threshold: float = 0.1,
+        temperature: float = 0.02,
+        body_names: tuple[str, ...] | list[str] | str | None = None,
+        contact_body_names_regex: str = ".*",
+        target_topk: int | None = None,
+        fail_on_missing_targets: bool = True,
+        **kwargs,
+    ) -> torch.Tensor:
+        motion_command = _get_motion_command_and_assert_type(env)
+        if not self.initialized:
+            self._initialize(
+                motion_command,
+                body_names=body_names,
+                contact_body_names_regex=contact_body_names_regex,
+                fail_on_missing_targets=fail_on_missing_targets,
+            )
+
+        if self.contact_label_columns.numel() == 0:
+            return torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
+
+        expected = motion_command.contact_object_label[:, self.contact_label_columns]
+        target_valid = motion_command.contact_object_target_valid[:, self.contact_label_columns]
+        active = expected & target_valid
+        has_active = active.any(dim=1)
+        if not torch.any(has_active):
+            return torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
+
+        active_env_ids = has_active.nonzero(as_tuple=False).flatten()
+        target_points_obj = motion_command.contact_object_target_points_obj[:, self.contact_label_columns]
+        target_points_obj = limit_contact_target_topk(target_points_obj, target_topk)
+        distances = torch.full(
+            (env.num_envs, self.contact_label_columns.numel()),
+            float("inf"),
+            dtype=torch.float32,
+            device=env.device,
+        )
+        active_distances, _, _ = get_contact_target_point_distances(
+            env=env,
+            motion_command=motion_command,
+            body_indices=self.contact_body_indices,
+            body_local_offsets=self.contact_body_local_offsets,
+            target_points_obj=target_points_obj[active_env_ids],
+            env_ids=active_env_ids,
+        )
+        distances[active_env_ids] = active_distances
+
+        threshold = torch.tensor(float(distance_threshold), dtype=torch.float32, device=env.device)
+        if float(temperature) > 0.0:
+            temp = torch.tensor(float(temperature), dtype=torch.float32, device=env.device).clamp(min=1e-6)
+            per_body_coverage = torch.sigmoid((threshold - distances) / temp)
+        else:
+            per_body_coverage = (distances <= threshold).float()
+
+        per_body_coverage = per_body_coverage * active.float()
+        denom = active.float().sum(dim=1).clamp(min=1.0)
+        reward = per_body_coverage.sum(dim=1) / denom
+        return torch.where(has_active, reward, torch.zeros_like(reward))
+
+
+class ObjectContactTargetSurfaceMismatchPenalty(ObjectContactTargetPointDistance):
+    """Penalize contact bodies whose current surface region differs from the labeled target region."""
+
+    def __init__(self, cfg: RewardTermCfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+        self.sample_points_by_key: dict[str | None, torch.Tensor] = {}
+
+    def __call__(
+        self,
+        env: WholeBodyTrackingManager,
+        *,
+        sample_points_root: str | None = None,
+        mismatch_threshold: float = 0.08,
+        mismatch_scale: float = 0.04,
+        surface_distance_cutoff: float = 0.1,
+        body_names: tuple[str, ...] | list[str] | str | None = None,
+        contact_body_names_regex: str = ".*",
+        target_topk: int | None = None,
+        fail_on_missing_targets: bool = True,
+        **kwargs,
+    ) -> torch.Tensor:
+        motion_command = _get_motion_command_and_assert_type(env)
+        if not self.initialized:
+            self._initialize(
+                motion_command,
+                sample_points_root=sample_points_root,
+                body_names=body_names,
+                contact_body_names_regex=contact_body_names_regex,
+                fail_on_missing_targets=fail_on_missing_targets,
+            )
+
+        if self.contact_label_columns.numel() == 0:
+            return torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
+
+        expected = motion_command.contact_object_label[:, self.contact_label_columns]
+        target_valid = motion_command.contact_object_target_valid[:, self.contact_label_columns]
+        active = expected & target_valid
+        has_active = active.any(dim=1)
+        if not torch.any(has_active):
+            return torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
+
+        active_env_ids = has_active.nonzero(as_tuple=False).flatten()
+        target_points_obj = motion_command.contact_object_target_points_obj[:, self.contact_label_columns]
+        target_points_obj = limit_contact_target_topk(target_points_obj, target_topk)
+        active_target_points_obj = target_points_obj[active_env_ids]
+
+        surface_distances, nearest_surface_points_obj, _ = get_nearest_object_surface_points_obj(
+            env=env,
+            motion_command=motion_command,
+            body_indices=self.contact_body_indices,
+            body_local_offsets=self.contact_body_local_offsets,
+            sample_points_by_key=self.sample_points_by_key,
+            env_ids=active_env_ids,
+        )
+        mismatch_distances = torch.linalg.norm(
+            nearest_surface_points_obj[:, :, None, :] - active_target_points_obj,
+            dim=-1,
+        ).amin(dim=-1)
+
+        active_close = active[active_env_ids]
+        if float(surface_distance_cutoff) > 0.0:
+            active_close = active_close & (surface_distances <= float(surface_distance_cutoff))
+
+        mismatch_excess = torch.clamp(mismatch_distances - float(mismatch_threshold), min=0.0)
+        scale = torch.tensor(max(float(mismatch_scale), 1e-6), dtype=torch.float32, device=env.device)
+        per_body_penalty = 1.0 - torch.exp(-mismatch_excess / scale)
+        per_body_penalty = per_body_penalty * active_close.float()
+
+        penalty = torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
+        denom = active_close.float().sum(dim=1).clamp(min=1.0)
+        penalty[active_env_ids] = per_body_penalty.sum(dim=1) / denom
+        return penalty
+
+    def _initialize(
+        self,
+        motion_command: MotionCommand,
+        *,
+        sample_points_root: str | None,
+        body_names: tuple[str, ...] | list[str] | str | None,
+        contact_body_names_regex: str,
+        fail_on_missing_targets: bool,
+    ) -> None:
+        super()._initialize(
+            motion_command,
+            body_names=body_names,
+            contact_body_names_regex=contact_body_names_regex,
+            fail_on_missing_targets=fail_on_missing_targets,
+        )
+        if self.contact_label_columns.numel() == 0:
+            return
+
+        root, self.sample_points_by_key = load_sample_points_by_key(
+            env=self.env,
+            motion_command=motion_command,
+            sample_points_root=sample_points_root,
+        )
+        logger.info(
+            "Initialized ObjectContactTargetSurfaceMismatchPenalty: "
+            f"bodies={self.contact_body_names}, objects={list(self.sample_points_by_key.keys())}, "
+            f"sample_points_root={root}"
+        )
 
 
 class ObjectBodyProximityPenalty(RewardTermBase):
@@ -536,6 +709,7 @@ class ObjectBodyProximityPenalty(RewardTermBase):
         self.body_names: list[str] = []
         self.body_indices = torch.zeros(0, dtype=torch.long, device=env.device)
         self.body_local_offsets = torch.zeros(0, 3, dtype=torch.float32, device=env.device)
+        self.body_distance_reduce = "sum"
 
     def __call__(
         self,
@@ -543,6 +717,8 @@ class ObjectBodyProximityPenalty(RewardTermBase):
         *,
         sample_points_root: str | None = None,
         body_names: tuple[str, ...] | list[str] | str = (),
+        body_points: Mapping[str, Sequence[Sequence[float]]] | None = None,
+        body_distance_reduce: str = "sum",
         distance_scale: float = 0.02,
         distance_cutoff: float = 0.08,
         **kwargs,
@@ -553,6 +729,8 @@ class ObjectBodyProximityPenalty(RewardTermBase):
                 motion_command,
                 sample_points_root=sample_points_root,
                 body_names=body_names,
+                body_points=body_points,
+                body_distance_reduce=body_distance_reduce,
             )
 
         if not self.body_names:
@@ -568,6 +746,8 @@ class ObjectBodyProximityPenalty(RewardTermBase):
         )
         scale_tensor = torch.tensor(max(float(distance_scale), 1e-6), dtype=torch.float32, device=env.device)
         cutoff = float(distance_cutoff)
+        if self.body_distance_reduce == "min":
+            distances = distances.amin(dim=1, keepdim=True)
         close_mask = distances <= cutoff if cutoff > 0.0 else torch.ones_like(distances, dtype=torch.bool)
         return (torch.exp(-distances / scale_tensor) * close_mask.float()).sum(dim=1)
 
@@ -580,12 +760,44 @@ class ObjectBodyProximityPenalty(RewardTermBase):
         *,
         sample_points_root: str | None,
         body_names: tuple[str, ...] | list[str] | str,
+        body_points: Mapping[str, Sequence[Sequence[float]]] | None,
+        body_distance_reduce: str,
     ) -> None:
-        self.body_names = [str(body_names)] if isinstance(body_names, str) else [str(name) for name in body_names]
-        self.body_indices, self.body_local_offsets = resolve_contact_body_indices_and_offsets(
-            self.env,
-            self.body_names,
-        )
+        requested_body_names = [str(body_names)] if isinstance(body_names, str) else [str(name) for name in body_names]
+        self.body_distance_reduce = str(body_distance_reduce)
+        if self.body_distance_reduce not in {"sum", "min"}:
+            raise ValueError(f"Unsupported body_distance_reduce={self.body_distance_reduce!r}; expected 'sum' or 'min'.")
+
+        if body_points:
+            expanded_body_names: list[str] = []
+            expanded_offsets: list[tuple[float, float, float]] = []
+            for body_name in requested_body_names:
+                points = body_points.get(body_name, ())
+                if not points:
+                    expanded_body_names.append(body_name)
+                    expanded_offsets.append((0.0, 0.0, 0.0))
+                    continue
+                for point in points:
+                    if len(point) != 3:
+                        raise ValueError(f"body_points[{body_name!r}] entries must be xyz triples, got {point!r}")
+                    expanded_body_names.append(body_name)
+                    expanded_offsets.append((float(point[0]), float(point[1]), float(point[2])))
+            self.body_names = expanded_body_names
+            self.body_indices, base_offsets = resolve_contact_body_indices_and_offsets(
+                self.env,
+                self.body_names,
+            )
+            self.body_local_offsets = base_offsets + torch.tensor(
+                expanded_offsets,
+                dtype=torch.float32,
+                device=self.env.device,
+            )
+        else:
+            self.body_names = requested_body_names
+            self.body_indices, self.body_local_offsets = resolve_contact_body_indices_and_offsets(
+                self.env,
+                self.body_names,
+            )
         root, self.sample_points_by_key = load_sample_points_by_key(
             env=self.env,
             motion_command=motion_command,
@@ -595,7 +807,7 @@ class ObjectBodyProximityPenalty(RewardTermBase):
         logger.info(
             "Initialized ObjectBodyProximityPenalty: "
             f"bodies={self.body_names}, objects={list(self.sample_points_by_key.keys())}, "
-            f"sample_points_root={root}"
+            f"body_distance_reduce={self.body_distance_reduce}, sample_points_root={root}"
         )
         self.initialized = True
 

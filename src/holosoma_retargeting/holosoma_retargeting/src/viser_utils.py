@@ -31,6 +31,10 @@ def create_motion_control_sliders(
     contact_labels: np.ndarray | None = None,
     contact_body_names: Sequence[str] | None = None,
     contact_visual_link_aliases: Mapping[str, Sequence[str]] | None = None,
+    debug_hand_target_points_obj: np.ndarray | None = None,
+    debug_hand_target_valid: np.ndarray | None = None,
+    debug_hand_target_body_names: Sequence[str] | None = None,
+    debug_hand_target_body_filter: Sequence[str] = ("left_hand_contact_link", "right_hand_contact_link"),
 ) -> Tuple[List[viser.GuiInputHandle[int]], List[float]]:
     """
     Create a slider + play/pause controls and a background player thread with smooth, slerp-based interpolation.
@@ -83,6 +87,84 @@ def create_motion_control_sliders(
             )
         if contact_labels.ndim != 2 or contact_labels.shape[1] != len(contact_body_names):
             raise ValueError("contact_labels must have shape (T, len(contact_body_names)).")
+
+    debug_hand_targets_obj: np.ndarray | None = None
+    debug_hand_targets_valid: np.ndarray | None = None
+    debug_hand_target_columns: list[int] = []
+    debug_hand_target_names: list[str] = []
+    has_debug_hand_targets = (
+        debug_hand_target_points_obj is not None
+        and debug_hand_target_valid is not None
+        and debug_hand_target_body_names is not None
+    )
+    if has_debug_hand_targets:
+        debug_hand_targets_obj = np.asarray(debug_hand_target_points_obj, dtype=float)
+        debug_hand_targets_valid = np.asarray(debug_hand_target_valid, dtype=bool)
+        if debug_hand_targets_obj.ndim == 3:
+            debug_hand_targets_obj = debug_hand_targets_obj[:, :, None, :]
+        if debug_hand_targets_obj.ndim != 4 or debug_hand_targets_obj.shape[0] != n_frames:
+            raise ValueError(
+                "debug_hand_target_points_obj must have shape (T, N, K, 3) "
+                f"or (T, N, 3), got {debug_hand_targets_obj.shape}."
+            )
+        if debug_hand_targets_valid.shape[:2] != debug_hand_targets_obj.shape[:2]:
+            raise ValueError("debug_hand_target_valid must have shape (T, N).")
+        if len(debug_hand_target_body_names) != debug_hand_targets_obj.shape[1]:
+            raise ValueError("debug_hand_target_body_names length must match target point body dimension.")
+        wanted = {str(name) for name in debug_hand_target_body_filter}
+        debug_hand_target_names = [str(name) for name in debug_hand_target_body_names]
+        debug_hand_target_columns = [
+            idx for idx, name in enumerate(debug_hand_target_names) if name in wanted
+        ]
+        has_debug_hand_targets = bool(debug_hand_target_columns)
+
+    def _quat_wxyz_to_matrix(q: np.ndarray) -> np.ndarray:
+        q = _quat_normalize(q)
+        w, x, y, z = q
+        return np.array(
+            [
+                [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+                [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+                [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+            ],
+            dtype=float,
+        )
+
+    debug_hand_target_handles: dict[tuple[int, int], Any] = {}
+    if has_debug_hand_targets:
+        assert debug_hand_targets_obj is not None
+        left_rank_colors = (
+            (255.0, 230.0, 0.0),
+            (255.0, 190.0, 0.0),
+            (255.0, 150.0, 0.0),
+            (255.0, 110.0, 0.0),
+            (255.0, 70.0, 0.0),
+        )
+        right_rank_colors = (
+            (0.0, 230.0, 255.0),
+            (0.0, 190.0, 255.0),
+            (0.0, 150.0, 255.0),
+            (0.0, 110.0, 255.0),
+            (0.0, 70.0, 255.0),
+        )
+        hand_colors = {
+            "left_hand_contact_link": left_rank_colors,
+            "right_hand_contact_link": right_rank_colors,
+        }
+        for col in debug_hand_target_columns:
+            body_name = debug_hand_target_names[col]
+            body_colors = hand_colors.get(body_name, left_rank_colors)
+            for rank in range(debug_hand_targets_obj.shape[2]):
+                color = np.array([body_colors[min(rank, len(body_colors) - 1)]], dtype=np.float32)
+                handle = server.scene.add_point_cloud(
+                    f"/debug/hand_contact_target/{body_name}/{rank}",
+                    points=np.zeros((1, 3), dtype=np.float32),
+                    colors=color,
+                    point_size=max(0.018, 0.03 - 0.002 * rank),
+                    point_shape="circle",
+                )
+                handle.visible = False
+                debug_hand_target_handles[(col, rank)] = handle
 
     # ---------------- GUI ----------------
     with server.gui.add_folder("Playback"):
@@ -183,6 +265,29 @@ def create_motion_control_sliders(
                 for handle in handles:
                     handle.visible = visible and robot_visual_enabled
 
+    def _apply_debug_hand_targets(q: np.ndarray, frame_index: int) -> None:
+        if not has_debug_hand_targets:
+            return
+        assert debug_hand_targets_obj is not None
+        assert debug_hand_targets_valid is not None
+
+        if not has_object_input:
+            for handle in debug_hand_target_handles.values():
+                handle.visible = False
+            return
+
+        frame_index = int(np.clip(frame_index, 0, n_frames - 1))
+        object_pos = q[-7:-4]
+        object_quat = q[-4:]
+        object_rot = _quat_wxyz_to_matrix(object_quat)
+        for (col, rank), handle in debug_hand_target_handles.items():
+            valid = bool(debug_hand_targets_valid[frame_index, col])
+            if valid:
+                point_obj = debug_hand_targets_obj[frame_index, col, rank]
+                point_w = object_pos + object_rot @ point_obj
+                handle.points = point_w[None].astype(np.float32)
+            handle.visible = valid
+
     def _apply_frame_from_q(q: np.ndarray, frame_index: int) -> None:
         # joints -> ensure length
         joints = q[7 : 7 + robot_dof]
@@ -209,6 +314,8 @@ def create_motion_control_sliders(
             # fallback static pose
             object_base_frame.position = np.zeros(3)
             object_base_frame.wxyz = np.array([1.0, 0.0, 0.0, 0.0])
+
+        _apply_debug_hand_targets(q, frame_index)
 
     def _apply_discrete_frame(i: int) -> None:
         i = int(np.clip(i, 0, n_frames - 1))

@@ -734,6 +734,7 @@ def main(cfg: RetargetingConfig) -> None:
 
     # Create retargeter
     retargeter_kwargs = build_retargeter_kwargs_from_config(cfg.retargeter, constants, object_urdf_path, task_type)
+    retargeter_kwargs["debug_hand"] = bool(cfg.debug.hand)
     retargeter = InteractionMeshRetargeter(**retargeter_kwargs)
     logger.info("Retargeter created")
 

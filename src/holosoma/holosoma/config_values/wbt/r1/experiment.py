@@ -39,7 +39,7 @@ r1_teacher_logger = replace(
     logger_values.wandb,
     video=replace(
         logger_values.wandb.video,
-        interval=100,
+        interval=20,
         camera=CartesianCameraConfig(offset=[3.0, -3.0, 1.5]),
     ),
 )

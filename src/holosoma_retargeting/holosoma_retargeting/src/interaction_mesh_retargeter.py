@@ -89,6 +89,7 @@ class InteractionMeshRetargeter:
         contact_target_topk: int = 5,
         contact_human_joint_regex: str = DEFAULT_CONTACT_HUMAN_JOINT_REGEX,
         debug: bool = False,
+        debug_hand: bool = False,
         w_nominal_tracking_init: float = 5.0,
         nominal_tracking_tau: float = 10.0,
     ):
@@ -141,6 +142,7 @@ class InteractionMeshRetargeter:
         self.contact_target_topk = max(int(contact_target_topk), 1)
         self.contact_human_joint_regex = contact_human_joint_regex
         self.debug = debug
+        self.debug_hand = debug_hand
         self.demo_joints = task_constants.DEMO_JOINTS
         self.laplacian_match_links = task_constants.JOINTS_MAPPING
         self.task_constants = task_constants
@@ -964,6 +966,17 @@ class InteractionMeshRetargeter:
                     else None
                 ),
                 contact_visual_link_aliases=self.CONTACT_VISUAL_ALIASES,
+                debug_hand_target_points_obj=(
+                    contact_arrays.get("contact_object_target_points_obj") if self.debug_hand else None
+                ),
+                debug_hand_target_valid=(
+                    contact_arrays.get("contact_object_target_valid") if self.debug_hand else None
+                ),
+                debug_hand_target_body_names=(
+                    [str(name) for name in contact_arrays["contact_object_names"].tolist()]
+                    if self.debug_hand and contact_arrays and "contact_object_names" in contact_arrays
+                    else None
+                ),
             )
 
             # 4) optional: visibility toggle

@@ -13,6 +13,14 @@ from holosoma_retargeting.config_types.task import TaskConfig
 
 
 @dataclass
+class DebugConfig:
+    """Top-level debug visualization helpers."""
+
+    hand: bool = False
+    """Whether to visualize nearest object sample targets for hand contact links."""
+
+
+@dataclass
 class RetargetingConfig:
     """Top-level retargeting configuration used by the Tyro CLI.
 
@@ -49,6 +57,9 @@ class RetargetingConfig:
 
     augmentation: bool = False
     """Whether to use augmentation."""
+
+    debug: DebugConfig = field(default_factory=DebugConfig)
+    """Debug visualization toggles, e.g. --debug.hand."""
 
     # --- Nested configs ---
     robot_config: RobotConfig = field(default_factory=lambda: RobotConfig(robot_type="g1"))
