@@ -320,3 +320,49 @@ class JointPositionActionTerm(ActionTermBase):
                     self.action_scales[i] = control_cfg.action_scale * effort / stiffness
         else:
             self.action_scales[:] = control_cfg.action_scale
+
+
+class JointPositionActionTermWithFixedJoints(JointPositionActionTerm):
+    """Control a subset of joints while holding the rest at their default pose."""
+
+    def __init__(self, cfg: ActionTermCfg, env: Any):
+        super().__init__(cfg, env)
+
+        fixed_joint_names = tuple(cfg.params.get("fixed_joint_names", ()))
+        if not fixed_joint_names:
+            raise ValueError("fixed_joint_names must contain at least one joint name.")
+
+        unknown_names = sorted(set(fixed_joint_names) - set(env.dof_names))
+        if unknown_names:
+            raise ValueError(f"Unknown fixed joint names: {unknown_names}. Available DOFs: {env.dof_names}")
+
+        fixed_names = set(fixed_joint_names)
+        controlled_indices = [index for index, name in enumerate(env.dof_names) if name not in fixed_names]
+        self._controlled_joint_indices = torch.tensor(controlled_indices, dtype=torch.long, device=env.device)
+        self._full_action_dim = env.num_dof
+        self._action_dim = len(controlled_indices)
+
+        if env.robot_config.actions_dim != self._action_dim:
+            raise ValueError(
+                f"Robot actions_dim ({env.robot_config.actions_dim}) must equal the number of non-fixed joints "
+                f"({self._action_dim})."
+            )
+
+        # These are policy-facing buffers. Full-sized PD, torque, and actuator
+        # randomization buffers allocated by the parent remain unchanged.
+        self._raw_actions = torch.zeros(env.num_envs, self._action_dim, device=env.device)
+        self._processed_actions = torch.zeros_like(self._raw_actions)
+        self._actions_after_delay = torch.zeros_like(self._raw_actions)
+
+    def apply_actions(self) -> None:
+        """Expand policy actions to all DOFs and apply full-sized PD torques."""
+        full_actions = torch.zeros(
+            self.env.num_envs,
+            self._full_action_dim,
+            dtype=self._actions_after_delay.dtype,
+            device=self.env.device,
+        )
+        full_actions[:, self._controlled_joint_indices] = self._actions_after_delay
+        self.torques[:] = self._compute_torques(full_actions)
+        self.env.simulator.apply_torques_at_dof(self.torques)
+        self._prev_dof_vel.copy_(self.env.simulator.dof_vel)

@@ -69,6 +69,7 @@ r1_teacher = replace(
     ),
     robot=replace(
         robot.r1_26dof_w_object_multi_teacher,
+        actions_dim=24,
         asset=replace(
             robot.r1_26dof_w_object_multi_teacher.asset,
             enable_self_collisions=True,
@@ -86,7 +87,7 @@ r1_teacher = replace(
     algo=r1_teacher_algo,
     logger=r1_teacher_logger,
     simulator=r1_teacher_simulator,
-    action=action.r1_26dof_joint_pos,
+    action=action.r1_24dof_joint_pos_fixed_head,
     command=command.r1_26dof_wbt_command_w_object_multi_teacher,
     termination=termination.r1_26dof_wbt_termination,
     randomization=randomization.r1_26dof_wbt_randomization_w_object,
