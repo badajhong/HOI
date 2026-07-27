@@ -15,8 +15,8 @@ from holosoma.ae_pro_joint_train import load_joint_model as load_pro_joint_model
 from holosoma.agents.modules.module_utils import setup_ppo_actor_module
 from holosoma.managers.command.terms.wbt import MotionCommand
 from holosoma.managers.object_contact import (
-    get_contact_target_point_distances,
     get_cached_object_surface_distances,
+    get_contact_target_point_distances,
     limit_contact_target_topk,
     load_sample_points_by_key,
     resolve_contact_body_indices_and_offsets,
@@ -24,6 +24,7 @@ from holosoma.managers.object_contact import (
 )
 from holosoma.managers.observation.base import ObservationTermBase
 from holosoma.utils.eval_utils import CheckpointConfig, load_saved_experiment_config
+from holosoma.utils.path import resolve_data_file_path
 from holosoma.utils.rotations import quat_rotate_inverse, quaternion_to_matrix, subtract_frame_transforms
 from holosoma.utils.surface_features import SurfaceFeatureComputer
 from holosoma.utils.torch_utils import get_axis_params, to_torch
@@ -325,6 +326,54 @@ def obj_type_one_hot(env: WholeBodyTrackingManager) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     num_classes = max(int(getattr(motion_command, "num_object_types", 1)), 1)
     return torch.nn.functional.one_hot(motion_command.object_type_ids, num_classes=num_classes).float()
+
+
+def task_index_one_hot(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Return the configured motion-task identity as a one-hot vector."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    task_id_per_clip = getattr(motion_command, "_task_id_per_clip", None)
+    task_names = getattr(motion_command, "_task_index_names", None)
+
+    if task_id_per_clip is None or task_names is None:
+        object_cfg = getattr(getattr(env, "robot_config", None), "object", None)
+        object_parm = getattr(object_cfg, "object_parm", None)
+        if not object_parm:
+            raise ValueError("task_index_one_hot requires robot.object.object_parm to be configured.")
+
+        import yaml  # noqa: PLC0415
+
+        object_parm_path = Path(resolve_data_file_path(object_parm))
+        with object_parm_path.open("r", encoding="utf-8") as file:
+            object_parm_cfg = yaml.safe_load(file) or {}
+
+        task_names = object_parm_cfg.get("task_index")
+        if not isinstance(task_names, list) or not task_names:
+            raise ValueError(
+                f"'task_index' must be a non-empty YAML list in object parameter file: {object_parm_path}"
+            )
+        task_names = [str(task_name) for task_name in task_names]
+        if len(task_names) != len(set(task_names)):
+            raise ValueError(f"'task_index' contains duplicate task names: {object_parm_path}")
+
+        task_name_to_id = {task_name: task_id for task_id, task_name in enumerate(task_names)}
+        clip_files = getattr(motion_command.motion, "clip_files", [])
+        clip_task_names = [Path(str(clip_file)).stem for clip_file in clip_files]
+        missing_tasks = sorted(set(clip_task_names) - set(task_name_to_id))
+        if missing_tasks:
+            raise ValueError(
+                f"Motion clips are missing from 'task_index' in {object_parm_path}: {missing_tasks}"
+            )
+
+        task_id_per_clip = torch.tensor(
+            [task_name_to_id[task_name] for task_name in clip_task_names],
+            device=env.device,
+            dtype=torch.long,
+        )
+        motion_command._task_index_names = task_names
+        motion_command._task_id_per_clip = task_id_per_clip
+
+    task_ids = task_id_per_clip[motion_command.clip_ids]
+    return torch.nn.functional.one_hot(task_ids, num_classes=len(task_names)).float()
 
 
 def object_randomization_privileged(env: WholeBodyTrackingManager) -> torch.Tensor:

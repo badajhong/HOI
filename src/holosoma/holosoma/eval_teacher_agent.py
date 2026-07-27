@@ -113,6 +113,13 @@ def _apply_motion_overrides(config: ExperimentConfig, cli_cfg: TeacherEvalConfig
     if cli_cfg.start_at_timestep_zero_prob is not None:
         motion_updates["start_at_timestep_zero_prob"] = cli_cfg.start_at_timestep_zero_prob
 
+    # Adaptive timestep sampling is training-only and is ignored once the
+    # environment enters evaluation mode. MotionCommand validates the reset
+    # probability bands during construction, however, before evaluation mode is
+    # enabled. Clear the adaptive band here so start-at-zero=1.0 is valid.
+    motion_updates["use_adaptive_timesteps_sampler"] = False
+    motion_updates["adaptive_timestep_sampling_ratio"] = 0.0
+
     if not motion_updates:
         return config
 
@@ -459,8 +466,17 @@ def _preserve_checkpoint_object_type_space(env: Any, saved_config: ExperimentCon
         )
         return
 
-    object_key_to_id = {object_key: object_id for object_id, object_key in enumerate(checkpoint_object_keys)}
-    motion_command.object_key_to_id = object_key_to_id
+    checkpoint_object_key_to_id = {
+        object_key: object_id for object_id, object_key in enumerate(checkpoint_object_keys)
+    }
+    active_object_keys = sorted({str(object_key) for object_key in clip_object_keys if object_key is not None})
+    # Keep only active objects in this lookup. Runtime contact and point-cloud
+    # terms iterate this mapping to select object-specific assets, which are
+    # intentionally loaded only for the eval motions. The IDs remain those from
+    # the full checkpoint vocabulary so the one-hot semantics stay unchanged.
+    motion_command.object_key_to_id = {
+        object_key: checkpoint_object_key_to_id[object_key] for object_key in active_object_keys
+    }
     motion_command.num_object_types = len(checkpoint_object_keys)
 
     motion_command.object_type_id_per_clip = torch.zeros(
@@ -468,7 +484,7 @@ def _preserve_checkpoint_object_type_space(env: Any, saved_config: ExperimentCon
     )
     for clip_idx, object_key in enumerate(clip_object_keys):
         if object_key is not None:
-            motion_command.object_type_id_per_clip[clip_idx] = object_key_to_id[str(object_key)]
+            motion_command.object_type_id_per_clip[clip_idx] = checkpoint_object_key_to_id[str(object_key)]
 
     if hasattr(motion_command, "object_type_ids") and hasattr(motion_command, "clip_ids"):
         motion_command.object_type_ids[:] = motion_command.object_type_id_per_clip[motion_command.clip_ids]

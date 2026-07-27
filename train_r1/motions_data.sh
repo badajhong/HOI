@@ -98,7 +98,7 @@ run_task sub17_smalltable_014 smalltable 0.01
 run_task sub17_smalltable_010 smalltable 0.01
 run_task sub6_smalltable_030 smalltable 0.01
 
-run_task sub4_whitechair_029 whitechair 0.05
+run_task sub4_whitechair_029 whitechair 0.035
 run_task sub4_whitechair_030 whitechair 0.01
 
 run_task sub3_largebox_003 largebox 0.01

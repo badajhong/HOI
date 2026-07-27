@@ -248,11 +248,12 @@ python src/holosoma_retargeting/holosoma_retargeting/examples/robot_retarget.py 
   --retargeter.debug \
   --retargeter.visualize \
   --robot r1 \
-  --retargeter.penetration-tolerance 0.0 \
+  --retargeter.penetration-tolerance 0.001 \
   --retargeter.surface-penetration-tolerance 0.00 \
-  --retargeter.object-penetration-tolerance 0.05 \
+  --retargeter.object-penetration-tolerance 0.035 \
   --retargeter.contact-threshold 0.1 \
-  --retargeter.contact-source robot
+  --retargeter.contact-source robot \
+  --debug.hand
 ```
 
 ```bash

@@ -52,3 +52,34 @@ def test_object_randomization_privileged_selects_active_object_and_spawn_offset(
     torch.testing.assert_close(privileged[1, :10], env.object_randomization_privileged_by_key["chair"][1])
     torch.testing.assert_close(privileged[2, :10], env.object_randomization_privileged_by_key["box"][2])
     torch.testing.assert_close(privileged[:, 10:13], motion_command.object_pos_reward_offset)
+
+
+def test_task_index_one_hot_uses_configured_motion_stem_order(tmp_path, monkeypatch):
+    object_parm = tmp_path / "objects_parm.yaml"
+    object_parm.write_text(
+        "task_index:\n"
+        "  - task_b\n"
+        "  - task_a\n"
+        "  - unused_task\n",
+        encoding="utf-8",
+    )
+    motion_command = SimpleNamespace(
+        motion=SimpleNamespace(clip_files=["motions/task_a.npz", "motions/task_b.npz"]),
+        clip_ids=torch.tensor([0, 1, 0], dtype=torch.long),
+    )
+    env = SimpleNamespace(
+        device=torch.device("cpu"),
+        robot_config=SimpleNamespace(object=SimpleNamespace(object_parm=str(object_parm))),
+    )
+    monkeypatch.setattr(wbt_obs, "_get_motion_command_and_assert_type", lambda _: motion_command)
+
+    actual = wbt_obs.task_index_one_hot(env)
+
+    expected = torch.tensor(
+        [
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ]
+    )
+    torch.testing.assert_close(actual, expected)

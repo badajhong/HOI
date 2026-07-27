@@ -51,6 +51,7 @@ g1_29dof_wbt_reward = RewardManagerCfg(
             func="holosoma.managers.reward.terms.wbt:UndesiredContacts",
             params={
                 "threshold": 1.0,
+                "respect_motion_contact_labels": True,
                 "undesired_contacts_body_names": (
                     "^(?!left_foot_contact_point$)(?!right_foot_contact_point$)"
                     "(?!left_wrist_yaw_link$)(?!right_wrist_yaw_link$)"
@@ -176,6 +177,7 @@ g1_29dof_wbt_reward_w_object_multi_teacher = RewardManagerCfg(
             func="holosoma.managers.reward.terms.wbt:UndesiredContacts",
             params={
                 "threshold": 1.0,
+                "respect_motion_contact_labels": True,
                 "undesired_contacts_body_names": (
                     "^(?!left_foot_contact_point$)(?!right_foot_contact_point$)"
                     "(?!left_wrist_yaw_link$)(?!right_wrist_yaw_link$)"

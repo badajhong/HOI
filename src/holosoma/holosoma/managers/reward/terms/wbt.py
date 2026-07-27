@@ -125,6 +125,48 @@ def motion_global_body_ang_vel(env: WholeBodyTrackingManager, sigma: float) -> t
     return torch.exp(-error.mean(-1) / sigma**2)
 
 
+class MotionJointPositionErrorExp(RewardTermBase):
+    """Reward reference joint-position tracking for selected controllable joints."""
+
+    def __init__(self, cfg: RewardTermCfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+        joint_names = cfg.params.get("joint_names")
+        simulator_joint_names = list(env.simulator.dof_names)
+        if joint_names is None:
+            joint_names = simulator_joint_names
+        missing = [name for name in joint_names if name not in simulator_joint_names]
+        if missing:
+            raise ValueError(f"Joint-position reward contains unknown joint names: {missing}")
+        self.joint_indices = torch.tensor(
+            [simulator_joint_names.index(name) for name in joint_names],
+            dtype=torch.long,
+            device=env.device,
+        )
+
+    def __call__(self, env: WholeBodyTrackingManager, *, sigma: float = 0.5, **kwargs) -> torch.Tensor:
+        motion_command = _get_motion_command_and_assert_type(env)
+        error = torch.square(
+            motion_command.joint_pos[:, self.joint_indices]
+            - motion_command.robot_joint_pos[:, self.joint_indices]
+        ).mean(dim=-1)
+        return torch.exp(-error / max(float(sigma), 1e-6) ** 2)
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        pass
+
+
+class MotionJointVelocityErrorExp(MotionJointPositionErrorExp):
+    """Reward reference joint-velocity tracking for selected controllable joints."""
+
+    def __call__(self, env: WholeBodyTrackingManager, *, sigma: float = 2.0, **kwargs) -> torch.Tensor:
+        motion_command = _get_motion_command_and_assert_type(env)
+        error = torch.square(
+            motion_command.joint_vel[:, self.joint_indices]
+            - motion_command.robot_joint_vel[:, self.joint_indices]
+        ).mean(dim=-1)
+        return torch.exp(-error / max(float(sigma), 1e-6) ** 2)
+
+
 # ================================================================================================
 # Object Tracking Rewards
 # ================================================================================================
@@ -595,109 +637,6 @@ class ObjectContactTargetPointCoverage(ObjectContactTargetPointDistance):
         return torch.where(has_active, reward, torch.zeros_like(reward))
 
 
-class ObjectContactTargetSurfaceMismatchPenalty(ObjectContactTargetPointDistance):
-    """Penalize contact bodies whose current surface region differs from the labeled target region."""
-
-    def __init__(self, cfg: RewardTermCfg, env: WholeBodyTrackingManager):
-        super().__init__(cfg, env)
-        self.sample_points_by_key: dict[str | None, torch.Tensor] = {}
-
-    def __call__(
-        self,
-        env: WholeBodyTrackingManager,
-        *,
-        sample_points_root: str | None = None,
-        mismatch_threshold: float = 0.08,
-        mismatch_scale: float = 0.04,
-        surface_distance_cutoff: float = 0.1,
-        body_names: tuple[str, ...] | list[str] | str | None = None,
-        contact_body_names_regex: str = ".*",
-        target_topk: int | None = None,
-        fail_on_missing_targets: bool = True,
-        **kwargs,
-    ) -> torch.Tensor:
-        motion_command = _get_motion_command_and_assert_type(env)
-        if not self.initialized:
-            self._initialize(
-                motion_command,
-                sample_points_root=sample_points_root,
-                body_names=body_names,
-                contact_body_names_regex=contact_body_names_regex,
-                fail_on_missing_targets=fail_on_missing_targets,
-            )
-
-        if self.contact_label_columns.numel() == 0:
-            return torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
-
-        expected = motion_command.contact_object_label[:, self.contact_label_columns]
-        target_valid = motion_command.contact_object_target_valid[:, self.contact_label_columns]
-        active = expected & target_valid
-        has_active = active.any(dim=1)
-        if not torch.any(has_active):
-            return torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
-
-        active_env_ids = has_active.nonzero(as_tuple=False).flatten()
-        target_points_obj = motion_command.contact_object_target_points_obj[:, self.contact_label_columns]
-        target_points_obj = limit_contact_target_topk(target_points_obj, target_topk)
-        active_target_points_obj = target_points_obj[active_env_ids]
-
-        surface_distances, nearest_surface_points_obj, _ = get_nearest_object_surface_points_obj(
-            env=env,
-            motion_command=motion_command,
-            body_indices=self.contact_body_indices,
-            body_local_offsets=self.contact_body_local_offsets,
-            sample_points_by_key=self.sample_points_by_key,
-            env_ids=active_env_ids,
-        )
-        mismatch_distances = torch.linalg.norm(
-            nearest_surface_points_obj[:, :, None, :] - active_target_points_obj,
-            dim=-1,
-        ).amin(dim=-1)
-
-        active_close = active[active_env_ids]
-        if float(surface_distance_cutoff) > 0.0:
-            active_close = active_close & (surface_distances <= float(surface_distance_cutoff))
-
-        mismatch_excess = torch.clamp(mismatch_distances - float(mismatch_threshold), min=0.0)
-        scale = torch.tensor(max(float(mismatch_scale), 1e-6), dtype=torch.float32, device=env.device)
-        per_body_penalty = 1.0 - torch.exp(-mismatch_excess / scale)
-        per_body_penalty = per_body_penalty * active_close.float()
-
-        penalty = torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
-        denom = active_close.float().sum(dim=1).clamp(min=1.0)
-        penalty[active_env_ids] = per_body_penalty.sum(dim=1) / denom
-        return penalty
-
-    def _initialize(
-        self,
-        motion_command: MotionCommand,
-        *,
-        sample_points_root: str | None,
-        body_names: tuple[str, ...] | list[str] | str | None,
-        contact_body_names_regex: str,
-        fail_on_missing_targets: bool,
-    ) -> None:
-        super()._initialize(
-            motion_command,
-            body_names=body_names,
-            contact_body_names_regex=contact_body_names_regex,
-            fail_on_missing_targets=fail_on_missing_targets,
-        )
-        if self.contact_label_columns.numel() == 0:
-            return
-
-        root, self.sample_points_by_key = load_sample_points_by_key(
-            env=self.env,
-            motion_command=motion_command,
-            sample_points_root=sample_points_root,
-        )
-        logger.info(
-            "Initialized ObjectContactTargetSurfaceMismatchPenalty: "
-            f"bodies={self.contact_body_names}, objects={list(self.sample_points_by_key.keys())}, "
-            f"sample_points_root={root}"
-        )
-
-
 class ObjectBodyProximityPenalty(RewardTermBase):
     """Penalize selected robot bodies for being near the active object surface, ignoring contact labels."""
 
@@ -818,28 +757,68 @@ class ObjectBodyProximityPenalty(RewardTermBase):
 
 
 class UndesiredContacts(RewardTermBase):
+    """Penalize physical contacts unless the current retarget frame expects them."""
+
     def __init__(self, cfg: RewardTermCfg, env: WholeBodyTrackingManager):
         super().__init__(cfg, env)
         self.env = env
-        undesired_contacts_body_names = [
+        self.undesired_contacts_body_names = [
             body_name
             for body_name in self.env.simulator.body_names  # type: ignore[attr-defined]
             if re.match(cfg.params.get("undesired_contacts_body_names", ""), body_name)
         ]
         self.undesired_contacts_body_indexes = self._get_index_of_a_in_b(
-            undesired_contacts_body_names,
+            self.undesired_contacts_body_names,
             self.env.simulator.body_names,  # type: ignore[attr-defined]
             self.env.device,
         )
         self.threshold = cfg.params.get("threshold", 1.0)
+        self.contact_label_mapping_initialized = False
+        self.contact_label_body_slots = torch.zeros(0, dtype=torch.long, device=env.device)
+        self.contact_label_columns = torch.zeros(0, dtype=torch.long, device=env.device)
 
-    def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:
+    def __call__(
+        self,
+        env: WholeBodyTrackingManager,
+        *,
+        respect_motion_contact_labels: bool = True,
+        **kwargs,
+    ) -> torch.Tensor:
         # (num_envs, history_length, num_bodies, 3)
         net_contact_forces = self.env.simulator.contact_forces_history
         is_contact = (
             torch.max(torch.norm(net_contact_forces[:, :, self.undesired_contacts_body_indexes], dim=-1), dim=1)[0]
             > self.threshold
         )
+
+        if respect_motion_contact_labels:
+            motion_command = _get_motion_command_and_assert_type(env)
+            if not self.contact_label_mapping_initialized:
+                contact_name_to_column = {
+                    name: column for column, name in enumerate(motion_command.motion.contact_body_names)
+                } if motion_command.has_contact_labels else {}
+                matched_body_slots: list[int] = []
+                matched_label_columns: list[int] = []
+                for body_slot, body_name in enumerate(self.undesired_contacts_body_names):
+                    label_column = contact_name_to_column.get(body_name)
+                    if label_column is not None:
+                        matched_body_slots.append(body_slot)
+                        matched_label_columns.append(label_column)
+                self.contact_label_body_slots = torch.tensor(
+                    matched_body_slots, dtype=torch.long, device=env.device
+                )
+                self.contact_label_columns = torch.tensor(
+                    matched_label_columns, dtype=torch.long, device=env.device
+                )
+                self.contact_label_mapping_initialized = True
+
+            if self.contact_label_body_slots.numel() > 0:
+                expected_contact = torch.zeros_like(is_contact)
+                expected_contact[:, self.contact_label_body_slots] = motion_command.contact_object_label[
+                    :, self.contact_label_columns
+                ]
+                is_contact = is_contact & ~expected_contact
+
         return torch.sum(is_contact, dim=1)
 
     def reset(self, env_ids: torch.Tensor | None = None) -> None:

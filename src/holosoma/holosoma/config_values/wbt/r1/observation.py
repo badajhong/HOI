@@ -1,5 +1,7 @@
 """Whole Body Tracking observation presets for the R1 robot."""
 
+from __future__ import annotations
+
 from dataclasses import replace
 
 from holosoma.config_types.observation import ObsTermCfg
@@ -15,6 +17,12 @@ from holosoma.config_values.wbt.r1.contact import (
 
 object_randomization_privileged_term = ObsTermCfg(
     func="holosoma.managers.observation.terms.wbt:object_randomization_privileged",
+    scale=1.0,
+    noise=0.0,
+)
+
+task_index_one_hot_term = ObsTermCfg(
+    func="holosoma.managers.observation.terms.wbt:task_index_one_hot",
     scale=1.0,
     noise=0.0,
 )
@@ -82,6 +90,7 @@ actor_terms = _with_selective_history(
         "object_distance_current": object_distance_current_term,
         "object_contact_target_current": object_contact_target_current_term,
         "object_randomization_privileged": object_randomization_privileged_term,
+        "task_index_one_hot": task_index_one_hot_term,
     }
 )
 
@@ -92,6 +101,7 @@ critic_terms = _with_selective_history(
         "object_distance_current": object_distance_current_term,
         "object_contact_target_current": object_contact_target_current_term,
         "object_randomization_privileged": object_randomization_privileged_term,
+        "task_index_one_hot": task_index_one_hot_term,
     }
 )
 

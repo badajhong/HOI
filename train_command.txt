@@ -234,7 +234,7 @@ nohup xvfb-run -a python src/holosoma/holosoma/train_agent.py \
     --algo.config.actor-learning-rate 3e-5 \
     --algo.config.critic-learning-rate 3e-5 \
     --algo.config.desired-kl 0.02 \
-    --termination.terms.bad-tracking.params.bad-object-pos-threshold 0.3 \
+    --termination.terms.bad-tracking.params.bad-object-pos-threshold 0.2 \
     --termination.terms.bad-tracking.params.bad-motion-body-pos-threshold 0.35 \
     --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob 0.4 \
     --command.setup-terms.motion-command.params.motion-config.use-adaptive-timesteps-sampler True \
@@ -242,11 +242,13 @@ nohup xvfb-run -a python src/holosoma/holosoma/train_agent.py \
     --command.setup-terms.motion-command.params.motion-config.adaptive-timestep-lookback-steps 10 \
     --command.setup-terms.motion-command.params.motion-config.hard-motion-sampling-ratio 0.4 \
     --command.setup-terms.motion-command.params.motion-config.hard-motion-sampling-ema-alpha 0.1 \
+    --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.object-pos '[0.0, 0.0, 0.0]' \
     --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.root-pos '[0.0, 0.0, 0.01]' \
     --reward.terms.action-rate-l2.weight -0.25 \
     --reward.terms.object-contact-label-distance.weight 0.0 \
-    --reward.terms.object-contact-target-point-distance.weight 4.0 \
-    --reward.terms.object-contact-target-point-coverage.weight 0.0 \
+    --reward.terms.motion-joint-position-error-exp.weight 2.0 \
+    --reward.terms.object-contact-target-point-distance.weight 0.5 \
+    --reward.terms.object-contact-target-point-coverage.weight 0.25 \
     --logger.video.async-encoding True \
     --logger.video.async-encoding-backend process \
     > train_output.log 2>&1 &

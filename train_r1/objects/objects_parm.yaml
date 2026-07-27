@@ -109,3 +109,17 @@ objects:
     mass_distribution_params:
     - 1.0
     - 2.0
+
+task_index:
+  - sub1_suitcase_050
+  - sub5_suitcase_000
+  - sub17_smalltable_014
+  - sub17_smalltable_010
+  - sub6_smalltable_030
+  - sub4_whitechair_029
+  - sub4_whitechair_030
+  - sub3_largebox_003
+  - sub3_largebox_020
+  - sub7_largebox_000
+  - sub5_plasticbox_030
+  - sub5_plasticbox_000
