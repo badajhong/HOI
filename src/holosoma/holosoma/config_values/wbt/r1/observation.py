@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from holosoma.config_types.observation import ObsTermCfg
+from holosoma.config_types.observation import ObservationManagerCfg, ObsTermCfg
 from holosoma.config_values.wbt.g1.observation import (
     g1_29dof_wbt_observation_w_object_multi_teacher,
+    g1_29dof_wbt_observation_w_object_multi_student,
 )
 from holosoma.config_values.wbt.r1.contact import (
     R1_OBJECT_CONTACT_BODY_NAMES,
@@ -122,4 +123,43 @@ r1_26dof_wbt_observation_w_object_multi_teacher = replace(
     },
 )
 
-__all__ = ["r1_26dof_wbt_observation_w_object_multi_teacher"]
+r1_26dof_wbt_observation_w_object_multi_student = ObservationManagerCfg(
+    groups={
+        # The R1 student is reference-free: it must infer object-relative
+        # interaction state from the live depth/proprioception latent rather
+        # than consuming the demonstration's current target joint pose.
+        "actor_obs": replace(
+            g1_29dof_wbt_observation_w_object_multi_student.groups["actor_obs"],
+            terms={
+                name: term
+                for name, term in g1_29dof_wbt_observation_w_object_multi_student.groups["actor_obs"].terms.items()
+                if name != "motion_command_joint_pos"
+            },
+        ),
+        "ae_latent": replace(
+            g1_29dof_wbt_observation_w_object_multi_student.groups["ae_latent"],
+            terms={
+                "ae_latent": replace(
+                    g1_29dof_wbt_observation_w_object_multi_student.groups["ae_latent"].terms["ae_latent"],
+                    params={
+                        **g1_29dof_wbt_observation_w_object_multi_student.groups["ae_latent"]
+                        .terms["ae_latent"]
+                        .params,
+                        "depth_pixel_noise_max_std_m": 0.005,
+                        "depth_dropout_probability": 0.001,
+                    },
+                )
+            },
+        ),
+        # Keep this group identical to the R1 teacher actor observation. The
+        # frozen teacher checkpoint is reconstructed against this exact input.
+        "teacher_obs": replace(
+            r1_26dof_wbt_observation_w_object_multi_teacher.groups["actor_obs"],
+        ),
+    },
+)
+
+__all__ = [
+    "r1_26dof_wbt_observation_w_object_multi_student",
+    "r1_26dof_wbt_observation_w_object_multi_teacher",
+]

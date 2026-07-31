@@ -3,7 +3,7 @@
 from dataclasses import replace
 
 from holosoma.config_types.video import CartesianCameraConfig
-from holosoma.config_values import action, logger as logger_values, robot, simulator
+from holosoma.config_values import action, algo, logger as logger_values, robot, simulator
 from holosoma.config_values.wbt.g1.experiment import g1_29dof_wbt_w_object_multi_teacher
 from holosoma.config_values.wbt.r1 import command, curriculum, observation, randomization, reward, termination
 
@@ -95,4 +95,71 @@ r1_teacher = replace(
     curriculum=curriculum.r1_26dof_wbt_curriculum,
 )
 
-__all__ = ["r1_teacher"]
+r1_student_motion_term = replace(
+    r1_teacher.command.setup_terms["motion_command"],
+    params={
+        **r1_teacher.command.setup_terms["motion_command"].params,
+        "motion_config": replace(
+            r1_teacher.command.setup_terms["motion_command"].params["motion_config"],
+            noise_to_initial_pose=replace(
+                r1_teacher.command.setup_terms["motion_command"].params[
+                    "motion_config"
+                ].noise_to_initial_pose,
+                object_pos=[0.0, 0.0, 0.0],
+                root_pos=[0.0, 0.0, 0.01],
+            ),
+        ),
+    },
+)
+
+r1_student_command = replace(
+    r1_teacher.command,
+    setup_terms={
+        **r1_teacher.command.setup_terms,
+        "motion_command": r1_student_motion_term,
+    },
+)
+
+r1_student = replace(
+    r1_teacher,
+    training=replace(
+        r1_teacher.training,
+        project="student",
+        name="r1_student",
+        num_envs=64,
+    ),
+    algo=replace(
+        algo.dagger_student,
+        config=replace(
+            algo.dagger_student.config,
+            num_learning_iterations=50000,
+            num_steps_per_env=32,
+            num_updates_per_iteration=16,
+            batch_size=4096,
+            actor_learning_rate=3e-4,
+            save_interval=1000,
+            stack_buffer=262144,
+            module_dict=replace(
+                algo.dagger_student.config.module_dict,
+                actor=replace(
+                    algo.dagger_student.config.module_dict.actor,
+                    layer_config=replace(
+                        algo.dagger_student.config.module_dict.actor.layer_config,
+                        hidden_dims=[512, 256, 128],
+                    ),
+                ),
+            ),
+        ),
+    ),
+    observation=observation.r1_26dof_wbt_observation_w_object_multi_student,
+    command=r1_student_command,
+    simulator=replace(
+        r1_teacher.simulator,
+        config=replace(
+            r1_teacher.simulator.config,
+            robot_depth_camera_position_noise_m=0.02,
+        ),
+    ),
+)
+
+__all__ = ["r1_student", "r1_teacher"]

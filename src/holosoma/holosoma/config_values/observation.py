@@ -11,7 +11,10 @@ from holosoma.config_values.wbt.g1.observation import (
     g1_29dof_wbt_observation_w_object_multi_student,
     g1_29dof_wbt_observation_w_object_multi_teacher,
 )
-from holosoma.config_values.wbt.r1.observation import r1_26dof_wbt_observation_w_object_multi_teacher
+from holosoma.config_values.wbt.r1.observation import (
+    r1_26dof_wbt_observation_w_object_multi_student,
+    r1_26dof_wbt_observation_w_object_multi_teacher,
+)
 
 none = None
 
@@ -26,5 +29,6 @@ DEFAULTS = {
     "g1_29dof_wbt_w_object_multi_res_scale_probe": g1_29dof_wbt_observation_w_object_multi_res_scale_probe,
     "g1_29dof_wbt_w_object_multi_teacher": g1_29dof_wbt_observation_w_object_multi_teacher,
     "g1_29dof_wbt_w_object_multi_student": g1_29dof_wbt_observation_w_object_multi_student,
+    "r1_26dof_wbt_w_object_multi_student": r1_26dof_wbt_observation_w_object_multi_student,
     "r1_26dof_wbt_w_object_multi_teacher": r1_26dof_wbt_observation_w_object_multi_teacher,
 }

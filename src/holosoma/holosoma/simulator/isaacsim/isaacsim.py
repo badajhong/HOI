@@ -42,6 +42,14 @@ from omegaconf import DictConfig
 
 from holosoma.utils.module_utils import get_holosoma_root
 from holosoma.utils.path import resolve_data_file_path
+from holosoma.utils.depth import (
+    ROBOT_DEPTH_FOCAL_LENGTH,
+    ROBOT_DEPTH_HORIZONTAL_APERTURE,
+    ROBOT_DEPTH_MAX_M,
+    ROBOT_DEPTH_MIN_M,
+    ROBOT_DEPTH_RAW_RESOLUTION_WH,
+    ROBOT_DEPTH_VERTICAL_APERTURE,
+)
 from holosoma.config_types.simulator import SimulatorInitConfig, SceneConfig
 from holosoma.managers.terrain import TerrainManager
 from holosoma.simulator.base_simulator.base_simulator import BaseSimulator
@@ -80,15 +88,37 @@ class IsaacSim(BaseSimulator):
         self.robot_depth_camera: Camera | None = None
         self.robot_depth_camera_link_name = "realsense_d435_depth_optical_frame"
         self.robot_depth_camera_prim_name = "realsense_d435_depth"
-        self.robot_depth_camera_resolution = (80, 60)
+        self.robot_depth_camera_resolution = ROBOT_DEPTH_RAW_RESOLUTION_WH
         self.robot_depth_camera_use_tiled = self.training_config.num_envs > 1
         self.robot_depth_camera_fallback_parent_link_name = "torso_link"
-        self.robot_depth_camera_fallback_pos = (0.075, 0.0, 0.42)
+        self.robot_depth_camera_r1_parent_link_name = "waist_yaw_link"
+        self.robot_depth_camera_r1_mount_presets = {
+            "cam1": (
+                (0.085, 0.0, 0.42),
+                (
+                    0.2126281001816864,
+                    -0.6743797093191588,
+                    0.6743809086432211,
+                    -0.212630404056609,
+                ),
+            ),
+            "cam2": (
+                (0.075, 0.0, 0.21),
+                (0.7071067811865476, 0.0, 0.7071067811865475, 0.0),
+            ),
+        }
+        self.robot_depth_camera_fallback_parent_link_candidates = (
+            "torso_link",
+            "waist_yaw_link",
+            "pelvis_link",
+            "pelvis",
+        )
+        self.robot_depth_camera_fallback_pos = (0.085, 0.0, 0.42)
         self.robot_depth_camera_fallback_rot = (
-            0.2705950505259776,
-            -0.6532817309240402,
-            0.6532827248883822,
-            -0.27059745016194003,
+            0.2126281001816864,
+            -0.6743797093191588,
+            0.6743809086432211,
+            -0.212630404056609,
         )
 
         # Scale GPU rigid patch buffer with env count to avoid PhysX patch-buffer overflow
@@ -517,11 +547,37 @@ class IsaacSim(BaseSimulator):
     def _maybe_create_robot_depth_camera(self) -> None:
         from isaacsim.core.utils.prims import is_prim_path_valid
 
+        robot_type = str(getattr(self.robot_config.asset, "robot_type", "")).lower()
+        force_r1_upper_body_mount = robot_type.startswith("r1")
+        camera_location = str(self.simulator_config.robot_depth_camera_location).lower()
+        if camera_location not in self.robot_depth_camera_r1_mount_presets:
+            raise ValueError(
+                f"Unsupported robot_depth_camera_location='{camera_location}'. Expected 'cam1' or 'cam2'."
+            )
         direct_optical_frame_prim = f"/World/envs/env_0/Robot/{self.robot_depth_camera_link_name}"
         nested_optical_frame_prim = f"/World/envs/env_0/Robot/realsense_d435_link/{self.robot_depth_camera_link_name}"
-        fallback_parent_prim = f"/World/envs/env_0/Robot/{self.robot_depth_camera_fallback_parent_link_name}"
+        fallback_parent_link_name = next(
+            (
+                candidate
+                for candidate in self.robot_depth_camera_fallback_parent_link_candidates
+                if is_prim_path_valid(f"/World/envs/env_0/Robot/{candidate}")
+            ),
+            self.robot_depth_camera_fallback_parent_link_name,
+        )
+        fallback_parent_prim = f"/World/envs/env_0/Robot/{fallback_parent_link_name}"
         fallback_mount_used = False
-        if is_prim_path_valid(direct_optical_frame_prim):
+        if force_r1_upper_body_mount:
+            r1_parent_prim = f"/World/envs/env_0/Robot/{self.robot_depth_camera_r1_parent_link_name}"
+            if not is_prim_path_valid(r1_parent_prim):
+                raise RuntimeError(
+                    f"R1 depth-camera parent prim does not exist: {r1_parent_prim}"
+                )
+            camera_mount_path = (
+                f"/World/envs/env_.*/Robot/{self.robot_depth_camera_r1_parent_link_name}"
+            )
+            camera_offset_pos, camera_offset_rot = self.robot_depth_camera_r1_mount_presets[camera_location]
+            fallback_mount_used = True
+        elif is_prim_path_valid(direct_optical_frame_prim):
             camera_mount_path = f"/World/envs/env_.*/Robot/{self.robot_depth_camera_link_name}"
             camera_offset_pos = (0.0, 0.0, 0.0)
             camera_offset_rot = (1.0, 0.0, 0.0, 0.0)
@@ -530,7 +586,7 @@ class IsaacSim(BaseSimulator):
             camera_offset_pos = (0.0, 0.0, 0.0)
             camera_offset_rot = (1.0, 0.0, 0.0, 0.0)
         elif is_prim_path_valid(fallback_parent_prim):
-            camera_mount_path = f"/World/envs/env_.*/Robot/{self.robot_depth_camera_fallback_parent_link_name}"
+            camera_mount_path = f"/World/envs/env_.*/Robot/{fallback_parent_link_name}"
             camera_offset_pos = self.robot_depth_camera_fallback_pos
             camera_offset_rot = self.robot_depth_camera_fallback_rot
             fallback_mount_used = True
@@ -551,10 +607,11 @@ class IsaacSim(BaseSimulator):
             data_types=["distance_to_image_plane"],
             update_latest_camera_pose=True,
             spawn=sim_utils.PinholeCameraCfg(
-                focal_length=24.0,
+                focal_length=ROBOT_DEPTH_FOCAL_LENGTH,
                 focus_distance=400.0,
-                horizontal_aperture=20.955,
-                clipping_range=(0.05, 20.0),
+                horizontal_aperture=ROBOT_DEPTH_HORIZONTAL_APERTURE,
+                vertical_aperture=ROBOT_DEPTH_VERTICAL_APERTURE,
+                clipping_range=(ROBOT_DEPTH_MIN_M, ROBOT_DEPTH_MAX_M),
             ),
             offset=camera_cfg_cls.OffsetCfg(
                 pos=camera_offset_pos,
@@ -569,9 +626,10 @@ class IsaacSim(BaseSimulator):
         self.scene.sensors["robot_depth_camera"] = self.robot_depth_camera
         if fallback_mount_used:
             logger.info(
-                "IsaacSim: registered robot-mounted depth camera sensor using fallback torso mount at "
+                "IsaacSim: registered robot-mounted depth camera sensor using runtime body mount at "
                 f"{camera_cfg.prim_path} with offset pos={camera_offset_pos}, rot={camera_offset_rot}, "
-                f"resolution={self.robot_depth_camera_resolution}, tiled={self.robot_depth_camera_use_tiled}"
+                f"robot_type={robot_type}, location={camera_location}, resolution={self.robot_depth_camera_resolution}, "
+                f"tiled={self.robot_depth_camera_use_tiled}"
             )
         else:
             logger.info(
@@ -579,6 +637,62 @@ class IsaacSim(BaseSimulator):
                 f"{camera_cfg.prim_path} from URDF link '{self.robot_depth_camera_link_name}' with "
                 f"resolution={self.robot_depth_camera_resolution}, tiled={self.robot_depth_camera_use_tiled}"
             )
+
+    def _randomize_robot_depth_camera_positions(self) -> None:
+        """Apply one fixed local XYZ camera offset to each environment."""
+        noise_m = float(self.simulator_config.robot_depth_camera_position_noise_m)
+        if noise_m < 0.0:
+            raise ValueError(
+                "robot_depth_camera_position_noise_m must be non-negative, "
+                f"got {noise_m}."
+            )
+        if self.robot_depth_camera is None or noise_m == 0.0:
+            return
+
+        import omni.usd  # noqa: PLC0415
+        from pxr import Gf, UsdGeom  # noqa: PLC0415
+
+        stage = omni.usd.get_context().get_stage()
+        offsets = (torch.rand((self.num_envs, 3), device="cpu") * 2.0 - 1.0) * noise_m
+        self.robot_depth_camera_position_offsets_m = offsets.tolist()
+        prim_template = str(self.robot_depth_camera.cfg.prim_path)
+
+        for env_id, offset in enumerate(self.robot_depth_camera_position_offsets_m):
+            camera_prim_path = prim_template.replace("env_.*", f"env_{env_id}")
+            camera_prim = stage.GetPrimAtPath(camera_prim_path)
+            if not camera_prim.IsValid():
+                raise RuntimeError(f"Cannot randomize missing depth-camera prim: {camera_prim_path}")
+
+            xformable = UsdGeom.Xformable(camera_prim)
+            translate_op = next(
+                (
+                    op
+                    for op in xformable.GetOrderedXformOps()
+                    if op.GetOpType() == UsdGeom.XformOp.TypeTranslate
+                ),
+                None,
+            )
+            if translate_op is None:
+                raise RuntimeError(
+                    "Depth-camera prim has no translate xform op required for mount randomization: "
+                    f"{camera_prim_path}"
+                )
+
+            nominal_position = translate_op.Get()
+            if nominal_position is None:
+                nominal_position = Gf.Vec3d(0.0, 0.0, 0.0)
+            translate_op.Set(
+                type(nominal_position)(
+                    float(nominal_position[0]) + offset[0],
+                    float(nominal_position[1]) + offset[1],
+                    float(nominal_position[2]) + offset[2],
+                )
+            )
+
+        logger.info(
+            "Applied fixed per-environment depth-camera position randomization: "
+            f"xyz_uniform_range_m=[{-noise_m}, {noise_m}], envs={self.num_envs}."
+        )
 
     def get_robot_depth_frame(self, env_id: int) -> torch.Tensor:
         if self.robot_depth_camera is None:
@@ -873,6 +987,7 @@ class IsaacSim(BaseSimulator):
     def prepare_sim(self):
         # Wait until play so rigid object collections are initialized
         register_objects(self)
+        self._randomize_robot_depth_camera_positions()
 
         # Create before state adapter, needs a reference
         self.robot_root_states = RootStatesProxy(self._robot.data.root_state_w)  # (num_envs, 13)

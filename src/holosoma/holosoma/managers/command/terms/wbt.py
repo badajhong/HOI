@@ -1370,7 +1370,18 @@ class MotionCommand(CommandTermBase):
         if torch.any(clip_lens < 2):
             raise ValueError("Each motion clip must have at least 2 frames for safe stepping.")
 
-        sampled_clip_ids = self._sample_clip_ids_for_reset(num_resets, num_clips)
+        eval_clip_sweep_enabled = bool(
+            getattr(self, "_eval_clip_sweep_enabled", False) and self._env.is_evaluating
+        )
+        if eval_clip_sweep_enabled:
+            if not hasattr(self, "_eval_clip_sweep_cursor"):
+                self._eval_clip_sweep_cursor = torch.zeros(
+                    self.num_envs, dtype=torch.long, device=self.device
+                )
+            sampled_clip_ids = self._eval_clip_sweep_cursor[env_ids] % num_clips
+            self._eval_clip_sweep_cursor[env_ids] += 1
+        else:
+            sampled_clip_ids = self._sample_clip_ids_for_reset(num_resets, num_clips)
 
         sampled_starts = clip_starts[sampled_clip_ids]
         sampled_ends = clip_ends[sampled_clip_ids]
@@ -1394,7 +1405,11 @@ class MotionCommand(CommandTermBase):
         adaptive_prob = self.adaptive_timestep_sampling_ratio if adaptive_available else 0.0
         sampling_rand = torch.rand(num_resets, device=self.device)
 
-        start_zero_mask = sampling_rand < start_zero_prob
+        start_zero_mask = (
+            torch.ones(num_resets, device=self.device, dtype=torch.bool)
+            if eval_clip_sweep_enabled
+            else sampling_rand < start_zero_prob
+        )
         if start_zero_mask.any():
             subset = self.time_steps[env_ids]
             subset[start_zero_mask] = sampled_starts[start_zero_mask]
@@ -1625,6 +1640,13 @@ class MotionCommand(CommandTermBase):
             object_states = torch.cat([target_obj_pos, obj_ori, obj_lin_vel, obj_ang_vel], dim=-1)
             # 4.3 set object states in simulator (per-clip object selection when available)
             self.set_simulator_object_states(env_ids, object_states, write_updates=False)
+
+    def enable_eval_clip_sweep(self) -> None:
+        """Evaluate every loaded clip sequentially from its first frame."""
+        self._eval_clip_sweep_enabled = True
+        self._eval_clip_sweep_cursor = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
 
     def step(self) -> None:
         """called in _update_tasks_callback of the environment. (after compute_reward, before compute_observations)"""

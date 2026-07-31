@@ -30,6 +30,13 @@ from holosoma.simulator.shared.object_registry import ObjectType
 from holosoma.simulator.shared.virtual_gantry import create_virtual_gantry
 from holosoma.simulator.types import ActorIndices, ActorNames, ActorPoses, ActorStates, EnvIds
 from holosoma.utils.adapters import mujoco_draw_adapter
+from holosoma.utils.depth import (
+    ROBOT_DEPTH_MAX_M,
+    ROBOT_DEPTH_MIN_M,
+    ROBOT_DEPTH_RAW_RESOLUTION_WH,
+    ROBOT_DEPTH_VERTICAL_FOV_DEG,
+    preprocess_robot_depth_tensor,
+)
 
 
 class MuJoCoScene:
@@ -143,16 +150,16 @@ class MuJoCo(BaseSimulator):
         self.viewer: mujoco.viewer.Handle | None = None
 
         # Robot-mounted depth rendering used by sim2sim residual policies.
-        self.robot_depth_camera_resolution = (80, 60)
+        self.robot_depth_camera_resolution = ROBOT_DEPTH_RAW_RESOLUTION_WH
         self.robot_depth_camera_fixed_name = "realsense_d435_depth"
         self.robot_depth_camera_fallback_parent_link_name = "torso_link"
         self.robot_depth_camera_fallback_pos = np.asarray((0.075, 0.0, 0.42), dtype=np.float64)
         self.robot_depth_camera_fallback_forward = np.asarray((np.sqrt(0.5), 0.0, -np.sqrt(0.5)), dtype=np.float64)
         self.robot_depth_camera_fallback_up = np.asarray((np.sqrt(0.5), 0.0, np.sqrt(0.5)), dtype=np.float64)
         self.robot_depth_camera_fallback_distance = 1.0
-        self.robot_depth_camera_vertical_fov = 36.3
-        self.robot_depth_camera_near_clip = 0.05
-        self.robot_depth_camera_far_clip = 20.0
+        self.robot_depth_camera_vertical_fov = ROBOT_DEPTH_VERTICAL_FOV_DEG
+        self.robot_depth_camera_near_clip = ROBOT_DEPTH_MIN_M
+        self.robot_depth_camera_far_clip = ROBOT_DEPTH_MAX_M
         self._robot_depth_renderer: mujoco.Renderer | None = None
         self._robot_depth_camera: mujoco.MjvCamera | None = None
         self._robot_depth_fixed_camera_name: str | None = None
@@ -1528,7 +1535,11 @@ class MuJoCo(BaseSimulator):
         depth_np = np.asarray(depth_frame, dtype=np.float32)
         depth_np = np.nan_to_num(depth_np, nan=0.0, posinf=0.0, neginf=0.0)
         depth_np[depth_np >= self.robot_depth_camera_far_clip * 0.999] = 0.0
-        return torch.from_numpy(np.ascontiguousarray(depth_np)).to(device=self.sim_device, dtype=torch.float32)
+        depth_tensor = torch.from_numpy(np.ascontiguousarray(depth_np)).to(
+            device=self.sim_device,
+            dtype=torch.float32,
+        )
+        return preprocess_robot_depth_tensor(depth_tensor)
 
     def render(self, sync_frame_time: bool = True) -> None:
         """Render simulation to the viewer

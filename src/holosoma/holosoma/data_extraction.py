@@ -1,14 +1,3 @@
-# python src/holosoma/holosoma/ir_di_pro_agent.py \
-#   --checkpoint=/home/rllab/haechan/holosoma/logs/WholeBodyTracking/teacher_suitcase/model_13000.pt \
-#   --surface-feature-body-source=all \
-#   --training.num-envs=16 \
-#   --num-eval-episodes=80 \
-#   --max-eval-steps=200 \
-#   --save-camera-images=False \
-#   --logger.base-dir "/home/rllab/haechan/holosoma/logs" \
-#   --training.project "ir_di_pro_suitcase" \
-#   --headless=True
-
 from __future__ import annotations
 
 import copy
@@ -30,6 +19,15 @@ from pydantic.dataclasses import dataclass
 from holosoma.agents.base_algo.base_algo import BaseAlgo
 from holosoma.config_types.experiment import ExperimentConfig
 from holosoma.utils.config_utils import CONFIG_NAME
+from holosoma.utils.depth import (
+    ROBOT_DEPTH_MAX_M,
+    ROBOT_DEPTH_MIN_M,
+    ROBOT_DEPTH_HORIZONTAL_FOV_DEG,
+    ROBOT_DEPTH_OUTPUT_RESOLUTION_WH,
+    ROBOT_DEPTH_RAW_RESOLUTION_WH,
+    ROBOT_DEPTH_VERTICAL_FOV_DEG,
+    preprocess_robot_depth_array,
+)
 from holosoma.utils.eval_utils import (
     init_eval_logging,
     load_checkpoint,
@@ -48,20 +46,34 @@ from holosoma.utils.tyro_utils import TYRO_CONIFG
 
 ORIGINAL_G1_URDF_FILE = "g1/g1_29dof.urdf"
 ORIGINAL_G1_XML_FILE = "g1/g1_29dof.xml"
+DEFAULT_IR_CHECKPOINT = (
+    "/home/rllab/haechan/holosoma/logs/teacher/"
+    "20260727_070811-r1_teacher-locomotion/model_30000.pt"
+)
+DEFAULT_IR_NUM_ENVS = 1
+DEFAULT_IR_LOG_BASE_DIR = "/home/rllab/haechan/holosoma/logs"
+DEFAULT_IR_PROJECT = "ir_di_pro_largebox"
 REALSENSE_CAMERA_BODY_LINK = "realsense_d435_link"
 DEPTH_CAMERA_FRAME_LINK = "realsense_d435_depth_optical_frame"
 DEPTH_CAMERA_PRIM_NAME = "realsense_d435_depth"
 DEPTH_CAMERA_FALLBACK_PARENT_LINK = "torso_link"
-DEPTH_CAMERA_FALLBACK_POS = (0.075, 0.0, 0.42)
-DEPTH_CAMERA_FALLBACK_ROT_ROS_WXYZ = (
-    0.2705950505259776,
-    -0.6532817309240402,
-    0.6532827248883822,
-    -0.27059745016194003,
-)
+DEPTH_CAMERA_FALLBACK_PARENT_CANDIDATES = ("torso_link", "waist_yaw_link", "pelvis_link", "pelvis")
+DEPTH_CAMERA_FALLBACK_POS = (0.085, 0.0, 0.42)
+R1_DEPTH_CAMERA_PARENT_LINK = "waist_yaw_link"
+R1_DEPTH_CAMERA_MOUNT_PRESETS = {
+    "cam1": (
+        (0.085, 0.0, 0.42),
+        (0.2126281001816864, -0.6743797093191588, 0.6743809086432211, -0.212630404056609),
+    ),
+    "cam2": (
+        (0.075, 0.0, 0.21),
+        (0.7071067811865476, 0.0, 0.7071067811865475, 0.0),
+    ),
+}
+DEPTH_CAMERA_FALLBACK_ROT_ROS_WXYZ = R1_DEPTH_CAMERA_MOUNT_PRESETS["cam1"][1]
 # IsaacSim camera config uses (width, height). Saved depth_window tensors use
 # [window, height, width], so telemetry stores both conventions explicitly.
-DEPTH_RESOLUTION = (80, 60)
+DEPTH_RESOLUTION = ROBOT_DEPTH_OUTPUT_RESOLUTION_WH
 IR_SURFACE_FEATURE_COMPONENT_NAMES = (
     "phi",
     "grad_phi_x",
@@ -77,10 +89,11 @@ IR_SURFACE_FEATURE_COMPONENT_NAMES = (
     "v_tan_y",
     "v_tan_z",
 )
-IR_SURFACE_FEATURE_BODY_SOURCE_CHOICES = ("pelvis", "hands", "all")
-IR_SURFACE_FEATURE_BODY_SOURCE_BASE_CHOICES = ("pelvis", "hands")
-IR_SURFACE_FEATURE_BODY_SOURCE_ALL_RESOLVED = ("hands", "pelvis")
+IR_SURFACE_FEATURE_BODY_SOURCE_CHOICES = ("pelvis", "hands", "feet", "all")
+IR_SURFACE_FEATURE_BODY_SOURCE_BASE_CHOICES = ("pelvis", "hands", "feet")
+IR_SURFACE_FEATURE_BODY_SOURCE_ALL_RESOLVED = ("hands", "pelvis", "feet")
 IR_HAND_BODY_LABELS = ("left_hand", "right_hand")
+IR_FOOT_BODY_LABELS = ("left_foot", "right_foot")
 IR_LEFT_HAND_BODY_NAME_CANDIDATES = (
     "left_hand_link",
     "left_wrist_yaw_link",
@@ -93,6 +106,20 @@ IR_RIGHT_HAND_BODY_NAME_CANDIDATES = (
     "right_wrist_pitch_link",
     "right_wrist_roll_link",
 )
+IR_FOOT_BODY_NAME_CANDIDATES_BY_ROBOT_TYPE = {
+    "g1": {
+        "left": ("left_foot_contact_point", "left_ankle_roll_link", "left_foot_link"),
+        "right": ("right_foot_contact_point", "right_ankle_roll_link", "right_foot_link"),
+    },
+    "r1": {
+        "left": ("left_ankle_roll_link", "left_foot_front_inner_link", "left_foot_front_outer_link"),
+        "right": ("right_ankle_roll_link", "right_foot_front_inner_link", "right_foot_front_outer_link"),
+    },
+}
+IR_PELVIS_BODY_NAME_CANDIDATES_BY_ROBOT_TYPE = {
+    "g1": ("pelvis", "pelvis_link"),
+    "r1": ("pelvis_link", "pelvis"),
+}
 PROPRIOCEPTION_COMPONENT_NAMES = (
     "base_ang_vel",
     "dof_pos",
@@ -102,7 +129,7 @@ PROPRIOCEPTION_COMPONENT_NAMES = (
 
 @dataclass(frozen=True)
 class IRCheckpointConfig:
-    checkpoint: str | None = None
+    checkpoint: str | None = DEFAULT_IR_CHECKPOINT
     """Path to a local checkpoint file, or W&B URI in the format `wandb://<entity>/<project>/<run_id>[/<checkpoint_name>]`."""
 
     max_eval_steps: int | None = None
@@ -111,17 +138,23 @@ class IRCheckpointConfig:
     num_eval_episodes: int | None = None
     """Number of episodes to collect per environment before ending the IR run. None means keep running until manually stopped."""
 
-    headless: bool = False
+    evaluate_all_motions: bool = True
+    """Evaluate every motion clip once per environment, sequentially from its first frame."""
+
+    all_motions_iterations: int = 10
+    """Number of complete all-motion sweeps to collect per environment."""
+
+    headless: bool = True
     """Run IR telemetry collection without showing the simulator window."""
 
     surface_feature_log_env_ids: tuple[int, ...] = (0,)
     """Environment ids to print for live IR ir_t features during playback."""
 
-    surface_feature_body_source: str = "pelvis"
-    """Surface-feature body source selection. Supported values: 'pelvis', 'hands', or 'all'."""
+    surface_feature_body_source: str = "all"
+    """Surface-feature body source selection. Supported values: 'pelvis', 'hands', 'feet', or 'all'."""
 
-    surface_feature_body_name: str = "pelvis"
-    """Rigid body name to use when `surface_feature_body_source` includes 'pelvis'."""
+    surface_feature_body_name: str | None = None
+    """Optional pelvis rigid-body override; otherwise it is resolved from robot_type."""
 
     left_hand_body_name: str | None = None
     """Optional override for the left-hand rigid body when `surface_feature_body_source` includes 'hands'."""
@@ -129,11 +162,29 @@ class IRCheckpointConfig:
     right_hand_body_name: str | None = None
     """Optional override for the right-hand rigid body when `surface_feature_body_source` includes 'hands'."""
 
+    left_foot_body_name: str | None = None
+    """Optional override for the left-foot rigid body when `surface_feature_body_source` includes 'feet'."""
+
+    right_foot_body_name: str | None = None
+    """Optional override for the right-foot rigid body when `surface_feature_body_source` includes 'feet'."""
+
     save_camera_images: bool = False
     """Save per-step depth camera preview images under the IR telemetry folder."""
 
-    show_camera_marker: bool = True
-    """Deprecated. Camera marker visualization was removed from ir_agent.py and this flag has no effect."""
+    show_camera_marker: bool = False
+    """Show RGB local axes and a red forward marker at each live IsaacSim depth-camera prim."""
+
+    depth_camera_location: str = "cam1"
+    """Depth-camera mount preset: 'cam1' for head or 'cam2' for the forward-facing upper body."""
+
+    camera_position_noise_m: float = 0.02
+    """Per-environment camera-mount XYZ position noise half-range in meters."""
+
+    depth_pixel_noise_max_std_m: float = 0.005
+    """Gaussian depth-noise standard deviation at the 5 m far limit; scales quadratically with distance."""
+
+    depth_dropout_probability: float = 0.001
+    """Independent probability that a valid depth pixel is replaced by zero."""
 
 
 def _normalize_bool_value(value: str) -> bool:
@@ -147,7 +198,12 @@ def _normalize_bool_value(value: str) -> bool:
 
 def _normalize_ir_cli_bool_equals_args(args: list[str]) -> list[str]:
     """Allow `--flag=True/False` spellings for Tyro bool flags used by IR CLI."""
-    bool_flags = ("--headless", "--save-camera-images", "--show-camera-marker")
+    bool_flags = (
+        "--evaluate-all-motions",
+        "--headless",
+        "--save-camera-images",
+        "--show-camera-marker",
+    )
     normalized_args: list[str] = []
     for arg in args:
         rewritten = False
@@ -298,6 +354,7 @@ def _canonical_surface_feature_body_source(body_sources: tuple[str, ...]) -> str
 
 def _parse_surface_feature_body_sources(body_source: str) -> tuple[str, ...]:
     normalized = body_source.strip().lower()
+    normalized = {"foot": "feet", "foots": "feet"}.get(normalized, normalized)
     if not normalized:
         raise ValueError("surface_feature_body_source must not be empty.")
 
@@ -307,7 +364,11 @@ def _parse_surface_feature_body_sources(body_source: str) -> tuple[str, ...]:
         return IR_SURFACE_FEATURE_BODY_SOURCE_ALL_RESOLVED
 
     # Backward-compatible alias for older comma-separated combinations such as "hands,pelvis".
-    parts = [part.strip() for part in normalized.split(",") if part.strip()]
+    parts = [
+        {"foot": "feet", "foots": "feet"}.get(part.strip(), part.strip())
+        for part in normalized.split(",")
+        if part.strip()
+    ]
     invalid_parts = [part for part in parts if part not in IR_SURFACE_FEATURE_BODY_SOURCE_BASE_CHOICES]
     if invalid_parts or not parts:
         raise ValueError(
@@ -333,6 +394,12 @@ def _ir_t_component_names_for_body_source(body_source: str) -> tuple[str, ...]:
         return tuple(
             f"{body_label}_{component_name}"
             for body_label in IR_HAND_BODY_LABELS
+            for component_name in IR_SURFACE_FEATURE_COMPONENT_NAMES
+        )
+    if body_source == "feet":
+        return tuple(
+            f"{body_label}_{component_name}"
+            for body_label in IR_FOOT_BODY_LABELS
             for component_name in IR_SURFACE_FEATURE_COMPONENT_NAMES
         )
     raise ValueError(
@@ -373,6 +440,18 @@ def _resolve_surface_feature_body_name(
     raise RuntimeError(
         f"Could not auto-resolve the {body_label} body name. Tried {list(candidate_names)} against available bodies: "
         f"{available_body_names}"
+    )
+
+
+def _robot_family(robot_type: str) -> str:
+    normalized = robot_type.lower()
+    if normalized.startswith("r1"):
+        return "r1"
+    if normalized.startswith("g1"):
+        return "g1"
+    raise ValueError(
+        f"Unsupported robot_type '{robot_type}' for automatic foot-body resolution. "
+        "Provide --left-foot-body-name and --right-foot-body-name explicitly."
     )
 
 
@@ -422,17 +501,33 @@ def _joint_origin_xyz_rpy(joint: ET.Element) -> tuple[tuple[float, float, float]
     return xyz, rpy
 
 
-def _fallback_depth_mount_from_simulator_defaults(urdf_path: Path) -> DepthCameraMountSpec:
+def _fallback_depth_mount_from_simulator_defaults(
+    urdf_path: Path,
+    camera_location: str,
+) -> DepthCameraMountSpec:
+    robot_root = ET.parse(urdf_path).getroot()
+    available_links = {link.get("name") for link in robot_root.findall("link")}
+    is_r1 = R1_DEPTH_CAMERA_PARENT_LINK in available_links and "pelvis_link" in available_links
+    if is_r1:
+        fallback_parent = R1_DEPTH_CAMERA_PARENT_LINK
+        fallback_position, fallback_rotation = R1_DEPTH_CAMERA_MOUNT_PRESETS[camera_location]
+    else:
+        fallback_parent = next(
+            (candidate for candidate in DEPTH_CAMERA_FALLBACK_PARENT_CANDIDATES if candidate in available_links),
+            DEPTH_CAMERA_FALLBACK_PARENT_LINK,
+        )
+        fallback_position = DEPTH_CAMERA_FALLBACK_POS
+        fallback_rotation = DEPTH_CAMERA_FALLBACK_ROT_ROS_WXYZ
     return DepthCameraMountSpec(
         source_urdf_path=str(urdf_path),
         mount_mode="simulator_fallback_parent",
-        scene_parent_link=DEPTH_CAMERA_FALLBACK_PARENT_LINK,
-        parent_link=DEPTH_CAMERA_FALLBACK_PARENT_LINK,
-        camera_body_link=DEPTH_CAMERA_FALLBACK_PARENT_LINK,
+        scene_parent_link=fallback_parent,
+        parent_link=fallback_parent,
+        camera_body_link=fallback_parent,
         optical_frame_link=DEPTH_CAMERA_FRAME_LINK,
-        translation=DEPTH_CAMERA_FALLBACK_POS,
-        quaternion_ros_wxyz=DEPTH_CAMERA_FALLBACK_ROT_ROS_WXYZ,
-        camera_body_xyz=DEPTH_CAMERA_FALLBACK_POS,
+        translation=fallback_position,
+        quaternion_ros_wxyz=fallback_rotation,
+        camera_body_xyz=fallback_position,
         camera_body_rpy=(0.0, 0.0, 0.0),
         optical_frame_xyz=(0.0, 0.0, 0.0),
         optical_frame_rpy=(0.0, 0.0, 0.0),
@@ -451,7 +546,8 @@ def _resolve_depth_mount_spec(tyro_config: ExperimentConfig) -> DepthCameraMount
             "Current robot URDF has no dedicated RealSense links. "
             "IR depth camera will use IsaacSim's fallback torso mount."
         )
-        return _fallback_depth_mount_from_simulator_defaults(urdf_path)
+        camera_location = str(tyro_config.simulator.config.robot_depth_camera_location).lower()
+        return _fallback_depth_mount_from_simulator_defaults(urdf_path, camera_location)
 
     camera_body_parent = camera_body_joint.find("parent")
     optical_parent = optical_frame_joint.find("parent")
@@ -518,12 +614,24 @@ class IRTelemetryRecorder:
         self.surface_feature_body_name = ir_cfg.surface_feature_body_name
         self.left_hand_body_name = ir_cfg.left_hand_body_name
         self.right_hand_body_name = ir_cfg.right_hand_body_name
+        self.left_foot_body_name = ir_cfg.left_foot_body_name
+        self.right_foot_body_name = ir_cfg.right_foot_body_name
+        robot_asset_cfg = getattr(self.env.robot_config, "asset", None)
+        self.robot_type = str(getattr(robot_asset_cfg, "robot_type", "")).lower()
         self.max_eval_steps = ir_cfg.max_eval_steps
         self.num_eval_episodes = ir_cfg.num_eval_episodes
+        self.evaluate_all_motions = ir_cfg.evaluate_all_motions
+        self.all_motions_iterations = ir_cfg.all_motions_iterations
+        self.num_motion_clips: int | None = None
         self.depth_resolution = DEPTH_RESOLUTION
         self.depth_camera_mount = depth_camera_mount
         self.save_camera_images = ir_cfg.save_camera_images
         self.show_camera_marker = ir_cfg.show_camera_marker
+        self.depth_camera_location = ir_cfg.depth_camera_location.strip().lower()
+        self.camera_position_noise_m = ir_cfg.camera_position_noise_m
+        self._camera_position_offsets_m: list[list[float]] = []
+        self.depth_pixel_noise_max_std_m = ir_cfg.depth_pixel_noise_max_std_m
+        self.depth_dropout_probability = ir_cfg.depth_dropout_probability
         self.ir_t_mode = _ir_t_mode_for_body_sources(self.surface_feature_body_sources)
         self.ir_t_component_names = list(_ir_t_component_names_for_body_sources(self.surface_feature_body_sources))
 
@@ -531,8 +639,10 @@ class IRTelemetryRecorder:
         for body_source in self.surface_feature_body_sources:
             if body_source == "pelvis":
                 body_labels.append("pelvis")
-            else:
+            elif body_source == "hands":
                 body_labels.extend(IR_HAND_BODY_LABELS)
+            else:
+                body_labels.extend(IR_FOOT_BODY_LABELS)
         self._surface_feature_body_labels = tuple(body_labels)
         self._surface_feature_body_names: tuple[str, ...] = ()
         self._surface_feature_body_indices: tuple[int, ...] = ()
@@ -573,36 +683,56 @@ class IRTelemetryRecorder:
 
         for body_source in self.surface_feature_body_sources:
             if body_source == "pelvis":
-                if self.surface_feature_body_name not in available_body_names:
-                    raise RuntimeError(
-                        f"Configured surface feature body '{self.surface_feature_body_name}' was not found in simulator body names: "
-                        f"{available_body_names}."
-                    )
-                resolved_body_names.append(self.surface_feature_body_name)
-                resolved_body_indices.append(available_body_names.index(self.surface_feature_body_name))
+                family = _robot_family(self.robot_type)
+                pelvis_body_name = _resolve_surface_feature_body_name(
+                    available_body_names=available_body_names,
+                    explicit_name=self.surface_feature_body_name,
+                    candidate_names=IR_PELVIS_BODY_NAME_CANDIDATES_BY_ROBOT_TYPE[family],
+                    body_label=f"pelvis ({self.robot_type})",
+                )
+                resolved_body_names.append(pelvis_body_name)
+                resolved_body_indices.append(available_body_names.index(pelvis_body_name))
                 continue
 
-            left_hand_body_name = _resolve_surface_feature_body_name(
-                available_body_names=available_body_names,
-                explicit_name=self.left_hand_body_name,
-                candidate_names=IR_LEFT_HAND_BODY_NAME_CANDIDATES,
-                body_label="left hand",
-            )
-            right_hand_body_name = _resolve_surface_feature_body_name(
-                available_body_names=available_body_names,
-                explicit_name=self.right_hand_body_name,
-                candidate_names=IR_RIGHT_HAND_BODY_NAME_CANDIDATES,
-                body_label="right hand",
-            )
-            if left_hand_body_name == right_hand_body_name:
+            if body_source == "hands":
+                left_body_name = _resolve_surface_feature_body_name(
+                    available_body_names=available_body_names,
+                    explicit_name=self.left_hand_body_name,
+                    candidate_names=IR_LEFT_HAND_BODY_NAME_CANDIDATES,
+                    body_label="left hand",
+                )
+                right_body_name = _resolve_surface_feature_body_name(
+                    available_body_names=available_body_names,
+                    explicit_name=self.right_hand_body_name,
+                    candidate_names=IR_RIGHT_HAND_BODY_NAME_CANDIDATES,
+                    body_label="right hand",
+                )
+                body_kind = "hand"
+            else:
+                family = _robot_family(self.robot_type)
+                candidates = IR_FOOT_BODY_NAME_CANDIDATES_BY_ROBOT_TYPE[family]
+                left_body_name = _resolve_surface_feature_body_name(
+                    available_body_names=available_body_names,
+                    explicit_name=self.left_foot_body_name,
+                    candidate_names=candidates["left"],
+                    body_label=f"left foot ({self.robot_type})",
+                )
+                right_body_name = _resolve_surface_feature_body_name(
+                    available_body_names=available_body_names,
+                    explicit_name=self.right_foot_body_name,
+                    candidate_names=candidates["right"],
+                    body_label=f"right foot ({self.robot_type})",
+                )
+                body_kind = "foot"
+
+            if left_body_name == right_body_name:
                 raise RuntimeError(
-                    f"Left and right hand body names resolved to the same body '{left_hand_body_name}'. "
-                    "Please provide explicit --left-hand-body-name and --right-hand-body-name values."
+                    f"Left and right {body_kind} body names resolved to the same body '{left_body_name}'."
                 )
 
-            resolved_body_names.extend((left_hand_body_name, right_hand_body_name))
+            resolved_body_names.extend((left_body_name, right_body_name))
             resolved_body_indices.extend(
-                (available_body_names.index(left_hand_body_name), available_body_names.index(right_hand_body_name))
+                (available_body_names.index(left_body_name), available_body_names.index(right_body_name))
             )
 
         return tuple(resolved_body_names), tuple(resolved_body_indices)
@@ -639,9 +769,12 @@ class IRTelemetryRecorder:
         for body_source in self.surface_feature_body_sources:
             if body_source == "pelvis":
                 ir_t_parts.append(body_feature_batches["pelvis"]["ir_t"])
-                continue
-            ir_t_parts.append(body_feature_batches["left_hand"]["ir_t"])
-            ir_t_parts.append(body_feature_batches["right_hand"]["ir_t"])
+            elif body_source == "hands":
+                ir_t_parts.append(body_feature_batches["left_hand"]["ir_t"])
+                ir_t_parts.append(body_feature_batches["right_hand"]["ir_t"])
+            else:
+                ir_t_parts.append(body_feature_batches["left_foot"]["ir_t"])
+                ir_t_parts.append(body_feature_batches["right_foot"]["ir_t"])
 
         combined_ir_t = torch.cat(ir_t_parts, dim=-1)
         combined_features: dict[str, torch.Tensor] = {"ir_t": combined_ir_t}
@@ -800,6 +933,91 @@ class IRTelemetryRecorder:
         prim_template = self._camera_prim_path_template()
         return re.sub(r"env_\.\*/", f"env_{env_id}/", prim_template)
 
+    def _create_camera_location_markers(self, stage) -> None:
+        """Attach RGB local axes and a red forward dart to each camera prim."""
+        from pxr import Gf, UsdGeom  # noqa: PLC0415
+
+        marker_paths: list[str] = []
+        for env_id in range(self.env.num_envs):
+            marker_path = f"{self._camera_prim_path(env_id)}/LocationMarker"
+            UsdGeom.Xform.Define(stage, marker_path)
+
+            origin = UsdGeom.Sphere.Define(stage, f"{marker_path}/Origin")
+            origin.GetRadiusAttr().Set(0.012)
+            origin.GetDisplayColorAttr().Set([Gf.Vec3f(1.0, 0.0, 0.0)])
+
+            axis_specs = (
+                ("RollX", Gf.Vec3f(1.0, 0.0, 0.0), Gf.Vec3f(0.0, 90.0, 0.0)),
+                ("PitchY", Gf.Vec3f(0.0, 1.0, 0.0), Gf.Vec3f(-90.0, 0.0, 0.0)),
+                ("YawZ", Gf.Vec3f(0.0, 0.25, 1.0), Gf.Vec3f(0.0, 0.0, 0.0)),
+            )
+            for axis_name, color, rotation_xyz in axis_specs:
+                axis = UsdGeom.Cylinder.Define(stage, f"{marker_path}/{axis_name}")
+                axis.GetRadiusAttr().Set(0.003)
+                axis.GetHeightAttr().Set(0.10)
+                axis.GetDisplayColorAttr().Set([color])
+                axis.AddRotateXYZOp().Set(rotation_xyz)
+
+            # USD cameras look along local -Z. Keep this dart and all axes
+            # inside the 0.07 m near clip to avoid contaminating depth.
+            dart = UsdGeom.Cone.Define(stage, f"{marker_path}/ViewDirection")
+            dart.GetRadiusAttr().Set(0.012)
+            dart.GetHeightAttr().Set(0.05)
+            dart.GetDisplayColorAttr().Set([Gf.Vec3f(1.0, 0.0, 0.0)])
+            dart.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, -0.025))
+            dart.AddRotateXYZOp().Set(Gf.Vec3f(180.0, 0.0, 0.0))
+            marker_paths.append(marker_path)
+        logger.info(
+            "Created IsaacSim depth-camera frame markers: "
+            f"X=red Y=green Z=blue forward_dart=red paths={marker_paths}"
+        )
+
+    def _randomize_camera_mount_positions(self, stage) -> None:
+        """Apply one fixed XYZ camera-mount offset per environment."""
+        from pxr import Gf, UsdGeom  # noqa: PLC0415
+
+        noise_m = float(self.camera_position_noise_m)
+        if noise_m < 0.0:
+            raise ValueError(f"camera_position_noise_m must be non-negative, got {noise_m}.")
+
+        offsets = (torch.rand((self.env.num_envs, 3), device="cpu") * 2.0 - 1.0) * noise_m
+        self._camera_position_offsets_m = offsets.tolist()
+
+        for env_id, offset in enumerate(self._camera_position_offsets_m):
+            camera_prim_path = self._camera_prim_path(env_id)
+            camera_prim = stage.GetPrimAtPath(camera_prim_path)
+            if not camera_prim.IsValid():
+                raise RuntimeError(f"Cannot randomize missing depth-camera prim: {camera_prim_path}")
+
+            xformable = UsdGeom.Xformable(camera_prim)
+            translate_op = next(
+                (
+                    op
+                    for op in xformable.GetOrderedXformOps()
+                    if op.GetOpType() == UsdGeom.XformOp.TypeTranslate
+                ),
+                None,
+            )
+            if translate_op is None:
+                raise RuntimeError(
+                    f"Depth-camera prim has no translate xform op required for mount randomization: {camera_prim_path}"
+                )
+
+            nominal_position = translate_op.Get()
+            if nominal_position is None:
+                nominal_position = Gf.Vec3d(0.0, 0.0, 0.0)
+            randomized_position = type(nominal_position)(
+                float(nominal_position[0]) + offset[0],
+                float(nominal_position[1]) + offset[1],
+                float(nominal_position[2]) + offset[2],
+            )
+            translate_op.Set(randomized_position)
+
+        logger.info(
+            "Applied per-environment depth-camera mount position randomization: "
+            f"xyz_uniform_range_m=[{-noise_m}, {noise_m}], envs={self.env.num_envs}."
+        )
+
     def _read_depth_frame(self, env_id: int) -> list[list[float]]:
         expected_hw = (self.depth_resolution[1], self.depth_resolution[0])
         depth_tensor = self.env.simulator.get_robot_depth_frame(env_id)
@@ -810,14 +1028,17 @@ class IRTelemetryRecorder:
 
         depth_array = _to_numpy_float32(depth_tensor)
         depth_array = np.squeeze(depth_array)
-        if depth_array.shape == (self.depth_resolution[0], self.depth_resolution[1]):
-            depth_array = depth_array.T
-        if depth_array.shape != expected_hw:
+        valid_shapes = {
+            expected_hw,
+            (ROBOT_DEPTH_RAW_RESOLUTION_WH[1], ROBOT_DEPTH_RAW_RESOLUTION_WH[0]),
+        }
+        if depth_array.shape not in valid_shapes:
             raise RuntimeError(
-                f"Unexpected depth frame shape {depth_array.shape} for env {env_id}; expected {expected_hw}."
+                f"Unexpected depth frame shape {depth_array.shape} for env {env_id}; expected one of {valid_shapes}."
             )
 
-        depth_array = np.nan_to_num(depth_array, nan=0.0, posinf=0.0, neginf=0.0)
+        depth_array = preprocess_robot_depth_array(depth_array)
+        depth_array = self._apply_depth_sensor_noise(depth_array)
         return depth_array.tolist()
 
     def _read_all_depth_frames(self) -> list[list[list[float]]]:
@@ -835,15 +1056,49 @@ class IRTelemetryRecorder:
                 continue
             depth_array = _to_numpy_float32(depth_tensor)
             depth_array = np.squeeze(depth_array)
-            if depth_array.shape == (self.depth_resolution[0], self.depth_resolution[1]):
-                depth_array = depth_array.T
-            if depth_array.shape != expected_hw:
+            valid_shapes = {
+                expected_hw,
+                (ROBOT_DEPTH_RAW_RESOLUTION_WH[1], ROBOT_DEPTH_RAW_RESOLUTION_WH[0]),
+            }
+            if depth_array.shape not in valid_shapes:
                 raise RuntimeError(
-                    f"Unexpected depth frame shape {depth_array.shape} for env {env_id}; expected {expected_hw}."
+                    f"Unexpected depth frame shape {depth_array.shape} for env {env_id}; expected one of {valid_shapes}."
                 )
-            depth_array = np.nan_to_num(depth_array, nan=0.0, posinf=0.0, neginf=0.0)
+            depth_array = preprocess_robot_depth_array(depth_array)
+            depth_array = self._apply_depth_sensor_noise(depth_array)
             results.append(depth_array.tolist())
         return results
+
+    def _apply_depth_sensor_noise(self, depth_array: np.ndarray) -> np.ndarray:
+        """Apply small range-dependent pixel noise and sparse dropout."""
+        max_std_m = float(self.depth_pixel_noise_max_std_m)
+        dropout_probability = float(self.depth_dropout_probability)
+        if max_std_m < 0.0:
+            raise ValueError(f"depth_pixel_noise_max_std_m must be non-negative, got {max_std_m}.")
+        if not 0.0 <= dropout_probability <= 1.0:
+            raise ValueError(
+                "depth_dropout_probability must be in [0, 1], "
+                f"got {dropout_probability}."
+            )
+
+        noisy_depth = np.asarray(depth_array, dtype=np.float32).copy()
+        valid = np.isfinite(noisy_depth) & (noisy_depth > 0.0)
+        if max_std_m > 0.0 and valid.any():
+            normalized_range = np.clip(noisy_depth / ROBOT_DEPTH_MAX_M, 0.0, 1.0)
+            pixel_std_m = max_std_m * np.square(normalized_range)
+            gaussian_noise = np.random.normal(size=noisy_depth.shape).astype(np.float32)
+            noisy_depth[valid] += gaussian_noise[valid] * pixel_std_m[valid]
+            noisy_depth[valid] = np.clip(
+                noisy_depth[valid],
+                ROBOT_DEPTH_MIN_M,
+                ROBOT_DEPTH_MAX_M,
+            )
+
+        if dropout_probability > 0.0 and valid.any():
+            dropout_mask = np.random.random(size=noisy_depth.shape) < dropout_probability
+            noisy_depth[valid & dropout_mask] = 0.0
+
+        return noisy_depth
 
     def _depth_frame_shape_hw(self) -> tuple[int, int]:
         return (int(self.depth_resolution[1]), int(self.depth_resolution[0]))
@@ -894,17 +1149,28 @@ class IRTelemetryRecorder:
         self._exported_episode_count += 1
 
     def _finalize_episode(self, env_id: int, reason: str, global_step: int | None) -> None:
+        first_entry = self._episode_entries[env_id][0] if self._episode_entries[env_id] else {}
+        episode_index = self._episode_indices[env_id]
         episode_data = {
             "env_id": env_id,
-            "episode_index": self._episode_indices[env_id],
+            "episode_index": episode_index,
             "num_steps": len(self._episode_entries[env_id]),
             "termination_reason": reason,
+            "motion_clip_id": first_entry.get("motion_clip_id"),
+            "motion_name": first_entry.get("motion_name"),
+            "motion_iteration": (
+                episode_index // self.num_motion_clips + 1
+                if self.evaluate_all_motions and self.num_motion_clips
+                else None
+            ),
+            "all_motions_iterations": self.all_motions_iterations,
             "max_eval_steps": self.max_eval_steps,
             "num_eval_episodes": self.num_eval_episodes,
             "num_eval_episodes_scope": "per_env",
             "surface_feature_body_source": self.surface_feature_body_source,
             "surface_feature_body_sources": list(self.surface_feature_body_sources),
             "surface_feature_body_names": self._surface_feature_body_name_map(),
+            "robot_type": self.robot_type,
             "surface_feature_body_name": self.surface_feature_body_name,
             "left_hand_body_name": self.left_hand_body_name,
             "right_hand_body_name": self.right_hand_body_name,
@@ -912,11 +1178,22 @@ class IRTelemetryRecorder:
             "ir_t_components": self.ir_t_component_names,
             "ir_t_dim": len(self.ir_t_component_names),
             "save_camera_images": self.save_camera_images,
+            "depth_camera_location": self.depth_camera_location,
+            "camera_position_noise_m": self.camera_position_noise_m,
+            "camera_position_offset_m": self._camera_position_offsets_m[env_id],
+            "depth_pixel_noise_max_std_m": self.depth_pixel_noise_max_std_m,
+            "depth_pixel_noise_model": "gaussian_quadratic_in_range",
+            "depth_dropout_probability": self.depth_dropout_probability,
             "telemetry_format": "hdf5",
             "telemetry_hdf5_file": self.hdf5_path.name,
             # Legacy field: camera config order is [width, height].
             "depth_resolution": list(self.depth_resolution),
             "depth_resolution_order": "width_height",
+            "depth_raw_resolution": list(ROBOT_DEPTH_RAW_RESOLUTION_WH),
+            "depth_min_m": ROBOT_DEPTH_MIN_M,
+            "depth_max_m": ROBOT_DEPTH_MAX_M,
+            "depth_horizontal_fov_deg": ROBOT_DEPTH_HORIZONTAL_FOV_DEG,
+            "depth_vertical_fov_deg": ROBOT_DEPTH_VERTICAL_FOV_DEG,
             "depth_frame_shape": list(self._depth_frame_shape_hw()),
             "depth_frame_shape_order": "height_width",
             "depth_window_shape": list(self._depth_window_shape_t_h_w()),
@@ -952,12 +1229,33 @@ class IRTelemetryRecorder:
             raise RuntimeError("motion_command not found; IR telemetry requires a motion command.")
         if not getattr(motion_command.motion, "has_object", False):
             raise RuntimeError("IR telemetry requires a motion with an object.")
+        if self.all_motions_iterations <= 0:
+            raise ValueError(
+                f"all_motions_iterations must be positive, got {self.all_motions_iterations}"
+            )
+        if not self.evaluate_all_motions and self.all_motions_iterations != 1:
+            raise ValueError("all_motions_iterations requires evaluate_all_motions=True.")
+        if self.evaluate_all_motions:
+            num_clips = len(motion_command.motion.clip_ranges)
+            if num_clips == 0:
+                raise RuntimeError("evaluate_all_motions requires at least one loaded motion clip.")
+            motion_command.enable_eval_clip_sweep()
+            self.num_motion_clips = num_clips
+            self.num_eval_episodes = num_clips * self.all_motions_iterations
+            logger.info(
+                f"Enabled deterministic all-motion evaluation: clips={num_clips}, "
+                f"iterations={self.all_motions_iterations}, "
+                f"episodes_per_env={self.num_eval_episodes}, each starting at the first frame."
+            )
         if self.max_eval_steps is not None and self.max_eval_steps <= 0:
             raise ValueError(f"max_eval_steps must be positive when provided, got {self.max_eval_steps}")
         if self.num_eval_episodes is not None and self.num_eval_episodes <= 0:
             raise ValueError(f"num_eval_episodes must be positive when provided, got {self.num_eval_episodes}")
 
         self._surface_feature_body_names, self._surface_feature_body_indices = self._resolve_surface_feature_bodies()
+        if "pelvis" in self._surface_feature_body_labels:
+            pelvis_index = self._surface_feature_body_labels.index("pelvis")
+            self.surface_feature_body_name = self._surface_feature_body_names[pelvis_index]
         try:
             self._surface_feature_computer = SurfaceFeatureComputer.from_object_config(
                 self.env.robot_config.object,
@@ -967,7 +1265,13 @@ class IRTelemetryRecorder:
             raise RuntimeError(f"Failed to initialize GPU IR surface feature computer: {exc}") from exc
 
         depth_camera = self._get_simulator_depth_camera()
-        self.depth_resolution = (int(depth_camera.cfg.width), int(depth_camera.cfg.height))
+        camera_resolution = (int(depth_camera.cfg.width), int(depth_camera.cfg.height))
+        if camera_resolution != ROBOT_DEPTH_RAW_RESOLUTION_WH:
+            raise RuntimeError(
+                f"Robot depth camera resolution is {camera_resolution}; expected raw "
+                f"{ROBOT_DEPTH_RAW_RESOLUTION_WH} before uniform sampling."
+            )
+        self.depth_resolution = ROBOT_DEPTH_OUTPUT_RESOLUTION_WH
 
         import omni.usd  # noqa: PLC0415
 
@@ -981,6 +1285,9 @@ class IRTelemetryRecorder:
             raise RuntimeError(
                 f"Simulator depth camera prims were not found on the live stage: {missing_prim_paths}"
             )
+        self._randomize_camera_mount_positions(stage)
+        if self.show_camera_marker:
+            self._create_camera_location_markers(stage)
         self.telemetry_dir.mkdir(parents=True, exist_ok=True)
         if self.save_camera_images:
             self.depth_image_dir.mkdir(parents=True, exist_ok=True)
@@ -1002,6 +1309,8 @@ class IRTelemetryRecorder:
             f"proprioception_dim={self._proprioception_dim()}, "
             f"max_eval_steps={self.max_eval_steps}, "
             f"num_eval_episodes_per_env={self.num_eval_episodes}, save_camera_images={self.save_camera_images}, "
+            f"depth_pixel_noise_max_std_m={self.depth_pixel_noise_max_std_m}, "
+            f"depth_dropout_probability={self.depth_dropout_probability}, "
             "telemetry_format=hdf5, "
             f"depth_resolution_wh={self.depth_resolution}, depth_window_shape_t_h_w={self._depth_window_shape_t_h_w()}."
         )
@@ -1018,8 +1327,6 @@ class IRTelemetryRecorder:
         logger.info(
             f"IR depth camera is managed by IsaacSim scene sensor at prim: {self._camera_parent_prim_path(0)}"
         )
-        if self.show_camera_marker:
-            logger.info("show_camera_marker is deprecated and ignored; marker visualization was removed from ir_agent.py.")
 
     def on_pre_eval_env_step(self, actor_state: dict) -> dict:
         if not self._surface_feature_body_indices or self._run_complete:
@@ -1048,6 +1355,8 @@ class IRTelemetryRecorder:
         dof_vel_all: list = proprioception_batches["dof_vel"].tolist()
         proprioception_all: list = proprioception_batches["proprioception"].tolist()
         all_depth_frames: list = self._read_all_depth_frames()
+        clip_ids = motion_command.clip_ids.detach().cpu().tolist()
+        clip_files = getattr(motion_command.motion, "clip_files", [])
 
         for env_id in range(self.env.num_envs):
             if self._env_episode_target_reached(env_id):
@@ -1079,6 +1388,12 @@ class IRTelemetryRecorder:
                 "episode_step": self._episode_steps[env_id],
                 "env_id": env_id,
                 "object_key": object_keys[env_id],
+                "motion_clip_id": int(clip_ids[env_id]),
+                "motion_name": (
+                    Path(str(clip_files[int(clip_ids[env_id])])).stem
+                    if int(clip_ids[env_id]) < len(clip_files)
+                    else f"clip_{int(clip_ids[env_id])}"
+                ),
                 "surface_feature_body_source": self.surface_feature_body_source,
                 "surface_feature_body_sources": list(self.surface_feature_body_sources),
                 "ir_t": current_ir_t,
@@ -1120,6 +1435,14 @@ class IRTelemetryRecorder:
                         body_features=body_feature_batches["right_hand"],
                         env_id=env_id,
                     )
+                if "feet" in self.surface_feature_body_sources:
+                    for foot_label in IR_FOOT_BODY_LABELS:
+                        foot_index = self._surface_feature_body_labels.index(foot_label)
+                        entry[f"{foot_label}_surface_features"] = self._surface_feature_entry_for_env(
+                            body_name=self._surface_feature_body_names[foot_index],
+                            body_features=body_feature_batches[foot_label],
+                            env_id=env_id,
+                        )
             self._episode_entries[env_id].append(entry)
 
             if env_id in self.log_env_ids:
@@ -1135,31 +1458,16 @@ class IRTelemetryRecorder:
                         f"v_tan={[round(float(v), 4) for v in body_features['v_tan'][env_id].tolist()]} "
                         f"depth_shape_t_h_w={self._depth_window_shape_t_h_w()}"
                     )
-                elif self.surface_feature_body_sources == ("hands",):
-                    left_hand_features = body_feature_batches["left_hand"]
-                    right_hand_features = body_feature_batches["right_hand"]
-                    logger.info(
-                        f"[ir_window] step={global_step} env={env_id} episode={self._episode_indices[env_id]} "
-                        f"episode_step={self._episode_steps[env_id]} object={object_keys[env_id]} "
-                        f"left_hand={self._surface_feature_body_names[0]} "
-                        f"left_phi={float(left_hand_features['phi'][env_id, 0].item()):.4f} "
-                        f"right_hand={self._surface_feature_body_names[1]} "
-                        f"right_phi={float(right_hand_features['phi'][env_id, 0].item()):.4f} "
-                        f"depth_shape_t_h_w={self._depth_window_shape_t_h_w()}"
-                    )
                 else:
-                    pelvis_features = body_feature_batches["pelvis"]
-                    left_hand_features = body_feature_batches["left_hand"]
-                    right_hand_features = body_feature_batches["right_hand"]
+                    body_phi_summary = " ".join(
+                        f"{body_label}={self._surface_feature_body_names[index]} "
+                        f"{body_label}_phi={float(body_feature_batches[body_label]['phi'][env_id, 0].item()):.4f}"
+                        for index, body_label in enumerate(self._surface_feature_body_labels)
+                    )
                     logger.info(
                         f"[ir_window] step={global_step} env={env_id} episode={self._episode_indices[env_id]} "
                         f"episode_step={self._episode_steps[env_id]} object={object_keys[env_id]} "
-                        f"pelvis={self.surface_feature_body_name} "
-                        f"pelvis_phi={float(pelvis_features['phi'][env_id, 0].item()):.4f} "
-                        f"left_hand={self._surface_feature_body_names[self._surface_feature_body_labels.index('left_hand')]} "
-                        f"left_phi={float(left_hand_features['phi'][env_id, 0].item()):.4f} "
-                        f"right_hand={self._surface_feature_body_names[self._surface_feature_body_labels.index('right_hand')]} "
-                        f"right_phi={float(right_hand_features['phi'][env_id, 0].item()):.4f} "
+                        f"{body_phi_summary} "
                         f"depth_shape_t_h_w={self._depth_window_shape_t_h_w()}"
                     )
 
@@ -1413,12 +1721,41 @@ def main() -> None:
     )
     saved_cfg, saved_wandb_path = load_saved_experiment_config(ir_cfg)
     eval_cfg = saved_cfg.get_eval_config()
+    eval_cfg = dataclasses.replace(
+        eval_cfg,
+        training=dataclasses.replace(
+            eval_cfg.training,
+            num_envs=DEFAULT_IR_NUM_ENVS,
+            project=DEFAULT_IR_PROJECT,
+            headless=False,
+        ),
+        logger=dataclasses.replace(
+            eval_cfg.logger,
+            base_dir=DEFAULT_IR_LOG_BASE_DIR,
+        ),
+    )
     overwritten_tyro_config = tyro.cli(
         ExperimentConfig,
         default=eval_cfg,
         args=remaining_args,
         description="Overriding config on top of what's loaded.",
         config=TYRO_CONIFG,
+    )
+    camera_location = ir_cfg.depth_camera_location.strip().lower()
+    if camera_location not in R1_DEPTH_CAMERA_MOUNT_PRESETS:
+        raise ValueError(
+            f"Unsupported --depth-camera-location='{ir_cfg.depth_camera_location}'. "
+            "Expected 'cam1' or 'cam2'."
+        )
+    overwritten_tyro_config = dataclasses.replace(
+        overwritten_tyro_config,
+        simulator=dataclasses.replace(
+            overwritten_tyro_config.simulator,
+            config=dataclasses.replace(
+                overwritten_tyro_config.simulator.config,
+                robot_depth_camera_location=camera_location,
+            ),
+        ),
     )
     if ir_cfg.headless and not overwritten_tyro_config.training.headless:
         overwritten_tyro_config = dataclasses.replace(
@@ -1430,6 +1767,11 @@ def main() -> None:
         f"Running IR evaluation with num_envs={overwritten_tyro_config.training.num_envs}, "
         f"headless={overwritten_tyro_config.training.headless}, "
         f"episode_max_eval_steps={ir_cfg.max_eval_steps}, num_eval_episodes_per_env={ir_cfg.num_eval_episodes}, "
+        f"all_motions_iterations={ir_cfg.all_motions_iterations}, "
+        f"depth_camera_location={camera_location}, "
+        f"camera_position_noise_m={ir_cfg.camera_position_noise_m}, "
+        f"depth_pixel_noise_max_std_m={ir_cfg.depth_pixel_noise_max_std_m}, "
+        f"depth_dropout_probability={ir_cfg.depth_dropout_probability}, "
         f"depth_resolution_wh={DEPTH_RESOLUTION}, "
         f"depth_frame_shape_hw={(DEPTH_RESOLUTION[1], DEPTH_RESOLUTION[0])}"
     )

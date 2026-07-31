@@ -537,6 +537,12 @@ class SimulatorInitConfig:
     renderer/camera initialization used for video recording.
     """
 
+    robot_depth_camera_location: str = "cam1"
+    """Robot depth-camera mount preset: ``cam1`` (head) or ``cam2`` (upper body)."""
+
+    robot_depth_camera_position_noise_m: float = 0.0
+    """Fixed per-environment XYZ camera-mount noise half-range in meters."""
+
     robot_mjcf_filter: MujocoXMLFilterCfg = field(default_factory=MujocoXMLFilterCfg)
     """MuJoCo-specific XML filtering configuration for robot MJCF files."""
 

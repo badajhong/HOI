@@ -26,14 +26,14 @@ from holosoma.utils.wandb import get_wandb
 
 DEFAULT_DATA_DIR = "/home/rllab/haechan/holosoma/logs/ir_di_pro_suitcase/20260508_ae_train/telemetry"
 DEFAULT_OUTPUT_ROOT = "/home/rllab/haechan/holosoma/logs/AE/"
-DEFAULT_CONDITION_TEXT = "Push the suitcase, and set it back down."
 DEFAULT_CLIP_MODEL_ID = "openai/clip-vit-base-patch32"
-IR_WINDOW_BODY_SOURCE_CHOICES = ("all", "hands", "pelvis")
+IR_WINDOW_BODY_SOURCE_CHOICES = ("all", "hands", "pelvis", "feet")
 
 
 @dataclass
 class EpisodePairedWindows:
     episode_id: str
+    task_name: str
     ir_windows: np.ndarray
     depth_windows: np.ndarray
     proprioception_windows: np.ndarray | None = None
@@ -249,6 +249,11 @@ def extract_episode_paired_windows(
                 if isinstance(metadata_json, bytes):
                     metadata_json = metadata_json.decode("utf-8")
                 payload = json.loads(str(metadata_json))
+                task_name = str(payload.get("motion_name") or "").strip()
+                if not task_name:
+                    raise ValueError(
+                        f"HDF5 group {group.name} is missing non-empty motion_name metadata required for conditioning."
+                    )
 
                 if dataset_has_proprioception is None:
                     dataset_has_proprioception = has_proprioception_window
@@ -319,6 +324,7 @@ def extract_episode_paired_windows(
                 episodes.append(
                     EpisodePairedWindows(
                         episode_id=group_name,
+                        task_name=task_name,
                         ir_windows=ir_windows.astype(np.float32, copy=False),
                         depth_windows=depth_windows.astype(np.float32, copy=False),
                         proprioception_windows=(
@@ -373,7 +379,7 @@ def flatten_episode_split(
     ir_window_shape: tuple[int, int],
     depth_window_shape: tuple[int, int, int],
     proprioception_window_shape: tuple[int, int] | None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, list[str]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray, list[str]]:
     selected = [episodes[index] for index in indices]
     episode_ids = [episode.episode_id for episode in selected]
     if not selected:
@@ -385,6 +391,7 @@ def flatten_episode_split(
                 if proprioception_window_shape is not None
                 else None
             ),
+            np.empty((0,), dtype=object),
             episode_ids,
         )
 
@@ -405,7 +412,11 @@ def flatten_episode_split(
             [episode.proprioception_windows for episode in selected if episode.proprioception_windows is not None],
             axis=0,
         ).astype(np.float32, copy=False)
-    return stacked_ir, stacked_depth, stacked_proprioception, episode_ids
+    stacked_task_names = np.concatenate(
+        [np.full((episode.ir_windows.shape[0],), episode.task_name, dtype=object) for episode in selected],
+        axis=0,
+    )
+    return stacked_ir, stacked_depth, stacked_proprioception, stacked_task_names, episode_ids
 
 @dataclass
 class RunPaths:
@@ -510,21 +521,31 @@ def _selected_component_indices_for_body_source(feature_dim: int, body_source: s
     if body_source == "all":
         return tuple(range(feature_dim))
     if body_source == "hands":
+        if feature_dim == 65:
+            # all-mode layout preserves legacy 39D first: hands(26), pelvis(13), feet(26).
+            return tuple(range(26))
         if feature_dim == 39:
             # all-mode ir_t layout is [left_hand(13), right_hand(13), pelvis(13)].
             return tuple(range(26))
         if feature_dim == 26:
             return tuple(range(26))
     if body_source == "pelvis":
+        if feature_dim == 65:
+            return tuple(range(26, 39))
         if feature_dim == 39:
             # all-mode ir_t layout is [left_hand(13), right_hand(13), pelvis(13)].
             return tuple(range(26, 39))
         if feature_dim == 13:
             return tuple(range(13))
+    if body_source == "feet":
+        if feature_dim == 65:
+            return tuple(range(39, 65))
+        if feature_dim == 26:
+            return tuple(range(26))
 
     raise ValueError(
         f"Cannot select ir_window_body_source='{body_source}' from ir_window feature dim={feature_dim}. "
-        "Expected dims: all=39, hands=26, pelvis=13, or all-mode 39D telemetry."
+        "Expected dims: legacy all=39, all-with-feet=65, hands/feet=26, or pelvis=13."
     )
 
 
@@ -538,7 +559,12 @@ def _selected_component_names_for_body_source(
         return ()
     if body_source == "all":
         return ir_t_components
-    prefixes = ("left_hand_", "right_hand_") if body_source == "hands" else ("pelvis_",)
+    if body_source == "hands":
+        prefixes = ("left_hand_", "right_hand_")
+    elif body_source == "feet":
+        prefixes = ("left_foot_", "right_foot_")
+    else:
+        prefixes = ("pelvis_",)
     selected = tuple(component for component in ir_t_components if component.startswith(prefixes))
     if selected:
         return selected
@@ -555,6 +581,14 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def task_names_to_ids(task_names: np.ndarray, vocabulary: Sequence[str]) -> torch.Tensor:
+    task_to_id = {name: index for index, name in enumerate(vocabulary)}
+    missing = sorted({str(name) for name in task_names if str(name) not in task_to_id})
+    if missing:
+        raise ValueError(f"Task names are missing from the conditioning vocabulary: {missing}")
+    return torch.tensor([task_to_id[str(name)] for name in task_names], dtype=torch.long)
 
 
 def resolve_device(device: str) -> str:
@@ -718,7 +752,6 @@ BEST_VAL_METRIC_CHOICES = (
 @dataclass
 class TrainConfig:
     data_dir: str = DEFAULT_DATA_DIR
-    condition_text: str = DEFAULT_CONDITION_TEXT
     ir_window_body_source: str = "all"
     output_root: str = DEFAULT_OUTPUT_ROOT
     run_name: str = "ae-joint"
@@ -1102,8 +1135,9 @@ def evaluate_model(
     ir_windows: torch.Tensor,
     depth_windows: torch.Tensor,
     proprioception_windows: torch.Tensor | None,
+    task_ids: torch.Tensor,
     *,
-    base_text_feature: torch.Tensor,
+    task_text_features: torch.Tensor,
     batch_size: int,
     ir_feature_mean: torch.Tensor,
     ir_feature_std: torch.Tensor,
@@ -1176,7 +1210,8 @@ def evaluate_model(
             ) / proprio_feature_std_device
         else:
             batch_proprioception_normalized = None
-        batch_text = base_text_feature.expand(batch_ir.shape[0], -1)
+        batch_task_ids = task_ids.index_select(0, batch_indices).to(device=device, non_blocking=True)
+        batch_text = task_text_features.index_select(0, batch_task_ids)
 
         ir_mu, ir_logvar = model.encode_ir(batch_ir_normalized, batch_text)
         depth_mu, depth_logvar = model.encode_di(
@@ -1279,6 +1314,7 @@ def make_checkpoint_payload(
     proprio_feature_mean: torch.Tensor | None,
     proprio_feature_std: torch.Tensor | None,
     text_feature_dim: int,
+    task_names: Sequence[str],
     telemetry_metadata: TelemetryMetadata,
     checkpoint_type: str,
     epoch: int,
@@ -1309,7 +1345,8 @@ def make_checkpoint_payload(
         "proprio_feature_mean": None if proprio_feature_mean is None else proprio_feature_mean.cpu(),
         "proprio_feature_std": None if proprio_feature_std is None else proprio_feature_std.cpu(),
         "text_feature_dim": int(text_feature_dim),
-        "condition_text": config.condition_text,
+        "condition_source": "motion_name",
+        "task_names": list(task_names),
         "telemetry": asdict(telemetry_metadata),
         "clip": {
             "model_id": config.clip_model_id,
@@ -1380,33 +1417,36 @@ def split_paired_arrays(
     np.ndarray,
     np.ndarray,
     np.ndarray | None,
+    np.ndarray,
     list[str],
     np.ndarray,
     np.ndarray,
     np.ndarray | None,
+    np.ndarray,
     list[str],
     np.ndarray,
     np.ndarray,
     np.ndarray | None,
+    np.ndarray,
     list[str],
 ]:
     if split_mode == "episode":
         split_indices = split_episode_indices(len(episodes), val_ratio, test_ratio, seed)
-        train_ir_np, train_depth_np, train_proprioception_np, train_episode_ids = flatten_episode_split(
+        train_ir_np, train_depth_np, train_proprioception_np, train_task_names_np, train_episode_ids = flatten_episode_split(
             episodes,
             split_indices["train"],
             telemetry_metadata.ir_window_shape,
             telemetry_metadata.depth_input_shape,
             telemetry_metadata.proprioception_window_shape,
         )
-        val_ir_np, val_depth_np, val_proprioception_np, val_episode_ids = flatten_episode_split(
+        val_ir_np, val_depth_np, val_proprioception_np, val_task_names_np, val_episode_ids = flatten_episode_split(
             episodes,
             split_indices["val"],
             telemetry_metadata.ir_window_shape,
             telemetry_metadata.depth_input_shape,
             telemetry_metadata.proprioception_window_shape,
         )
-        test_ir_np, test_depth_np, test_proprioception_np, test_episode_ids = flatten_episode_split(
+        test_ir_np, test_depth_np, test_proprioception_np, test_task_names_np, test_episode_ids = flatten_episode_split(
             episodes,
             split_indices["test"],
             telemetry_metadata.ir_window_shape,
@@ -1417,14 +1457,17 @@ def split_paired_arrays(
             train_ir_np,
             train_depth_np,
             train_proprioception_np,
+            train_task_names_np,
             train_episode_ids,
             val_ir_np,
             val_depth_np,
             val_proprioception_np,
+            val_task_names_np,
             val_episode_ids,
             test_ir_np,
             test_depth_np,
             test_proprioception_np,
+            test_task_names_np,
             test_episode_ids,
         )
 
@@ -1432,7 +1475,7 @@ def split_paired_arrays(
         raise ValueError(f"split_mode must be one of {SPLIT_MODE_CHOICES}, got {split_mode}.")
 
     all_indices = np.arange(len(episodes))
-    all_ir_np, all_depth_np, all_proprioception_np, all_episode_ids = flatten_episode_split(
+    all_ir_np, all_depth_np, all_proprioception_np, all_task_names_np, all_episode_ids = flatten_episode_split(
         episodes,
         all_indices,
         telemetry_metadata.ir_window_shape,
@@ -1469,14 +1512,17 @@ def split_paired_arrays(
         all_ir_np[train_indices],
         all_depth_np[train_indices],
         None if all_proprioception_np is None else all_proprioception_np[train_indices],
+        all_task_names_np[train_indices],
         [f"window_split_train_{len(train_indices)}_from_{len(all_episode_ids)}_episodes"],
         all_ir_np[val_indices],
         all_depth_np[val_indices],
         None if all_proprioception_np is None else all_proprioception_np[val_indices],
+        all_task_names_np[val_indices],
         [f"window_split_val_{len(val_indices)}_from_{len(all_episode_ids)}_episodes"],
         all_ir_np[test_indices],
         all_depth_np[test_indices],
         None if all_proprioception_np is None else all_proprioception_np[test_indices],
+        all_task_names_np[test_indices],
         [f"window_split_test_{len(test_indices)}_from_{len(all_episode_ids)}_episodes"],
     )
 
@@ -1502,14 +1548,17 @@ def train_joint(config: TrainConfig) -> Path:
             train_ir_np,
             train_depth_np,
             train_proprioception_np,
+            train_task_names_np,
             train_episode_ids,
             val_ir_np,
             val_depth_np,
             val_proprioception_np,
+            val_task_names_np,
             val_episode_ids,
             test_ir_np,
             test_depth_np,
             test_proprioception_np,
+            test_task_names_np,
             test_episode_ids,
         ) = split_paired_arrays(
             episodes,
@@ -1534,6 +1583,26 @@ def train_joint(config: TrainConfig) -> Path:
         test_proprioception = (
             torch.from_numpy(test_proprioception_np) if test_proprioception_np is not None else None
         )
+        task_names = tuple(
+            sorted(
+                {
+                    *(str(name) for name in train_task_names_np),
+                    *(str(name) for name in val_task_names_np),
+                    *(str(name) for name in test_task_names_np),
+                }
+            )
+        )
+        missing_train_tasks = sorted(
+            set(task_names) - {str(name) for name in train_task_names_np}
+        )
+        if missing_train_tasks:
+            raise ValueError(
+                "Some task names occur only in validation/test and cannot be learned: "
+                f"{missing_train_tasks}. Use more episodes or a task-stratified split."
+            )
+        train_task_ids = task_names_to_ids(train_task_names_np, task_names)
+        val_task_ids = task_names_to_ids(val_task_names_np, task_names)
+        test_task_ids = task_names_to_ids(test_task_names_np, task_names)
         del (
             train_ir_np,
             val_ir_np,
@@ -1544,6 +1613,9 @@ def train_joint(config: TrainConfig) -> Path:
             train_proprioception_np,
             val_proprioception_np,
             test_proprioception_np,
+            train_task_names_np,
+            val_task_names_np,
+            test_task_names_np,
         )
 
         train_ir_flat = train_ir.reshape(train_ir.shape[0], -1)
@@ -1582,8 +1654,8 @@ def train_joint(config: TrainConfig) -> Path:
             local_files_only=config.clip_local_files_only,
             quiet_load=config.clip_quiet_load,
         )
-        base_text_feature = clip_text.encode([config.condition_text]).to(device=device, dtype=torch.float32)
-        text_feature_dim = int(base_text_feature.shape[-1])
+        task_text_features = clip_text.encode(task_names).to(device=device, dtype=torch.float32)
+        text_feature_dim = int(task_text_features.shape[-1])
 
         model = JointMultimodalAE(
             ir_input_dim=int(train_ir_flat.shape[1]),
@@ -1629,6 +1701,7 @@ def train_joint(config: TrainConfig) -> Path:
             f"di_pool_size={config.di_pool_size}, split_mode={config.split_mode}, "
             f"eval_interval={config.eval_interval}, device={device}"
         )
+        logger.info(f"Task-name conditioning vocabulary ({len(task_names)} tasks): {list(task_names)}")
         objective_terms = [
             f"{config.ir_value_loss_weight}*ir_recon",
             f"{config.di_value_loss_weight}*di_recon",
@@ -1725,7 +1798,11 @@ def train_joint(config: TrainConfig) -> Path:
                         batch_depth_normalized,
                     ) * config.depth_input_noise_std
                 batch_size_current = int(batch_ir.shape[0])
-                batch_text = base_text_feature.expand(batch_size_current, -1)
+                batch_task_ids = train_task_ids.index_select(0, batch_indices).to(
+                    device=device,
+                    non_blocking=True,
+                )
+                batch_text = task_text_features.index_select(0, batch_task_ids)
 
                 ir_mu, ir_logvar = model.encode_ir(batch_ir_normalized, batch_text)
                 depth_mu, depth_logvar = model.encode_di(
@@ -1896,7 +1973,8 @@ def train_joint(config: TrainConfig) -> Path:
                     train_ir,
                     train_depth,
                     train_proprioception,
-                    base_text_feature=base_text_feature,
+                    train_task_ids,
+                    task_text_features=task_text_features,
                     batch_size=config.batch_size,
                     ir_feature_mean=ir_feature_mean,
                     ir_feature_std=ir_feature_std,
@@ -1920,7 +1998,8 @@ def train_joint(config: TrainConfig) -> Path:
                     val_ir,
                     val_depth,
                     val_proprioception,
-                    base_text_feature=base_text_feature,
+                    val_task_ids,
+                    task_text_features=task_text_features,
                     batch_size=config.batch_size,
                     ir_feature_mean=ir_feature_mean,
                     ir_feature_std=ir_feature_std,
@@ -1968,6 +2047,7 @@ def train_joint(config: TrainConfig) -> Path:
                         proprio_feature_mean=proprio_feature_mean,
                         proprio_feature_std=proprio_feature_std,
                         text_feature_dim=text_feature_dim,
+                        task_names=task_names,
                         telemetry_metadata=telemetry_metadata,
                         checkpoint_type="best",
                         epoch=epoch,
@@ -2101,6 +2181,7 @@ def train_joint(config: TrainConfig) -> Path:
             proprio_feature_mean=proprio_feature_mean,
             proprio_feature_std=proprio_feature_std,
             text_feature_dim=text_feature_dim,
+            task_names=task_names,
             telemetry_metadata=telemetry_metadata,
             checkpoint_type="last",
             epoch=last_epoch,
@@ -2120,7 +2201,8 @@ def train_joint(config: TrainConfig) -> Path:
             test_ir,
             test_depth,
             test_proprioception,
-            base_text_feature=base_text_feature,
+            test_task_ids,
+            task_text_features=task_text_features,
             batch_size=config.batch_size,
             ir_feature_mean=ir_feature_mean,
             ir_feature_std=ir_feature_std,
@@ -2145,7 +2227,8 @@ def train_joint(config: TrainConfig) -> Path:
             test_ir,
             test_depth,
             test_proprioception,
-            base_text_feature=base_text_feature,
+            test_task_ids,
+            task_text_features=task_text_features,
             batch_size=config.batch_size,
             ir_feature_mean=ir_feature_mean,
             ir_feature_std=ir_feature_std,
@@ -2173,6 +2256,8 @@ def train_joint(config: TrainConfig) -> Path:
             "num_train_windows": int(train_ir.shape[0]),
             "num_val_windows": int(val_ir.shape[0]),
             "num_test_windows": int(test_ir.shape[0]),
+            "condition_source": "motion_name",
+            "task_names": list(task_names),
             "num_train_episodes": len(train_episode_ids),
             "num_val_episodes": len(val_episode_ids),
             "num_test_episodes": len(test_episode_ids),
@@ -2276,7 +2361,7 @@ def load_joint_model(checkpoint_path: str, device: str = "cpu") -> tuple[JointMu
 def encode_di_window_to_latent_distribution(
     checkpoint_path: str,
     depth_window: np.ndarray | list,
-    condition_text: str | None = None,
+    task_name: str | None = None,
     device: str = "cpu",
     proprioception_window: np.ndarray | list | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -2323,8 +2408,15 @@ def encode_di_window_to_latent_distribution(
         local_files_only=clip_cfg["local_files_only"],
         quiet_load=True,
     )
-    text = condition_text or payload["condition_text"]
-    text_feature = text_extractor.encode([text]).to(device=device, dtype=torch.float32)
+    if payload.get("condition_source") == "motion_name":
+        if not task_name:
+            raise ValueError("This checkpoint requires task_name conditioning.")
+        condition_value = task_name
+    else:
+        condition_value = task_name or payload.get("condition_text")
+        if not condition_value:
+            raise ValueError("Checkpoint is missing legacy condition_text and no task_name was provided.")
+    text_feature = text_extractor.encode([condition_value]).to(device=device, dtype=torch.float32)
     mu, logvar = model.encode_di(depth, text_feature, proprioception)
     return mu.squeeze(0).cpu(), logvar.squeeze(0).cpu()
 
@@ -2333,14 +2425,14 @@ def encode_di_window_to_latent_distribution(
 def encode_di_window_to_mu_latent(
     checkpoint_path: str,
     depth_window: np.ndarray | list,
-    condition_text: str | None = None,
+    task_name: str | None = None,
     device: str = "cpu",
     proprioception_window: np.ndarray | list | None = None,
 ) -> torch.Tensor:
     mu, _ = encode_di_window_to_latent_distribution(
         checkpoint_path,
         depth_window,
-        condition_text=condition_text,
+        task_name=task_name,
         device=device,
         proprioception_window=proprioception_window,
     )
@@ -2350,7 +2442,6 @@ def encode_di_window_to_mu_latent(
 def parse_args() -> TrainConfig:
     parser = argparse.ArgumentParser(description="Joint end-to-end AE for paired ir_window and depth_window data.")
     parser.add_argument("--data-dir", type=str, default=TrainConfig.data_dir)
-    parser.add_argument("--condition-text", type=str, default=TrainConfig.condition_text)
     parser.add_argument("--ir-window-body-source", type=str, default=TrainConfig.ir_window_body_source, choices=IR_WINDOW_BODY_SOURCE_CHOICES)
     parser.add_argument("--output-root", type=str, default=TrainConfig.output_root)
     parser.add_argument("--run-name", type=str, default=TrainConfig.run_name)
@@ -2418,7 +2509,6 @@ def parse_args() -> TrainConfig:
     wandb_mode = "offline" if args.wandb_mode == "disabled" else args.wandb_mode
     return TrainConfig(
         data_dir=args.data_dir,
-        condition_text=args.condition_text,
         ir_window_body_source=normalize_ir_window_body_source(args.ir_window_body_source),
         output_root=args.output_root,
         run_name=args.run_name,

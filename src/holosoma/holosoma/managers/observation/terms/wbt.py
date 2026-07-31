@@ -23,6 +23,7 @@ from holosoma.managers.object_contact import (
     select_contact_body_columns,
 )
 from holosoma.managers.observation.base import ObservationTermBase
+from holosoma.utils.depth import ROBOT_DEPTH_MAX_M, ROBOT_DEPTH_MIN_M, preprocess_robot_depth_tensor
 from holosoma.utils.eval_utils import CheckpointConfig, load_saved_experiment_config
 from holosoma.utils.path import resolve_data_file_path
 from holosoma.utils.rotations import quat_rotate_inverse, quaternion_to_matrix, subtract_frame_transforms
@@ -898,7 +899,6 @@ class IRAELatent(ObservationTermBase):
         self._surface_feature_computer = SurfaceFeatureComputer.from_object_config(object_cfg)
 
         # --- CLIP text features ----------------------------------------------
-        condition_text = str(cfg.params.get("condition_text") or payload["condition_text"])
         clip_cfg = payload["clip"]
         text_extractor = CLIPTextFeatureExtractor(
             model_id=clip_cfg["model_id"],
@@ -906,7 +906,28 @@ class IRAELatent(ObservationTermBase):
             cache_dir=clip_cfg["cache_dir"],
             local_files_only=clip_cfg["local_files_only"],
         )
-        self.text_features = text_extractor.encode([condition_text]).to(device=self.device, dtype=torch.float32)
+        self.ir_condition_source = str(payload.get("condition_source", "legacy_fixed_text"))
+        if self.ir_condition_source == "motion_name":
+            motion_command = env.command_manager.get_state("motion_command")
+            if motion_command is None:
+                raise RuntimeError("motion_name-conditioned IR checkpoint requires motion_command.")
+            clip_files = tuple(getattr(motion_command.motion, "clip_files", ()))
+            if not clip_files:
+                raise RuntimeError("motion_name-conditioned IR checkpoint requires motion clip filenames.")
+            self.ir_task_names = tuple(Path(str(path)).stem for path in clip_files)
+            self.ir_task_text_features = text_extractor.encode(self.ir_task_names).to(
+                device=self.device,
+                dtype=torch.float32,
+            )
+            self.text_features = None
+        else:
+            condition_text = str(cfg.params.get("condition_text") or payload["condition_text"])
+            self.text_features = text_extractor.encode([condition_text]).to(
+                device=self.device,
+                dtype=torch.float32,
+            )
+            self.ir_task_names = ()
+            self.ir_task_text_features = None
         self.ir_window_history = torch.zeros(env.num_envs, self.window_size, self.ir_t_dim, device=self.device)
         self.is_initialized = torch.zeros(env.num_envs, dtype=torch.bool, device=self.device)
 
@@ -992,7 +1013,17 @@ class IRAELatent(ObservationTermBase):
 
         flat_window = effective_window.reshape(env.num_envs, -1)
         normalized_window = (flat_window - self.feature_mean.unsqueeze(0)) / self.feature_std.unsqueeze(0)
-        text_features = self.text_features.expand(env.num_envs, -1)
+        if self.ir_condition_source == "motion_name":
+            motion_command = env.command_manager.get_state("motion_command")
+            if motion_command is None or self.ir_task_text_features is None:
+                raise RuntimeError("motion_name-conditioned IR latent is missing motion command/features.")
+            text_features = self.ir_task_text_features.index_select(
+                0,
+                motion_command.clip_ids.to(device=self.device, dtype=torch.long),
+            )
+        else:
+            assert self.text_features is not None
+            text_features = self.text_features.expand(env.num_envs, -1)
         mu, _ = self.encoder.encode_ir(normalized_window, text_features)
         return mu
 
@@ -1163,6 +1194,18 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
         self.uses_di_pro_checkpoint = bool(di_pro_checkpoint)
         self.di_checkpoint = str(di_pro_checkpoint or di_checkpoint)
         self.debug_save_depth_images = bool(cfg.params.get("debug_save_depth_images", False))
+        self.depth_pixel_noise_max_std_m = float(cfg.params.get("depth_pixel_noise_max_std_m", 0.0))
+        self.depth_dropout_probability = float(cfg.params.get("depth_dropout_probability", 0.0))
+        if self.depth_pixel_noise_max_std_m < 0.0:
+            raise ValueError(
+                "depth_pixel_noise_max_std_m must be non-negative, "
+                f"got {self.depth_pixel_noise_max_std_m}."
+            )
+        if not 0.0 <= self.depth_dropout_probability <= 1.0:
+            raise ValueError(
+                "depth_dropout_probability must be in [0, 1], "
+                f"got {self.depth_dropout_probability}."
+            )
         self.debug_depth_save_interval = max(int(cfg.params.get("debug_depth_save_interval", 200)), 1)
         debug_depth_env_ids = cfg.params.get("debug_depth_env_ids", "0")
         self.debug_depth_env_ids = _parse_debug_depth_env_ids(debug_depth_env_ids)
@@ -1229,16 +1272,31 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
             self.proprio_feature_dim = 0
         self.depth_latent_mode = "mu"
 
-        condition_text = str(cfg.params.get("condition_text") or payload["condition_text"])
         clip_cfg = payload["clip"]
-        text_extractor = CLIPTextFeatureExtractor(
-            model_id=clip_cfg["model_id"],
-            device=self.device,
-            cache_dir=clip_cfg["cache_dir"],
-            local_files_only=clip_cfg["local_files_only"],
-            quiet_load=True,
-        )
-        self.di_text_features = text_extractor.encode([condition_text]).to(device=self.device, dtype=torch.float32)
+        self.di_clip_cfg = dict(clip_cfg)
+        self.di_condition_source = str(payload.get("condition_source", "legacy_fixed_text"))
+        if self.di_condition_source == "motion_name":
+            # Observation terms are constructed before CommandManager. Resolve
+            # and encode motion names lazily on the first observation compute,
+            # after every manager is available.
+            self.di_task_names = ()
+            self.di_task_text_features = None
+            self.di_text_features = None
+        else:
+            text_extractor = CLIPTextFeatureExtractor(
+                model_id=clip_cfg["model_id"],
+                device=self.device,
+                cache_dir=clip_cfg["cache_dir"],
+                local_files_only=clip_cfg["local_files_only"],
+                quiet_load=True,
+            )
+            condition_text = str(cfg.params.get("condition_text") or payload["condition_text"])
+            self.di_text_features = text_extractor.encode([condition_text]).to(
+                device=self.device,
+                dtype=torch.float32,
+            )
+            self.di_task_names = ()
+            self.di_task_text_features = None
 
         self.depth_window_history = torch.zeros(
             env.num_envs,
@@ -1390,9 +1448,23 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
         if depth_output is None:
             raise RuntimeError("Robot depth camera has no 'distance_to_image_plane' output.")
 
-        depth_frames = depth_output.to(device=self.device, dtype=torch.float32)
-        if depth_frames.ndim == 4 and depth_frames.shape[-1] == 1:
-            depth_frames = depth_frames[..., 0]
+        depth_frames = preprocess_robot_depth_tensor(depth_output.to(device=self.device, dtype=torch.float32))
+        valid = torch.isfinite(depth_frames) & (depth_frames > 0.0)
+        if self.depth_pixel_noise_max_std_m > 0.0:
+            normalized_range = torch.clamp(depth_frames / ROBOT_DEPTH_MAX_M, 0.0, 1.0)
+            pixel_std_m = self.depth_pixel_noise_max_std_m * normalized_range.square()
+            depth_frames = torch.where(
+                valid,
+                torch.clamp(
+                    depth_frames + torch.randn_like(depth_frames) * pixel_std_m,
+                    min=ROBOT_DEPTH_MIN_M,
+                    max=ROBOT_DEPTH_MAX_M,
+                ),
+                depth_frames,
+            )
+        if self.depth_dropout_probability > 0.0:
+            dropout_mask = torch.rand_like(depth_frames) < self.depth_dropout_probability
+            depth_frames = torch.where(valid & dropout_mask, torch.zeros_like(depth_frames), depth_frames)
         if depth_frames.ndim != 3:
             raise RuntimeError(
                 f"Unexpected robot depth batch shape {tuple(depth_frames.shape)}; "
@@ -1406,7 +1478,7 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
                 f"expected {(self.depth_height, self.depth_width)}."
             )
 
-        return torch.nan_to_num(depth_frames, nan=0.0, posinf=0.0, neginf=0.0)
+        return depth_frames
 
     def _build_depth_window(self, depth_frames: torch.Tensor, *, modify_history: bool) -> torch.Tensor:
         if modify_history:
@@ -1470,13 +1542,54 @@ class _DepthLatentObservationTermBase(ObservationTermBase):
             effective_window[new_mask] = proprioception[new_mask].unsqueeze(1).repeat(1, self.window_size, 1)
         return effective_window
 
+    def _ensure_motion_name_text_features(self) -> None:
+        if self.di_task_text_features is not None:
+            return
+        command_manager = getattr(self.env, "command_manager", None)
+        if command_manager is None:
+            raise RuntimeError(
+                "motion_name-conditioned DI latent was evaluated before CommandManager initialization."
+            )
+        motion_command = command_manager.get_state("motion_command")
+        if motion_command is None:
+            raise RuntimeError("motion_name-conditioned DI checkpoint requires motion_command.")
+        clip_files = tuple(getattr(motion_command.motion, "clip_files", ()))
+        if not clip_files:
+            raise RuntimeError("motion_name-conditioned DI checkpoint requires motion clip filenames.")
+
+        self.di_task_names = tuple(Path(str(path)).stem for path in clip_files)
+        text_extractor = CLIPTextFeatureExtractor(
+            model_id=self.di_clip_cfg["model_id"],
+            device=self.device,
+            cache_dir=self.di_clip_cfg["cache_dir"],
+            local_files_only=self.di_clip_cfg["local_files_only"],
+            quiet_load=True,
+        )
+        self.di_task_text_features = text_extractor.encode(self.di_task_names).to(
+            device=self.device,
+            dtype=torch.float32,
+        )
+        logger.info(
+            "Initialized cached motion-name DI conditions after CommandManager setup: "
+            f"tasks={list(self.di_task_names)}."
+        )
+
     def _encode_di_latent_and_projection_feature(
         self,
         depth_window: torch.Tensor,
         proprioception_window: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         normalized_window = (depth_window - self.di_feature_mean.unsqueeze(0)) / self.di_feature_std.unsqueeze(0)
-        text_features = self.di_text_features.expand(depth_window.shape[0], -1)
+        if self.di_condition_source == "motion_name":
+            self._ensure_motion_name_text_features()
+            motion_command = self.env.command_manager.get_state("motion_command")
+            if motion_command is None or self.di_task_text_features is None:
+                raise RuntimeError("motion_name-conditioned DI latent is missing motion command/features.")
+            clip_ids = motion_command.clip_ids.to(device=self.device, dtype=torch.long)
+            text_features = self.di_task_text_features.index_select(0, clip_ids)
+        else:
+            assert self.di_text_features is not None
+            text_features = self.di_text_features.expand(depth_window.shape[0], -1)
         condition = self.di_encoder.condition(text_features)
         depth_encoder = self.di_encoder.di_encoder
 

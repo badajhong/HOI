@@ -24,6 +24,7 @@ from holosoma.config_types.observation import ObservationManagerCfg, ObsGroupCfg
 from holosoma.config_types.randomization import RandomizationManagerCfg, RandomizationTermCfg
 from holosoma.eval_student_agent import StudentEvalConfig, _resolve_device
 from holosoma.utils.config_utils import CONFIG_NAME
+from holosoma.utils.depth import preprocess_robot_depth_tensor
 from holosoma.utils.eval_utils import (
     CheckpointConfig,
     init_eval_logging,
@@ -980,9 +981,7 @@ class FusedResidualOnnxRuntimePolicy:
         if depth_output is None:
             raise RuntimeError("Robot depth camera has no 'distance_to_image_plane' output.")
 
-        depth_frames = depth_output.to(device=self.device, dtype=torch.float32)
-        if depth_frames.ndim == 4 and depth_frames.shape[-1] == 1:
-            depth_frames = depth_frames[..., 0]
+        depth_frames = preprocess_robot_depth_tensor(depth_output.to(device=self.device, dtype=torch.float32))
         if depth_frames.ndim != 3:
             raise RuntimeError(f"Unexpected robot depth batch shape {tuple(depth_frames.shape)}.")
 
@@ -994,7 +993,7 @@ class FusedResidualOnnxRuntimePolicy:
                 f"Unexpected robot depth spatial shape {tuple(depth_frames.shape[1:])}; "
                 f"expected {(expected_height, expected_width)}."
             )
-        return torch.nan_to_num(depth_frames, nan=0.0, posinf=0.0, neginf=0.0)
+        return depth_frames
 
     def _update_depth_window(self, env: Any) -> torch.Tensor:
         depth_frames = self._read_depth_frames(env)
