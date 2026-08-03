@@ -115,6 +115,10 @@ class ExperimentConfig:
     """Optional frozen depth latent checkpoint used to build visual latents."""
     di_pro_ae: str | None = None
     """Optional frozen depth+proprioception latent checkpoint from ae_pro_joint_train.py."""
+    teacher_buffer: str | None = None
+    """Optional FastSAC offline teacher replay-buffer H5 path."""
+    object_scale_curriculum_level: int | None = None
+    """Startup object-scale stage: 0=[1.0], 1=[0.8,1.0,1.2], 2=full range."""
 
     training: TrainingConfig = TrainingConfig()
     algo: Annotated[

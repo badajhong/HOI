@@ -18,6 +18,8 @@ from pydantic.dataclasses import dataclass
 
 from holosoma.agents.base_algo.base_algo import BaseAlgo
 from holosoma.config_types.experiment import ExperimentConfig
+from holosoma.config_values.wbt.r1 import observation as r1_observation_values
+from holosoma.config_values.wbt.r1 import reward as r1_reward_values
 from holosoma.utils.config_utils import CONFIG_NAME
 from holosoma.utils.depth import (
     ROBOT_DEPTH_MAX_M,
@@ -41,17 +43,18 @@ from holosoma.utils.rotations import quat_rotate_inverse
 from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.sim_utils import close_simulation_app, setup_simulation_environment
 from holosoma.utils.surface_features import SurfaceFeatureComputer
+from holosoma.utils.task_phase import TwoPhaseSchedule
 from holosoma.utils.tyro_utils import TYRO_CONIFG
 
 
 ORIGINAL_G1_URDF_FILE = "g1/g1_29dof.urdf"
 ORIGINAL_G1_XML_FILE = "g1/g1_29dof.xml"
 DEFAULT_IR_CHECKPOINT = (
-    "/home/rllab/haechan/holosoma/logs/teacher/"
+    "./logs/teacher/"
     "20260727_070811-r1_teacher-locomotion/model_30000.pt"
 )
-DEFAULT_IR_NUM_ENVS = 1
-DEFAULT_IR_LOG_BASE_DIR = "/home/rllab/haechan/holosoma/logs"
+DEFAULT_IR_NUM_ENVS = 24
+DEFAULT_IR_LOG_BASE_DIR = "./logs"
 DEFAULT_IR_PROJECT = "ir_di_pro_largebox"
 REALSENSE_CAMERA_BODY_LINK = "realsense_d435_link"
 DEPTH_CAMERA_FRAME_LINK = "realsense_d435_depth_optical_frame"
@@ -647,6 +650,7 @@ class IRTelemetryRecorder:
         self._surface_feature_body_names: tuple[str, ...] = ()
         self._surface_feature_body_indices: tuple[int, ...] = ()
         self._surface_feature_computer: SurfaceFeatureComputer | None = None
+        self._task_phase_schedule: TwoPhaseSchedule | None = None
         self._run_complete = False
 
         self._episode_indices: list[int] = []
@@ -1122,22 +1126,72 @@ class IRTelemetryRecorder:
         metadata = {key: value for key, value in episode_data.items() if key != "entries"}
         ir_windows = np.asarray([entry["ir_window"] for entry in entries], dtype=np.float32)
         depth_windows = np.asarray([entry["depth_window"] for entry in entries], dtype=np.float32)
+        next_depth_windows = np.concatenate((depth_windows[1:], depth_windows[-1:]), axis=0)
         proprioception_windows = np.asarray(
             [entry["proprioception_window"] for entry in entries],
             dtype=np.float32,
         )
+        reference_velocity_commands = np.asarray(
+            [entry["reference_velocity_command"] for entry in entries],
+            dtype=np.float32,
+        )
+        task_phases = np.asarray([entry["task_phase"] for entry in entries], dtype=np.int64)
+        teacher_actions = np.asarray([entry["teacher_action"] for entry in entries], dtype=np.float32)
+        actor_observations = np.asarray([entry["actor_observation"] for entry in entries], dtype=np.float32)
+        critic_observations = np.asarray([entry["critic_observation"] for entry in entries], dtype=np.float32)
+        next_actor_observations = np.asarray(
+            [entry["next_actor_observation"] for entry in entries], dtype=np.float32
+        )
+        next_critic_observations = np.asarray(
+            [entry["next_critic_observation"] for entry in entries], dtype=np.float32
+        )
+        depth_frames = np.asarray([entry["depth_window"][-1] for entry in entries], dtype=np.float32)
+        next_depth_frames = np.concatenate((depth_frames[1:], depth_frames[-1:]), axis=0)
+        next_depth_valid = np.ones(len(entries), dtype=np.bool_)
+        next_depth_valid[-1] = False
+        sac_rewards = np.asarray([entry["sac_reward"] for entry in entries], dtype=np.float32)
+        dones = np.asarray([entry["done"] for entry in entries], dtype=np.bool_)
+        terminations = np.asarray([entry["terminated"] for entry in entries], dtype=np.bool_)
+        truncations = np.asarray([entry["truncated"] for entry in entries], dtype=np.bool_)
+        episode_ids = np.asarray([entry["episode_index"] for entry in entries], dtype=np.int64)
+        timesteps = np.asarray([entry["episode_step"] for entry in entries], dtype=np.int64)
+        reward_term_names = sorted(entries[0].get("sac_reward_terms_raw", {}))
 
         group_path = f"episodes/{group_name}"
         with h5py.File(self.hdf5_path, "a") as hdf5_file:
             hdf5_file.attrs["format"] = "holosoma_ir_telemetry"
-            hdf5_file.attrs["format_version"] = 1
+            hdf5_file.attrs["format_version"] = 2
             episodes_group = hdf5_file.require_group("episodes")
             if group_name in episodes_group:
                 del episodes_group[group_name]
             episode_group = episodes_group.create_group(group_name)
             episode_group.create_dataset("ir_windows", data=ir_windows)
             episode_group.create_dataset("depth_windows", data=depth_windows)
+            episode_group.create_dataset("next_depth_windows", data=next_depth_windows)
             episode_group.create_dataset("proprioception_windows", data=proprioception_windows)
+            episode_group.create_dataset("reference_velocity_commands", data=reference_velocity_commands)
+            episode_group.create_dataset("task_phases", data=task_phases)
+            episode_group.create_dataset("teacher_actions", data=teacher_actions)
+            episode_group.create_dataset("actor_observations", data=actor_observations)
+            episode_group.create_dataset("critic_observations", data=critic_observations)
+            episode_group.create_dataset("next_actor_observations", data=next_actor_observations)
+            episode_group.create_dataset("next_critic_observations", data=next_critic_observations)
+            episode_group.create_dataset("depth_frames", data=depth_frames)
+            episode_group.create_dataset("next_depth_frames", data=next_depth_frames)
+            episode_group.create_dataset("next_depth_valid", data=next_depth_valid)
+            episode_group.create_dataset("sac_rewards", data=sac_rewards)
+            episode_group.create_dataset("dones", data=dones)
+            episode_group.create_dataset("terminations", data=terminations)
+            episode_group.create_dataset("truncations", data=truncations)
+            episode_group.create_dataset("episode_ids", data=episode_ids)
+            episode_group.create_dataset("timesteps", data=timesteps)
+            reward_terms_group = episode_group.create_group("sac_reward_terms_raw")
+            for term_name in reward_term_names:
+                values = np.asarray(
+                    [entry["sac_reward_terms_raw"][term_name] for entry in entries],
+                    dtype=np.float32,
+                )
+                reward_terms_group.create_dataset(term_name, data=values)
             episode_group.attrs["metadata_json"] = json.dumps(metadata, separators=(",", ":"))
         return group_path
 
@@ -1204,6 +1258,19 @@ class IRTelemetryRecorder:
             "proprioception_window_shape": list(self._proprioception_window_shape_t_f()),
             "proprioception_window_shape_order": "time_feature",
             "proprioception_dof_names": list(self.env.dof_names),
+            "reference_velocity_command_components": [
+                "linear_velocity_x",
+                "linear_velocity_y",
+                "angular_velocity_z",
+            ],
+            "reference_velocity_command_frame": "reference_root_body",
+            "task_phase_definitions": {"0": "approach", "1": "interaction_and_finish"},
+            "replay_actor_observation_group": "replay_actor_obs",
+            "replay_critic_observation_group": "replay_critic_obs",
+            "fastsac_task_object_identity_included": True,
+            "depth_latent_included": False,
+            "next_depth_terminal_policy": "repeat_last_depth_frame",
+            "sac_reward_terms_raw": sorted(first_entry.get("sac_reward_terms_raw", {})),
             "depth_camera_prim_name": DEPTH_CAMERA_PRIM_NAME,
             "depth_camera_mount": self.depth_camera_mount.to_json_dict(),
             "completed_at_global_step": global_step,
@@ -1229,6 +1296,7 @@ class IRTelemetryRecorder:
             raise RuntimeError("motion_command not found; IR telemetry requires a motion command.")
         if not getattr(motion_command.motion, "has_object", False):
             raise RuntimeError("IR telemetry requires a motion with an object.")
+        self._task_phase_schedule = TwoPhaseSchedule(motion_command)
         if self.all_motions_iterations <= 0:
             raise ValueError(
                 f"all_motions_iterations must be positive, got {self.all_motions_iterations}"
@@ -1354,6 +1422,30 @@ class IRTelemetryRecorder:
         dof_pos_all: list = proprioception_batches["dof_pos"].tolist()
         dof_vel_all: list = proprioception_batches["dof_vel"].tolist()
         proprioception_all: list = proprioception_batches["proprioception"].tolist()
+        reference_root_lin_vel_b = quat_rotate_inverse(
+            motion_command.root_quat_w,
+            motion_command.root_lin_vel_w,
+            w_last=True,
+        )
+        reference_root_ang_vel_b = quat_rotate_inverse(
+            motion_command.root_quat_w,
+            motion_command.root_ang_vel_w,
+            w_last=True,
+        )
+        reference_velocity_commands = torch.stack(
+            (
+                reference_root_lin_vel_b[:, 0],
+                reference_root_lin_vel_b[:, 1],
+                reference_root_ang_vel_b[:, 2],
+            ),
+            dim=-1,
+        ).tolist()
+        if self._task_phase_schedule is None:
+            raise RuntimeError("Task phase schedule was not initialized before evaluation stepping.")
+        task_phases = self._task_phase_schedule.phase(motion_command).tolist()
+        teacher_actions = actor_state["actions"].detach().cpu().tolist()
+        replay_actor_obs = actor_state["obs"]["replay_actor_obs"].detach().cpu().tolist()
+        replay_critic_obs = actor_state["obs"]["replay_critic_obs"].detach().cpu().tolist()
         all_depth_frames: list = self._read_all_depth_frames()
         clip_ids = motion_command.clip_ids.detach().cpu().tolist()
         clip_files = getattr(motion_command.motion, "clip_files", [])
@@ -1403,6 +1495,11 @@ class IRTelemetryRecorder:
                 "dof_vel": current_dof_vel,
                 "proprioception": current_proprioception,
                 "proprioception_window": current_proprioception_window,
+                "reference_velocity_command": reference_velocity_commands[env_id],
+                "task_phase": int(task_phases[env_id]),
+                "teacher_action": teacher_actions[env_id],
+                "actor_observation": replay_actor_obs[env_id],
+                "critic_observation": replay_critic_obs[env_id],
                 "depth_window": current_depth_window,
                 "depth_image_file": depth_image_file,
             }
@@ -1482,6 +1579,14 @@ class IRTelemetryRecorder:
             return actor_state
 
         global_step = int(actor_state.get("step", -1))
+        rewards = actor_state.get("rewards")
+        extras = actor_state.get("extras") or {}
+        time_outs = extras.get("time_outs")
+        reward_manager = getattr(self.env, "reward_manager", None)
+        raw_terms = getattr(reward_manager, "last_raw_term_values", {}) if reward_manager is not None else {}
+        raw_terms_cpu = {name: values.detach().cpu().tolist() for name, values in raw_terms.items()}
+        next_obs = actor_state.get("obs") or {}
+        final_obs = extras.get("final_observations") or {}
         maxed_env_ids: list[int] = []
 
         for env_id in range(self.env.num_envs):
@@ -1494,10 +1599,30 @@ class IRTelemetryRecorder:
             self._episode_steps[env_id] += 1
             reached_limit = self.max_eval_steps is not None and self._episode_steps[env_id] >= self.max_eval_steps
             is_done = bool(dones[env_id].item())
+            if self._episode_entries[env_id]:
+                entry = self._episode_entries[env_id][-1]
+                next_actor = final_obs.get("replay_actor_obs") if is_done else next_obs.get("replay_actor_obs")
+                next_critic = final_obs.get("replay_critic_obs") if is_done else next_obs.get("replay_critic_obs")
+                if next_actor is None or next_critic is None:
+                    raise RuntimeError("Replay next observations are missing from environment observations.")
+                entry["sac_reward"] = float(rewards[env_id].item()) if rewards is not None else 0.0
+                entry["done"] = is_done
+                is_truncated = bool(time_outs[env_id].item()) if time_outs is not None else False
+                entry["terminated"] = is_done and not is_truncated
+                entry["truncated"] = is_truncated
+                entry["next_actor_observation"] = next_actor[env_id].detach().cpu().tolist()
+                entry["next_critic_observation"] = next_critic[env_id].detach().cpu().tolist()
+                entry["sac_reward_terms_raw"] = {
+                    name: float(values[env_id]) for name, values in raw_terms_cpu.items()
+                }
 
             if is_done:
                 self._finalize_episode(env_id, reason="done", global_step=global_step)
             elif reached_limit:
+                entry = self._episode_entries[env_id][-1]
+                entry["done"] = True
+                entry["terminated"] = False
+                entry["truncated"] = True
                 self._finalize_episode(env_id, reason="max_eval_steps", global_step=global_step)
                 if not self._run_complete and not self._env_episode_target_reached(env_id):
                     maxed_env_ids.append(env_id)
@@ -1721,6 +1846,37 @@ def main() -> None:
     )
     saved_cfg, saved_wandb_path = load_saved_experiment_config(ir_cfg)
     eval_cfg = saved_cfg.get_eval_config()
+    object_cfg = dataclasses.replace(
+        eval_cfg.robot.object,
+        object_urdf_asset="train_r1/objects",
+        object_urdf_folder="train_r1/objects",
+        object_urdf_name_to_path={},
+    )
+    eval_cfg = dataclasses.replace(
+        eval_cfg,
+        robot=dataclasses.replace(eval_cfg.robot, object=object_cfg),
+        reward=r1_reward_values.r1_26dof_fastsac_reward,
+        observation=dataclasses.replace(
+            eval_cfg.observation,
+            groups={
+                **eval_cfg.observation.groups,
+                "replay_actor_obs": r1_observation_values.r1_26dof_fastsac_observation.groups["actor_obs"],
+                # Match the runtime r1-fastsac privileged critic schema exactly.
+                # In particular this includes direct IR plus task/object identity,
+                # and records the action actually executed by the teacher rollout.
+                "replay_critic_obs": dataclasses.replace(
+                    r1_observation_values.r1_student_privileged_critic_obs,
+                    terms={
+                        **r1_observation_values.r1_student_privileged_critic_obs.terms,
+                        "previous_action": dataclasses.replace(
+                            r1_observation_values.r1_student_privileged_critic_obs.terms["previous_action"],
+                            func="holosoma.managers.observation.terms.wbt:actions",
+                        ),
+                    },
+                ),
+            },
+        ),
+    )
     eval_cfg = dataclasses.replace(
         eval_cfg,
         training=dataclasses.replace(

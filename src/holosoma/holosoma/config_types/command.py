@@ -63,6 +63,15 @@ class NoiseToInitialPoseConfig:
     object_pos: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     """noise scale for object position x, y, z."""
 
+    object_sector_radius: list[float] = field(default_factory=lambda: [0.0, 0.0])
+    """Min/max XY displacement from the reference object pose in a robot-forward sector."""
+
+    object_sector_half_angle_deg: float = 0.0
+    """Half-angle of object spawn sector around the reference robot forward axis."""
+
+    object_sector_min_front_clearance: float = 0.05
+    """Minimum forward-plane distance between robot root and randomized object."""
+
 
 @dataclass(frozen=True)
 class MotionConfig:
@@ -135,6 +144,17 @@ class MotionConfig:
 
     start_at_timestep_zero_prob: float = 0.2
     """Probability of starting at timestep zero."""
+
+    adaptive_phase_zero: bool = False
+    """Hold the interaction-start reference frame until the live robot reaches its shifted start pose."""
+
+    phase_zero_position_threshold_m: float = 0.15
+    phase_zero_yaw_threshold_rad: float = 0.35
+    phase_zero_ready_hold_steps: int = 8
+    phase_zero_linear_velocity_gain: float = 1.5
+    phase_zero_angular_velocity_gain: float = 1.5
+    phase_zero_max_linear_velocity: float = 0.6
+    phase_zero_max_angular_velocity: float = 0.8
 
     freeze_at_timestep_zero_prob: float = 0.0
     """When starting at timestep 0, probability of freezing motion counter at 0 (not advancing).

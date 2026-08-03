@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import copy
 import itertools
+import json
 import math
 import os
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Callable, Dict, Sequence
 
 import tqdm
 from loguru import logger
 
 from holosoma.agents.base_algo.base_algo import BaseAlgo
+from holosoma.agents.dagger_student.teacher_transition_h5 import infer_observation_mode
 from holosoma.agents.fast_sac.fast_sac import Actor, CNNActor, CNNCritic, Critic
 from holosoma.agents.fast_sac.fast_sac_utils import (
     EmpiricalNormalization,
@@ -22,6 +25,7 @@ from holosoma.agents.modules.logging_utils import LoggingHelper
 from holosoma.config_types.algo import FastSACConfig
 from holosoma.envs.base_task.base_task import BaseTask
 from holosoma.utils.average_meters import TensorAverageMeterDict
+from holosoma.utils.eval_utils import load_checkpoint
 from holosoma.utils.inference_helpers import (
     attach_onnx_metadata,
     export_motion_and_policy_as_onnx,
@@ -42,6 +46,152 @@ from holosoma.utils.safe_torch_import import (
 )
 
 torch.set_float32_matmul_precision("high")
+
+
+class TeacherReplayBuffer:
+    """Read-only, flat replay buffer loaded from create_teacher_buffer.py output."""
+
+    _FIELDS = (
+        "observations",
+        "critic_observations",
+        "actions",
+        "rewards",
+        "dones",
+        "truncations",
+        "next_observations",
+        "next_critic_observations",
+    )
+
+    def __init__(
+        self,
+        path: str,
+        *,
+        actor_obs_dim: int,
+        critic_obs_dim: int,
+        action_dim: int,
+        actor_obs_keys: Sequence[str] | None = None,
+        critic_obs_keys: Sequence[str] | None = None,
+        observation_mode: str | None = None,
+    ):
+        try:
+            import h5py  # noqa: PLC0415
+        except ImportError as exc:
+            raise ImportError("h5py is required to load a FastSAC teacher buffer.") from exc
+
+        buffer_path = Path(path).expanduser().resolve()
+        if not buffer_path.is_file():
+            raise FileNotFoundError(f"Teacher replay buffer does not exist: {buffer_path}")
+        with h5py.File(buffer_path, "r") as source:
+            missing = [name for name in self._FIELDS if name not in source]
+            if missing:
+                raise ValueError(f"Teacher buffer is missing datasets: {missing}")
+            if str(source.attrs.get("format", "")) != "holosoma_fastsac_teacher_buffer":
+                raise ValueError(f"Not a FastSAC teacher buffer: {buffer_path}")
+            format_version = int(source.attrs.get("format_version", 1))
+            if format_version >= 2:
+                required_attrs = {
+                    "actor_obs_keys",
+                    "critic_obs_keys",
+                    "actor_obs_dim",
+                    "critic_obs_dim",
+                    "action_dim",
+                    "observation_mode",
+                }
+                missing_attrs = sorted(required_attrs - set(source.attrs.keys()))
+                if missing_attrs:
+                    raise ValueError(
+                        f"Teacher buffer format v{format_version} is missing metadata: {missing_attrs}."
+                    )
+
+                def _decode_json_list(name: str) -> list[str]:
+                    raw = source.attrs[name]
+                    if isinstance(raw, bytes):
+                        raw = raw.decode("utf-8")
+                    value = json.loads(str(raw))
+                    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                        raise ValueError(f"Teacher-buffer metadata '{name}' must be a JSON string list.")
+                    return value
+
+                if actor_obs_keys is not None:
+                    stored_actor_keys = _decode_json_list("actor_obs_keys")
+                    if stored_actor_keys != list(actor_obs_keys):
+                        raise ValueError(
+                            "Teacher-buffer actor observation groups do not match this FastSAC run: "
+                            f"buffer={stored_actor_keys}, current={list(actor_obs_keys)}."
+                        )
+                if critic_obs_keys is not None:
+                    stored_critic_keys = _decode_json_list("critic_obs_keys")
+                    if stored_critic_keys != list(critic_obs_keys):
+                        raise ValueError(
+                            "Teacher-buffer critic observation groups do not match this FastSAC run: "
+                            f"buffer={stored_critic_keys}, current={list(critic_obs_keys)}."
+                        )
+                if observation_mode is not None:
+                    stored_mode = source.attrs["observation_mode"]
+                    if isinstance(stored_mode, bytes):
+                        stored_mode = stored_mode.decode("utf-8")
+                    if str(stored_mode) != str(observation_mode):
+                        raise ValueError(
+                            "Teacher-buffer observation mode does not match this FastSAC run: "
+                            f"buffer={stored_mode!r}, current={observation_mode!r}. "
+                            "Use a direct-IR buffer only with direct-IR FastSAC, and a latent buffer only "
+                            "with the corresponding AE observation mode."
+                        )
+                stored_dims = {
+                    "actor_obs_dim": actor_obs_dim,
+                    "critic_obs_dim": critic_obs_dim,
+                    "action_dim": action_dim,
+                }
+                for attr_name, expected_dim in stored_dims.items():
+                    if int(source.attrs[attr_name]) != int(expected_dim):
+                        raise ValueError(
+                            f"Teacher-buffer metadata {attr_name}={source.attrs[attr_name]} "
+                            f"does not match current value {expected_dim}."
+                        )
+            self.data = {name: torch.from_numpy(source[name][()]) for name in self._FIELDS}
+
+        count = int(self.data["observations"].shape[0])
+        if any(int(value.shape[0]) != count for value in self.data.values()):
+            raise ValueError("Teacher-buffer datasets have inconsistent transition counts.")
+        expected = {
+            "observations": actor_obs_dim,
+            "next_observations": actor_obs_dim,
+            "critic_observations": critic_obs_dim,
+            "next_critic_observations": critic_obs_dim,
+            "actions": action_dim,
+        }
+        for name, width in expected.items():
+            if self.data[name].ndim != 2 or int(self.data[name].shape[1]) != width:
+                raise ValueError(
+                    f"Teacher-buffer {name} shape {tuple(self.data[name].shape)} does not match (*, {width})."
+                )
+        self.count = count
+        if self.count == 0:
+            raise ValueError(f"Teacher replay buffer contains no transitions: {buffer_path}")
+        self.path = buffer_path
+        logger.info(f"Loaded teacher replay buffer {buffer_path} with {count:,} transitions on CPU.")
+
+    @torch.no_grad()
+    def sample(self, count: int, device: str) -> TensorDict:
+        indices = torch.randint(0, self.count, (count,), device="cpu")
+        values = {name: tensor.index_select(0, indices).to(device=device, non_blocking=True) for name, tensor in self.data.items()}
+        return TensorDict(
+            {
+                "observations": values["observations"].float(),
+                "critic_observations": values["critic_observations"].float(),
+                "actions": values["actions"].float(),
+                "next": {
+                    "observations": values["next_observations"].float(),
+                    "critic_observations": values["next_critic_observations"].float(),
+                    "rewards": values["rewards"].float(),
+                    "dones": values["dones"].long(),
+                    "truncations": values["truncations"].long(),
+                    "effective_n_steps": torch.ones(count, device=device),
+                },
+            },
+            batch_size=count,
+            device=device,
+        )
 
 
 class FastSACEnv:
@@ -74,6 +224,12 @@ class FastSACEnv:
 
     def step(self, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]]:
         # Actions are now already scaled by the actor, so pass them directly to the environment
+        # The R1 actor's autoregressive previous-action term uses these fields.
+        # Keep online FastSAC observations identical to DAgger/H5 semantics.
+        if hasattr(self._env, "student_prev_actions"):
+            self._env.student_prev_actions[:] = actions
+        if hasattr(self._env, "student_base_actions"):
+            self._env.student_base_actions[:] = actions
         obs_dict, rew_buf, reset_buf, info_dict = self._env.step({"actions": actions})  # type: ignore[attr-defined]
         actor_obs = torch.cat([obs_dict[k] for k in self._actor_obs_keys], dim=1)
         critic_obs = torch.cat([obs_dict[k] for k in self._critic_obs_keys], dim=1)
@@ -111,6 +267,25 @@ class FastSACEnv:
         the furthest limit from default.
         """
         robot_config = self._env.robot_config
+        action_dof_names: list[str] = []
+        action_manager = getattr(self._env, "action_manager", None)
+        if action_manager is not None:
+            for _, term in action_manager.iter_terms():
+                names = getattr(term, "action_dof_names", None)
+                if names is None:
+                    raise ValueError(
+                        f"FastSAC requires joint-mapped action terms, got {type(term).__name__}."
+                    )
+                action_dof_names.extend(names)
+        if not action_dof_names:
+            action_dof_names = list(robot_config.dof_names[: robot_config.actions_dim])
+        if len(action_dof_names) != robot_config.actions_dim:
+            raise ValueError(
+                f"Resolved {len(action_dof_names)} controlled joints for {robot_config.actions_dim} policy actions."
+            )
+        action_dof_indices = torch.tensor(
+            [robot_config.dof_names.index(name) for name in action_dof_names], device=self._env.device
+        )
 
         # Get joint limits and default positions
         dof_pos_lower_limits = torch.tensor(robot_config.dof_pos_lower_limit_list, device=self._env.device)
@@ -133,9 +308,9 @@ class FastSACEnv:
 
         # Account for action_scale: the environment applies actions_scaled = actions * action_scale
         # So our scaling factor should be: max_range / action_scale
-        action_scaling_factors = max_range / action_scale
+        action_scaling_factors = (max_range / action_scale).index_select(0, action_dof_indices)
 
-        logger.info(f"Computed action scaling factors for {len(robot_config.dof_names)} DOFs")
+        logger.info(f"Computed action scaling factors for {len(action_dof_names)} controlled DOFs")
         logger.info(f"Action scale: {action_scale}")
         logger.info(f"Scaling: {action_scaling_factors}")
 
@@ -313,6 +488,51 @@ class FastSACAgent(BaseAlgo):
         )
         self.qnet_target.load_state_dict(self.qnet.state_dict())
 
+        # Optionally initialize the distributional critic learned alongside a
+        # DAgger student. Actor initialization is intentionally separate: the
+        # DAgger PPO actor and stochastic FastSAC actor have different modules.
+        student_reference = getattr(self.env, "student", None)
+        if student_reference:
+            student_path = load_checkpoint(str(student_reference), self.log_dir)
+            # DAgger resume checkpoints may embed the full replay buffer.  Only
+            # Q/normalizer weights are needed here, so avoid staging the unused
+            # replay snapshot on the training GPU.
+            student_payload = torch.load(student_path, map_location="cpu", weights_only=False)
+            q_config = student_payload.get("distributional_q_config")
+            if not isinstance(q_config, dict):
+                raise ValueError(
+                    f"Student checkpoint has no distributional_q_config: {student_path}. "
+                    "Train a new r1-student checkpoint with distributional Q enabled."
+                )
+            expected_q_config = {
+                "num_q_networks": args.num_q_networks,
+                "num_atoms": args.num_atoms,
+                "v_min": args.v_min,
+                "v_max": args.v_max,
+                "critic_hidden_dim": args.critic_hidden_dim,
+                "use_layer_norm": args.use_layer_norm,
+                "critic_obs_keys": list(args.critic_obs_keys),
+                "critic_obs_dim": critic_obs_dim,
+            }
+            mismatches = {
+                key: (q_config.get(key), expected)
+                for key, expected in expected_q_config.items()
+                if q_config.get(key) != expected
+            }
+            if mismatches:
+                raise ValueError(f"Student/FastSAC distributional-Q config mismatch: {mismatches}")
+            self.qnet.load_state_dict(student_payload["qnet_state_dict"], strict=True)
+            self.qnet_target.load_state_dict(
+                student_payload.get("qnet_target_state_dict", student_payload["qnet_state_dict"]),
+                strict=True,
+            )
+            if args.obs_normalization:
+                normalizer_state = student_payload.get("critic_obs_normalizer_state")
+                if normalizer_state is None:
+                    raise KeyError(f"Student checkpoint has no critic_obs_normalizer_state: {student_path}")
+                self.critic_obs_normalizer.load_state_dict(normalizer_state, strict=True)
+            logger.info(f"Initialized FastSAC distributional Q critic from student checkpoint {student_path}")
+
         self.q_optimizer = optim.AdamW(
             list(self.qnet.parameters()),
             lr=args.critic_learning_rate,
@@ -343,6 +563,24 @@ class FastSACAgent(BaseAlgo):
             gamma=args.gamma,
             device=device,
         )
+        if not 0.0 <= args.teacher_buffer_ratio <= 1.0:
+            raise ValueError(f"teacher_buffer_ratio must be in [0, 1], got {args.teacher_buffer_ratio}.")
+        self.teacher_rb = None
+        if args.teacher_buffer:
+            observation_mode = infer_observation_mode(self.unwrapped_env, args.actor_obs_keys)
+            self.teacher_rb = TeacherReplayBuffer(
+                args.teacher_buffer,
+                actor_obs_dim=actor_obs_dim,
+                critic_obs_dim=critic_obs_dim,
+                action_dim=n_act,
+                actor_obs_keys=args.actor_obs_keys,
+                critic_obs_keys=args.critic_obs_keys,
+                observation_mode=observation_mode,
+            )
+            logger.info(
+                "RLPD-style replay mixing enabled: "
+                f"teacher={args.teacher_buffer_ratio:.1%}, online={1.0 - args.teacher_buffer_ratio:.1%}."
+            )
 
         if args.use_symmetry:
             # using env._env is not really ideal..
@@ -542,6 +780,30 @@ class FastSACAgent(BaseAlgo):
         large_batch_size = batch_size * num_updates
         large_data = self.rb.sample(large_batch_size)
         samples_per_update = batch_size * self.env.num_envs
+
+        if self.teacher_rb is not None and self.config.teacher_buffer_ratio > 0.0:
+            total_samples = int(large_data.batch_size[0])
+            teacher_count = min(total_samples, max(1, round(total_samples * self.config.teacher_buffer_ratio)))
+            teacher_data = self.teacher_rb.sample(teacher_count, self.device)
+            online_count = total_samples - teacher_count
+            online_indices = torch.randperm(total_samples, device=self.device)[:online_count]
+            permutation = torch.randperm(total_samples, device=self.device)
+
+            def mix(online: torch.Tensor, teacher: torch.Tensor) -> torch.Tensor:
+                combined = torch.cat((online.index_select(0, online_indices), teacher), dim=0)
+                return combined.index_select(0, permutation)
+
+            for key in ("observations", "critic_observations", "actions"):
+                large_data[key] = mix(large_data[key], teacher_data[key])
+            for key in (
+                "observations",
+                "critic_observations",
+                "rewards",
+                "dones",
+                "truncations",
+                "effective_n_steps",
+            ):
+                large_data["next"][key] = mix(large_data["next"][key], teacher_data["next"][key])
 
         if self.config.use_symmetry:
             samples_per_update *= 2

@@ -349,6 +349,60 @@ def resolve_observation_term_overrides(tyro_config: ExperimentConfig) -> Experim
     mirror them into the relevant observation terms for backward compatibility.
     """
     observation_cfg = tyro_config.observation
+
+    # R1 student/FastSAC support a checkpoint-free direct-IR mode.  The
+    # presence of this private fallback group is the opt-in marker, avoiding
+    # changes to unrelated experiments.
+    direct_ir_group = observation_cfg.groups.get("direct_ir_actor_obs") if observation_cfg is not None else None
+    if direct_ir_group is not None:
+        has_latent_checkpoint = any(
+            bool(value) for value in (tyro_config.ir_ae, tyro_config.di_ae, tyro_config.di_pro_ae)
+        )
+        groups = dict(observation_cfg.groups)
+        groups.pop("direct_ir_actor_obs", None)
+        resolved_algo = tyro_config.algo
+        if not has_latent_checkpoint:
+            groups["actor_obs"] = direct_ir_group
+            groups.pop("ae_latent", None)
+            algo_config = tyro_config.algo.config
+            if hasattr(algo_config, "module_dict"):
+                actor_module = dataclasses.replace(
+                    algo_config.module_dict.actor,
+                    input_dim=["actor_obs"],
+                )
+                module_dict = dataclasses.replace(
+                    algo_config.module_dict,
+                    actor=actor_module,
+                )
+                algo_config = dataclasses.replace(algo_config, module_dict=module_dict)
+            elif hasattr(algo_config, "actor_obs_keys"):
+                # FastSAC does not use the PPO-style module_dict.  Keep its
+                # concatenation layout aligned with the selected direct-IR
+                # observation so a direct-IR DAgger teacher buffer has the
+                # exact same actor schema at load time.
+                algo_config = dataclasses.replace(algo_config, actor_obs_keys=["actor_obs"])
+            else:
+                raise TypeError(
+                    "The direct-IR observation fallback requires either an actor module "
+                    "configuration or FastSAC actor_obs_keys."
+                )
+            resolved_algo = dataclasses.replace(tyro_config.algo, config=algo_config)
+            tyro_config = dataclasses.replace(
+                tyro_config,
+                simulator=dataclasses.replace(
+                    tyro_config.simulator,
+                    config=dataclasses.replace(
+                        tyro_config.simulator.config,
+                        enable_robot_depth_camera=False,
+                    ),
+                ),
+            )
+            logger.info(
+                "No AE checkpoint supplied: using direct 65-D interaction representation "
+                "for the R1 policy and disabling its depth-latent observation/camera."
+            )
+        observation_cfg = dataclasses.replace(observation_cfg, groups=groups)
+        tyro_config = dataclasses.replace(tyro_config, observation=observation_cfg, algo=resolved_algo)
     observation_cfg = _ensure_di_ae_latent_group(observation_cfg)
     observation_cfg = _replace_observation_term_params(
         observation_cfg,

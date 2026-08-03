@@ -226,6 +226,49 @@ def _resolve_multi_object_urdf_config(tyro_config: ExperimentConfig) -> Experime
     return dataclasses.replace(tyro_config, robot=new_robot_cfg)
 
 
+_OBJECT_SCALE_CURRICULUM_VALUES: dict[int, tuple[float, ...]] = {
+    0: (1.0,),
+    1: (0.8, 1.0, 1.2),
+    2: (0.6, 0.8, 1.0, 1.2, 1.4),
+}
+
+
+def _resolve_object_scale_curriculum_config(tyro_config: ExperimentConfig) -> ExperimentConfig:
+    """Select the safe startup object-scale set for a staged training run.
+
+    Isaac Sim object geometry is scaled while the stage is being created.  A
+    curriculum stage therefore applies for the lifetime of one training run;
+    advance the level when restarting from the previous stage's checkpoint.
+    """
+    level = tyro_config.object_scale_curriculum_level
+    if level is None:
+        return tyro_config
+    if level not in _OBJECT_SCALE_CURRICULUM_VALUES:
+        raise ValueError(
+            "object_scale_curriculum_level must be one of "
+            f"{sorted(_OBJECT_SCALE_CURRICULUM_VALUES)}, got {level}."
+        )
+    if tyro_config.randomization is None:
+        raise ValueError("Object-scale curriculum requires a randomization configuration.")
+
+    term_name = "randomize_object_scale_startup"
+    term_cfg = tyro_config.randomization.setup_terms.get(term_name)
+    if term_cfg is None:
+        raise ValueError(f"Object-scale curriculum requires setup term '{term_name}'.")
+
+    scale_values = _OBJECT_SCALE_CURRICULUM_VALUES[level]
+    updated_term = dataclasses.replace(
+        term_cfg,
+        params={**term_cfg.params, "scale_values": scale_values, "scale_value": None, "scale_range": None},
+    )
+    updated_randomization = dataclasses.replace(
+        tyro_config.randomization,
+        setup_terms={**tyro_config.randomization.setup_terms, term_name: updated_term},
+    )
+    logger.info(f"Object-scale curriculum level {level}: volume_ratio choices={scale_values}")
+    return dataclasses.replace(tyro_config, randomization=updated_randomization)
+
+
 def train(tyro_config: ExperimentConfig, training_context: TrainingContext | None = None) -> None:
     """Train an agent with optional context for sim app management.
 
@@ -237,6 +280,7 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
     """
 
     tyro_config = _resolve_multi_object_urdf_config(tyro_config)
+    tyro_config = _resolve_object_scale_curriculum_config(tyro_config)
     tyro_config = resolve_observation_term_overrides(tyro_config)
 
     if training_context is not None:
@@ -365,10 +409,13 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
                 wandb.save(str(config_path), base_path=experiment_save_dir)
 
         algo_class = get_class(tyro_config.algo._target_)
+        algo_config = tyro_config.algo.config
+        if tyro_config.teacher_buffer is not None and hasattr(algo_config, "teacher_buffer"):
+            algo_config = dataclasses.replace(algo_config, teacher_buffer=tyro_config.teacher_buffer)
         algo: BaseAlgo = algo_class(
             device=device,
             env=env,
-            config=tyro_config.algo.config,
+            config=algo_config,
             log_dir=experiment_save_dir,
             multi_gpu_cfg=distributed_conf,
         )

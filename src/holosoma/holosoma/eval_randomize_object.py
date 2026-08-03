@@ -283,7 +283,14 @@ def _zero_pose_noise(config: ExperimentConfig, *, robot: bool, obj: bool) -> Exp
             }
         )
     if obj:
-        noise_updates["object_pos"] = [0.0, 0.0, 0.0]
+        noise_updates.update(
+            {
+                "object_pos": [0.0, 0.0, 0.0],
+                # Viewer scripts apply their own explicit object placement.
+                # Disable the training sector to avoid applying the offset twice.
+                "object_sector_radius": [0.0, 0.0],
+            }
+        )
 
     if isinstance(motion_config, MotionConfig):
         noise_cfg = dataclasses.replace(motion_config.noise_to_initial_pose, **noise_updates)

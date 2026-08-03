@@ -287,6 +287,10 @@ class BaseTask:
             observation_state = self.observation_manager.get_checkpoint_state()
             if observation_state:
                 state["observation_manager"] = observation_state
+        if self.curriculum_manager is not None:
+            curriculum_state = self.curriculum_manager.get_checkpoint_state()
+            if curriculum_state:
+                state["curriculum_manager"] = curriculum_state
         return state
 
     def load_checkpoint_state(self, state: dict[str, torch.Tensor | float] | None) -> None:
@@ -296,6 +300,9 @@ class BaseTask:
         observation_state = state.get("observation_manager")
         if observation_state is not None and self.observation_manager is not None:
             self.observation_manager.load_checkpoint_state(observation_state)
+        curriculum_state = state.get("curriculum_manager")
+        if curriculum_state is not None and self.curriculum_manager is not None:
+            self.curriculum_manager.load_checkpoint_state(curriculum_state)
 
     def synchronize_curriculum_state(self, *, device: str, world_size: int) -> None:
         """Synchronize curriculum-related state across distributed processes."""

@@ -369,6 +369,27 @@ class PPO(BaseAlgo):
         for key, shape, dtype in minibatch_keys:
             self.storage.register(key, shape=shape, dtype=dtype)
 
+    def _normalize_critic_obs(
+        self,
+        critic_obs: torch.Tensor,
+        *,
+        update: bool,
+    ) -> torch.Tensor:
+        """Hook for PPO variants that carry critic-observation normalization."""
+
+        del update
+        return critic_obs
+
+    def _extra_checkpoint_state(self) -> dict:
+        """Checkpoint extension hook for PPO subclasses."""
+
+        return {}
+
+    def _load_extra_checkpoint_state(self, loaded_dict: dict) -> None:
+        """Restore checkpoint extensions for PPO subclasses."""
+
+        del loaded_dict
+
     def _eval_mode(self):
         self.actor.eval()
         self.critic.eval()
@@ -438,9 +459,14 @@ class PPO(BaseAlgo):
                 critic_obs = torch.cat([obs_dict[k] for k in self.critic_obs_keys], dim=1)
 
                 actions = self.actor.act({"actor_obs": actor_obs})
-                values = self.critic.evaluate({"critic_obs": critic_obs}).detach()
+                normalized_critic_obs = self._normalize_critic_obs(critic_obs, update=True)
+                values = self.critic.evaluate({"critic_obs": normalized_critic_obs}).detach()
 
-                obs_dict, rewards, dones, infos = self.env.step({"actions": actions})
+                # Keep the sampled policy action in storage so PPO recomputes
+                # likelihood ratios under the same distribution. Subclasses may
+                # transform only the action that is executed by the environment.
+                env_actions = self._actions_for_env(actions)
+                obs_dict, rewards, dones, infos = self.env.step({"actions": env_actions})
 
                 for obs_key in obs_dict:
                     obs_dict[obs_key] = obs_dict[obs_key].to(self.device)
@@ -450,6 +476,10 @@ class PPO(BaseAlgo):
                 final_rewards = torch.zeros_like(rewards)
                 if infos["time_outs"].any():
                     final_critic_obs = torch.cat([infos["final_observations"][k] for k in self.critic_obs_keys], dim=1)
+                    final_critic_obs = self._normalize_critic_obs(
+                        final_critic_obs,
+                        update=False,
+                    )
                     final_values = self.critic.evaluate({"critic_obs": final_critic_obs}).detach()
                     final_rewards += self.config.gamma * torch.squeeze(
                         final_values * infos["time_outs"].unsqueeze(1).to(self.device), 1
@@ -478,6 +508,7 @@ class PPO(BaseAlgo):
 
             # Return / Advantage computation
             last_critic_obs = torch.cat([obs_dict[k] for k in self.critic_obs_keys], dim=1)
+            last_critic_obs = self._normalize_critic_obs(last_critic_obs, update=False)
             last_values = self.critic.evaluate({"critic_obs": last_critic_obs}).detach().to(self.device)
             returns, advantages = self._compute_returns_and_advantages(
                 last_values,
@@ -490,6 +521,15 @@ class PPO(BaseAlgo):
             self.storage["advantages"] = advantages
 
         return obs_dict
+
+    def _actions_for_env(self, actions: torch.Tensor) -> torch.Tensor:
+        """Return the action executed by the environment.
+
+        PPO stores and scores the original sampled action. Algorithms that impose
+        an execution-time safety transform can override this hook without making
+        the stored action inconsistent with its Gaussian log probability.
+        """
+        return actions
 
     def _compute_returns_and_advantages(self, last_values, values, dones, rewards):
         advantage = 0
@@ -641,6 +681,7 @@ class PPO(BaseAlgo):
             critic_obs = minibatch["critic_obs"]
 
         self.actor.act({"actor_obs": actor_obs})
+        critic_obs = self._normalize_critic_obs(critic_obs, update=False)
         value_batch = self.critic.evaluate({"critic_obs": critic_obs})
         actions_log_prob_batch = self.actor.get_actions_log_prob(actions_batch)
         mu_batch = self.actor.action_mean[:original_batch_size]
@@ -744,6 +785,7 @@ class PPO(BaseAlgo):
             loaded_dict = torch.load(ckpt_path, map_location=self.device)
             self.actor.load_state_dict(loaded_dict["actor_model_state_dict"])
             self.critic.load_state_dict(loaded_dict["critic_model_state_dict"])
+            self._load_extra_checkpoint_state(loaded_dict)
             if self.config.load_optimizer:
                 self.actor_optimizer.load_state_dict(loaded_dict["actor_optimizer_state_dict"])
                 self.critic_optimizer.load_state_dict(loaded_dict["critic_optimizer_state_dict"])
@@ -765,6 +807,7 @@ class PPO(BaseAlgo):
             "infos": infos,
         }
         checkpoint_dict.update(self._checkpoint_metadata(iteration=self.current_learning_iteration))
+        checkpoint_dict.update(self._extra_checkpoint_state())
         env_state = self._collect_env_state()
         if env_state:
             checkpoint_dict["env_state"] = env_state

@@ -313,18 +313,21 @@ class EmpiricalNormalization(nn.Module):
             batch_mean = torch.mean(x, dim=0, keepdim=True)
             batch_var = torch.var(x, dim=0, keepdim=True, unbiased=False)
 
-        new_count = self.count + global_batch_size
+        old_count = self.count
+        new_count = old_count + global_batch_size
 
-        # Update mean
+        # Parallel/online variance merge (Chan et al.).  ``delta`` must be
+        # measured against the *old* running mean.  Computing it after updating
+        # ``self._mean`` underestimates the between-batch variance, especially
+        # during the first few updates.
         delta = batch_mean - self._mean
-        self._mean.copy_(self._mean + delta * (global_batch_size / new_count))
-
-        # Update variance
-        delta2 = batch_mean - self._mean
-        m_a = self._var * self.count
+        new_mean = self._mean + delta * (global_batch_size / new_count)
+        m_a = self._var * old_count
         m_b = batch_var * global_batch_size
-        M2 = m_a + m_b + delta2.pow(2) * (self.count * global_batch_size / new_count)
-        self._var.copy_(M2 / new_count)
+        m2 = m_a + m_b + delta.pow(2) * (old_count * global_batch_size / new_count)
+
+        self._mean.copy_(new_mean)
+        self._var.copy_((m2 / new_count).clamp_min_(0.0))
         self._std.copy_(self._var.sqrt())
         self.count.copy_(new_count)
 

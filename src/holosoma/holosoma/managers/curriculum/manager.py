@@ -171,3 +171,22 @@ class CurriculumManager:
     def iter_terms(self):
         """Iterate over registered class-based curriculum terms."""
         return self._class_terms.items()
+
+    def get_checkpoint_state(self) -> dict[str, Any]:
+        state: dict[str, Any] = {}
+        for name, term in self._class_terms.items():
+            state_fn = getattr(term, "state_dict", None)
+            if callable(state_fn):
+                term_state = state_fn()
+                if term_state:
+                    state[name] = term_state
+        return state
+
+    def load_checkpoint_state(self, state: dict[str, Any] | None) -> None:
+        if not state:
+            return
+        for name, term_state in state.items():
+            term = self._class_terms.get(name)
+            load_fn = getattr(term, "load_state_dict", None) if term is not None else None
+            if callable(load_fn):
+                load_fn(term_state)

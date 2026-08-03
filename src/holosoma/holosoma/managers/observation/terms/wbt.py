@@ -49,6 +49,122 @@ IR_RIGHT_HAND_BODY_NAME_CANDIDATES = (
     "right_wrist_pitch_link",
     "right_wrist_roll_link",
 )
+IR_PELVIS_BODY_NAME_CANDIDATES = ("pelvis_link", "pelvis")
+IR_LEFT_FOOT_BODY_NAME_CANDIDATES = (
+    "left_ankle_roll_link",
+    "left_foot_contact_point",
+    "left_foot_front_inner_link",
+    "left_foot_link",
+)
+IR_RIGHT_FOOT_BODY_NAME_CANDIDATES = (
+    "right_ankle_roll_link",
+    "right_foot_contact_point",
+    "right_foot_front_inner_link",
+    "right_foot_link",
+)
+
+
+class ObjectInteractionRepresentation(ObservationTermBase):
+    """Direct 65-D body/object surface interaction representation.
+
+    The fixed output order is left hand, right hand, pelvis, left foot, and
+    right foot.  Every body contributes the 13-D vector produced by
+    :class:`SurfaceFeatureComputer`: ``phi``, ``grad_phi``, ``v_t``,
+    ``v_norm``, and ``v_tan``.
+
+    Unlike the AE latent terms, this observation is computed entirely from
+    simulator state and never creates or reads a depth camera.
+    """
+
+    _BODY_SPECS = (
+        ("left_hand", IR_LEFT_HAND_BODY_NAME_CANDIDATES),
+        ("right_hand", IR_RIGHT_HAND_BODY_NAME_CANDIDATES),
+        ("pelvis", IR_PELVIS_BODY_NAME_CANDIDATES),
+        ("left_foot", IR_LEFT_FOOT_BODY_NAME_CANDIDATES),
+        ("right_foot", IR_RIGHT_FOOT_BODY_NAME_CANDIDATES),
+    )
+
+    def __init__(self, cfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+        available = set(env.body_names)
+        self._body_indices: list[int] = []
+        self._body_names: list[str] = []
+        for label, candidates in self._BODY_SPECS:
+            explicit_name = cfg.params.get(f"{label}_body_name")
+            body_name = _resolve_ir_surface_feature_body_name(
+                available,
+                explicit_name=explicit_name,
+                candidates=candidates,
+                label=label.replace("_", " "),
+            )
+            self._body_names.append(body_name)
+            self._body_indices.append(env.body_names.index(body_name))
+
+        shared_computer = getattr(env, "_direct_ir_surface_feature_computer", None)
+        if shared_computer is None:
+            shared_computer = SurfaceFeatureComputer.from_object_config(env.robot_config.object)
+            env._direct_ir_surface_feature_computer = shared_computer
+        self._surface_feature_computer = shared_computer
+        logger.info(
+            "Initialized direct 65-D interaction representation with body order "
+            f"{self._body_names}."
+        )
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        """Invalidate the shared per-observation-call cache after an env reset.
+
+        The term itself has no per-environment temporal state. Clearing the full
+        cache is inexpensive and is also correct for partial environment resets.
+        """
+        if hasattr(self.env, "_direct_ir_observation_cache"):
+            self.env._direct_ir_observation_cache = None
+
+    @torch.no_grad()
+    def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:
+        compute_token = int(getattr(env.observation_manager, "_compute_invocation_id", -1))
+        cached = getattr(env, "_direct_ir_observation_cache", None)
+        if cached is not None and cached[0] == compute_token:
+            return cached[1]
+        motion_command = _get_motion_command_and_assert_type(env)
+        if not getattr(motion_command.motion, "has_object", False):
+            result = torch.zeros(env.num_envs, 65, device=env.device)
+            env._direct_ir_observation_cache = (compute_token, result)
+            return result
+
+        object_keys = _object_keys_for_envs(motion_command, env.num_envs)
+        object_scales = getattr(env, "object_scale_factors", None)
+        if object_scales is None:
+            uniform_scale = torch.ones(env.num_envs, 1, device=env.device)
+        else:
+            object_scales = object_scales.to(device=env.device, dtype=torch.float32)
+            # Current randomization applies one uniform XYZ scale per object.
+            # Reject anisotropic scale rather than silently producing an
+            # incorrect closest-surface feature.
+            if not torch.allclose(object_scales, object_scales[:, :1].expand_as(object_scales), atol=1e-5):
+                raise ValueError("Direct interaction representation currently requires uniform object XYZ scale.")
+            uniform_scale = object_scales[:, :1].clamp_min(1e-6)
+        parts: list[torch.Tensor] = []
+        for body_idx in self._body_indices:
+            body_pos_w = env.simulator._rigid_body_pos[:, body_idx, :]
+            # Query the original URDF collision scene at the inverse-scaled
+            # point. Uniform scaling preserves the closest-surface normal;
+            # only phi must be scaled back to live-world units.
+            query_pos_w = motion_command.simulator_object_pos_w + (
+                body_pos_w - motion_command.simulator_object_pos_w
+            ) / uniform_scale
+            features = self._surface_feature_computer.compute_batch(
+                body_pos_w=query_pos_w,
+                body_lin_vel_w=env.simulator._rigid_body_vel[:, body_idx, :],
+                object_pos_w=motion_command.simulator_object_pos_w,
+                object_quat_w=motion_command.simulator_object_quat_w,
+                object_keys=object_keys,
+            )
+            ir_t = features["ir_t"].clone()
+            ir_t[:, :1] *= uniform_scale
+            parts.append(ir_t)
+        result = torch.cat(parts, dim=-1)
+        env._direct_ir_observation_cache = (compute_token, result)
+        return result
 
 
 class ObjectScaleSequenceProbe(torch.nn.Module):

@@ -2011,9 +2011,11 @@ def randomize_object_scale_startup(
                 scale_spec = prim_spec.GetAttributeAtPath(prim_path + ".xformOp:scale")
                 has_scale_attr = scale_spec is not None
                 if not has_scale_attr:
-                    scale_spec = Sdf.AttributeSpec(prim_spec, prim_path + ".xformOp:scale", Sdf.ValueTypeNames.Double3)
+                    # AttributeSpec expects a property token relative to prim_spec,
+                    # not a full USD property path.
+                    scale_spec = Sdf.AttributeSpec(prim_spec, "xformOp:scale", Sdf.ValueTypeNames.Double3)
 
-                scale_spec.default = Gf.Vec3f(*rand_samples_list[i])
+                scale_spec.default = Gf.Vec3d(*rand_samples_list[i])
 
                 if not has_scale_attr:
                     op_order_spec = prim_spec.GetAttributeAtPath(prim_path + ".xformOpOrder")

@@ -32,4 +32,32 @@ r1_26dof_wbt_termination = TerminationManagerCfg(
     }
 )
 
-__all__ = ["r1_26dof_wbt_termination"]
+r1_26dof_fastsac_termination = TerminationManagerCfg(
+    terms={
+        "timeout": TerminationTermCfg(
+            func="holosoma.managers.termination.terms.common:timeout_exceeded",
+            is_timeout=True,
+        ),
+        "motion_ends": TerminationTermCfg(
+            func="holosoma.managers.termination.terms.wbt:motion_ends",
+        ),
+        "object_robot_distance_xy": TerminationTermCfg(
+            func="holosoma.managers.termination.terms.wbt:ObjectRobotDistanceXY",
+            params={
+                "initial_distance_xy": 0.8,
+                "final_distance_margin_xy": 0.3,
+                "consecutive_steps": 25,
+            },
+        ),
+        "fallen": TerminationTermCfg(
+            func="holosoma.managers.termination.terms.wbt:ReferencePelvisHeightFallen",
+            params={
+                "pelvis_body_name": "pelvis_link",
+                "height_margin": 0.30,
+                "consecutive_steps": 5,
+            },
+        ),
+    }
+)
+
+__all__ = ["r1_26dof_fastsac_termination", "r1_26dof_wbt_termination"]

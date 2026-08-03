@@ -6,6 +6,13 @@ import torch
 pytest.importorskip("trimesh")
 
 import holosoma.managers.observation.terms.wbt as wbt_obs
+from holosoma.config_types.env import resolve_observation_term_overrides
+from holosoma.config_values.wbt.r1.experiment import r1_fastsac, r1_student
+from holosoma.config_values.wbt.r1.observation import (
+    r1_26dof_fastsac_observation,
+    r1_student_direct_ir_actor_obs,
+    r1_student_privileged_critic_obs,
+)
 
 
 def test_object_randomization_privileged_selects_active_object_and_spawn_offset(monkeypatch):
@@ -83,3 +90,41 @@ def test_task_index_one_hot_uses_configured_motion_stem_order(tmp_path, monkeypa
         ]
     )
     torch.testing.assert_close(actual, expected)
+
+
+def test_r1_student_observations_include_task_and_object_identity_once():
+    identity_terms = {"task_index_one_hot", "obj_type_one_hot"}
+
+    assert identity_terms <= set(r1_student_direct_ir_actor_obs.terms)
+    assert identity_terms <= set(r1_student_privileged_critic_obs.terms)
+
+    latent_actor_terms = r1_26dof_fastsac_observation.groups["actor_obs"].terms
+    assert identity_terms <= set(latent_actor_terms)
+    assert list(latent_actor_terms).count("task_index_one_hot") == 1
+    assert list(latent_actor_terms).count("obj_type_one_hot") == 1
+
+
+def test_r1_student_uses_slow_teacher_floor_and_robust_actor_replay():
+    config = r1_student.algo.config
+
+    assert config.teacher_mixture_start == 1.0
+    assert config.teacher_mixture_end == 0.2
+    assert config.teacher_mixture_decay_iterations == 5000
+    assert config.num_updates_per_iteration == 32
+    assert config.save_interval == 100
+    assert config.teacher_anchor_capacity == 262144
+    assert config.teacher_anchor_sampling_ratio == 0.5
+    assert config.teacher_action_outlier_threshold == 20.0
+    assert config.actor_huber_delta == 1.0
+    assert config.critic_obs_normalization
+
+
+def test_r1_fastsac_without_ae_uses_same_direct_ir_actor_layout_as_student():
+    student_resolved = resolve_observation_term_overrides(r1_student)
+    resolved = resolve_observation_term_overrides(r1_fastsac)
+
+    assert resolved.algo.config.actor_obs_keys == ["actor_obs"]
+    assert resolved.observation.groups["actor_obs"] == student_resolved.observation.groups["actor_obs"]
+    assert resolved.observation.groups["critic_obs"] == student_resolved.observation.groups["critic_obs"]
+    assert "ae_latent" not in resolved.observation.groups
+    assert not resolved.simulator.config.enable_robot_depth_camera

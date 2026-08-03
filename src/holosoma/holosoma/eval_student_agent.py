@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import sys
+from pathlib import Path
 from typing import Any, Literal
 
 import tyro
@@ -191,6 +192,24 @@ def _resolve_device(cli_cfg: StudentEvalConfig) -> str:
     return "cuda:0" if cli_cfg.device == "gpu" else "cpu"
 
 
+def _configure_all_motion_evaluation(env: Any) -> None:
+    """Evaluate every loaded motion clip sequentially, as data extraction does."""
+    motion_command = env.command_manager.get_state("motion_command")
+    if motion_command is None:
+        raise RuntimeError("motion_command is required for all-motion student evaluation.")
+    if not motion_command.motion.clip_files:
+        raise ValueError("No motion clips were loaded for student evaluation.")
+
+    # WBT resets each environment through clip 0, 1, 2, ... from the first frame.
+    env.set_is_evaluating()
+    motion_command.enable_eval_clip_sweep()
+    sequence_names = [Path(path).name for path in motion_command.motion.clip_files]
+    logger.info(
+        f"Enabled deterministic all-motion student evaluation: "
+        f"{' -> '.join(sequence_names)}"
+    )
+
+
 def run_eval_with_tyro(
     tyro_config: ExperimentConfig,
     checkpoint_cfg: CheckpointConfig,
@@ -225,6 +244,7 @@ def run_eval_with_tyro(
     algo.setup()
     algo.attach_checkpoint_metadata(saved_config, saved_wandb_path)
     algo.load(checkpoint_path)
+    _configure_all_motion_evaluation(env)
 
     checkpoint_dir = os.path.dirname(checkpoint_path)
 

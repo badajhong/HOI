@@ -199,6 +199,12 @@ class PPOConfig:
 
 @dataclass(frozen=True)
 class FastSACConfig:
+    teacher_buffer: str | None = None
+    """Offline teacher replay-buffer H5 used for RLPD-style mixed updates."""
+
+    teacher_buffer_ratio: float = 0.5
+    """Fraction of every update batch sampled from the teacher buffer."""
+
     num_learning_iterations: int = 25000
     """total timesteps of the experiments"""
 
@@ -321,6 +327,49 @@ class DaggerStudentConfig:
     module_dict: ActorOnlyModuleDictConfig
     """Student actor module configuration."""
 
+    value_critic: ModuleConfig = field(
+        default_factory=lambda: ModuleConfig(
+            type="MLP",
+            input_dim=["critic_obs"],
+            output_dim=[1],
+            layer_config=LayerConfig(hidden_dims=[512, 256, 128], activation="ELU"),
+        )
+    )
+    """PPO-compatible V(s) critic saved with the student checkpoint."""
+
+    critic_hidden_dim: int = 768
+    num_q_networks: int = 2
+    num_atoms: int = 101
+    v_min: float = -20.0
+    v_max: float = 20.0
+    q_use_layer_norm: bool = True
+    critic_obs_normalization: bool = True
+    q_weight_decay: float = 0.001
+    """FastSAC distributional-Q architecture and normalization settings."""
+
+    critic_learning_rate: float = 3e-4
+    """Legacy shared critic learning rate used when a split rate is not provided."""
+
+    value_learning_rate: float | None = None
+    """V-critic learning rate. Falls back to ``critic_learning_rate`` for old configs."""
+
+    q_learning_rate: float | None = None
+    """Distributional Q-critic learning rate. Falls back to ``critic_learning_rate``."""
+
+    critic_optimizer: OptimizerConfig = field(default_factory=lambda: OptimizerConfig(_target_="torch.optim.AdamW"))
+    gamma: float = 0.99
+    target_tau: float = 0.005
+    """Legacy shared target-network tau used when a split tau is not provided."""
+
+    value_target_tau: float | None = None
+    """V target-network Polyak coefficient. Falls back to ``target_tau``."""
+
+    q_target_tau: float | None = None
+    """Q target-network Polyak coefficient. Falls back to ``target_tau``."""
+
+    value_loss_coef: float = 1.0
+    q_loss_coef: float = 1.0
+
     actor_learning_rate: float = 3e-4
     """Learning rate for the student actor."""
 
@@ -348,8 +397,26 @@ class DaggerStudentConfig:
     stack_buffer: int = 6_400_000
     """Maximum number of samples kept in the rolling supervised buffer."""
 
+    teacher_anchor_capacity: int = 262_144
+    """Fixed valid-teacher actor samples retained as a non-overwriting anchor."""
+
+    teacher_anchor_sampling_ratio: float = 0.5
+    """Fraction of each actor-supervision batch sampled from the fixed teacher anchor."""
+
     buffer_device: str = "auto"
     """Storage device for the DAgger supervised buffer: ``auto``, ``cpu``, ``gpu``, or an explicit torch device."""
+
+    teacher_buffer_output: str | None = None
+    """Relative H5 path under the run directory for teacher-executed transitions; ``None`` disables export."""
+
+    teacher_buffer_max_transitions: int = 524_288
+    """Maximum H5 teacher transitions retained with reservoir sampling."""
+
+    teacher_buffer_reservoir_seed: int = 0
+    """Deterministic reservoir-sampling seed for the H5 teacher buffer."""
+
+    teacher_buffer_sampling_probability: float | None = None
+    """Teacher-row pre-sampling probability; ``None`` targets one reservoir-capacity over the mixture schedule."""
 
     max_grad_norm: float = 1.0
     """Maximum gradient norm for clipping."""
@@ -359,6 +426,24 @@ class DaggerStudentConfig:
 
     teacher_obs_group: str = "teacher_obs"
     """Observation group used to query the frozen teacher policy."""
+
+    teacher_mixture_start: float = 0.0
+    """Probability of executing the teacher action at DAgger iteration zero."""
+
+    teacher_mixture_end: float = 0.0
+    """Teacher-action probability after the DAgger mixture decay completes."""
+
+    teacher_mixture_decay_iterations: int = 0
+    """Number of iterations over which the teacher execution probability decays linearly."""
+
+    teacher_action_outlier_threshold: float = 20.0
+    """Reject teacher actor labels whose raw absolute action exceeds this value."""
+
+    actor_huber_delta: float = 1.0
+    """Transition point used by the robust Huber actor-supervision loss."""
+
+    student_action_clip: float = 100.0
+    """Absolute safety limit applied to actions before rollout execution and Q replay storage."""
 
     max_actor_learning_rate: float | None = None
     min_actor_learning_rate: float | None = None

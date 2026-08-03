@@ -1,0 +1,25 @@
+version: 1
+timestep_base: 0
+
+phase_definitions:
+  0: approach
+  1: interaction_and_finish
+
+# Two-phase boundary convention for a motion with T frames:
+#   phase 0: 0 <= timestep < phase_1_start_timestep
+#   phase 1: phase_1_start_timestep <= timestep < T
+#
+# phase_2_start_timestep is retained as optional provenance from the earlier
+# three-phase annotation and is not used by the two-phase FastSAC schedule.
+motions:
+  largebox/sub3_largebox_003.npz:
+    phase_1_start_timestep: 29
+    phase_2_start_timestep: 130
+
+  largebox/sub3_largebox_020.npz:
+    phase_1_start_timestep: 9
+    phase_2_start_timestep: 140
+
+  largebox/sub7_largebox_000.npz:
+    phase_1_start_timestep: 32
+    phase_2_start_timestep: 95

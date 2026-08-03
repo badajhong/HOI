@@ -47,6 +47,8 @@ class RewardManager:
 
         # Buffers for reward tracking
         self._reward_buf = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+        self.last_raw_term_values: dict[str, torch.Tensor] = {}
+        self.last_scaled_term_values: dict[str, torch.Tensor] = {}
 
         # Episode sums for each term (for logging)
         self._episode_sums: dict[str, torch.Tensor] = {}
@@ -147,6 +149,8 @@ class RewardManager:
         """
         # Reset computation
         self._reward_buf[:] = 0.0
+        self.last_raw_term_values = {}
+        self.last_scaled_term_values = {}
 
         # Iterate over all reward terms
         for term_name, term_cfg in zip(self._term_names, self._term_cfgs):
@@ -169,6 +173,8 @@ class RewardManager:
 
             # Scale by weight and dt
             rew_scaled = rew_raw * term_cfg.weight * dt
+            self.last_raw_term_values[term_name] = rew_raw.detach().clone()
+            self.last_scaled_term_values[term_name] = rew_scaled.detach().clone()
 
             # Accumulate
             self._reward_buf += rew_scaled

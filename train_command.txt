@@ -209,8 +209,35 @@ nohup xvfb-run -a python src/holosoma/holosoma/train_agent.py \
 nohup xvfb-run -a python src/holosoma/holosoma/train_agent.py \
     exp:r1-student \
     --training.project student \
-    --training.num-envs 64 \
+    --training.num-envs 512 \
+    --algo.config.batch-size 16384 \
+    --algo.config.num-updates-per-iteration 4 \
+    --algo.config.teacher-buffer-max-transitions 1048576 \
     --teacher ./logs/teacher/20260727_070811-r1_teacher-locomotion/model_30000.pt \
+    logger:wandb \
+    > train_output.log 2>&1 &
+
+OMNI_KIT_ACCEPT_EULA=YES nohup xvfb-run -a \
+python src/holosoma/holosoma/train_agent.py \
+    exp:r1-final-ppo \
+    --training.project final-ppo \
+    --training.num-envs 256 \
+    --student /home/hcc/research/HOI/logs/student/20260731_210545-r1_student-locomotion/model_03000.pt \
     --di-pro-ae ./logs/AE/20260730_053423-ae-pro-joint-largebox/best.pt \
     logger:wandb \
+    > train_output.log 2>&1 &
+
+OMNI_KIT_ACCEPT_EULA=YES nohup xvfb-run -a \
+python src/holosoma/holosoma/train_agent.py \
+    exp:r1-fastsac \
+    --training.project fastsac \
+    --training.num-envs 256 \
+    --di-pro-ae ./logs/AE/20260730_053423-ae-pro-joint-largebox/best.pt \
+    --teacher-buffer ./logs/ir_di_pro_largebox/20260731_181416-r1_teacher-ir/telemetry/teacher_buffer.h5 \
+    --algo.config.teacher-buffer-ratio 0.5 \
+    logger:wandb \
+    --logger.video.enabled True \
+    --logger.video.upload-to-wandb True \
+    --logger.video.interval 20 \
+    --logger.video.record-env-id 0 \
     > train_output.log 2>&1 &

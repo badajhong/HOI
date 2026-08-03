@@ -174,8 +174,8 @@ class WholeBodyTrackingManager(BaseTask):
             episode_count = torch.as_tensor(float(env_ids_for_clip.numel()), device=self.device)
             self.log_dict[f"{metric_prefix}/episode"] = episode_count.detach()
 
-            for outcome_name in ("motion_ends", "bad_tracking", "timeout"):
-                outcome_count = outcome_masks[outcome_name][env_ids_for_clip].to(dtype=torch.float32).sum()
+            for outcome_name, outcome_mask in outcome_masks.items():
+                outcome_count = outcome_mask[env_ids_for_clip].to(dtype=torch.float32).sum()
                 self.log_dict[f"{metric_prefix}/{outcome_name}"] = outcome_count.detach()
 
             bad_tracking_mask = outcome_masks["bad_tracking"][env_ids_for_clip]
@@ -205,6 +205,9 @@ class WholeBodyTrackingManager(BaseTask):
             "bad_tracking": _term_mask("bad_tracking"),
             "timeout": getattr(term_manager, "last_timeout_flags", zero).to(device=self.device, dtype=torch.bool),
         }
+        for term_name in last_term_results:
+            if term_name not in outcome_masks:
+                outcome_masks[term_name] = _term_mask(term_name)
 
         bad_tracking_term = getattr(term_manager, "_term_instances", {}).get("bad_tracking")
         bad_tracking_reasons = getattr(bad_tracking_term, "last_reason_results", {}) or {}

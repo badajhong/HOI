@@ -1174,6 +1174,64 @@ def get_scaled_object_support_delta_from_points(
     return orig_min - scaled_min
 
 
+def get_scaled_object_surface_distance_center_delta(
+    quat_xyzw: torch.Tensor,
+    scales_xyz: torch.Tensor,
+    direction_world: torch.Tensor,
+    *,
+    local_support_points: torch.Tensor | None = None,
+    local_bbox_center: torch.Tensor | None = None,
+    local_bbox_half_extent: torch.Tensor | None = None,
+    chunk_size: int = 256,
+) -> torch.Tensor:
+    """Return center displacement preserving robot-to-object near-surface distance.
+
+    Positive values move the object away from the robot along ``direction_world``;
+    negative values move it closer. Geometry projections account for the live
+    object orientation and per-axis scale.
+    """
+    if quat_xyzw.numel() == 0:
+        return torch.zeros(0, device=quat_xyzw.device, dtype=quat_xyzw.dtype)
+
+    dtype, device = quat_xyzw.dtype, quat_xyzw.device
+    scales_xyz = scales_xyz.to(device=device, dtype=dtype)
+    direction_world = direction_world.to(device=device, dtype=dtype)
+    direction_world = direction_world / torch.linalg.norm(
+        direction_world, dim=-1, keepdim=True
+    ).clamp_min(1e-6)
+    rotation_mats = quaternion_to_matrix(quat_xyzw, w_last=True)
+    direction_local = torch.bmm(
+        rotation_mats.transpose(1, 2), direction_world.unsqueeze(-1)
+    ).squeeze(-1)
+
+    if local_support_points is not None and local_support_points.numel() > 0:
+        points = local_support_points.to(device=device, dtype=dtype)
+        orig_min = torch.full((quat_xyzw.shape[0],), torch.inf, device=device, dtype=dtype)
+        scaled_min = torch.full_like(orig_min, torch.inf)
+        chunk_size = max(1, min(int(chunk_size), int(points.shape[0])))
+        for start in range(0, int(points.shape[0]), chunk_size):
+            chunk = points[start : start + chunk_size].unsqueeze(0)
+            orig_proj = torch.sum(chunk * direction_local.unsqueeze(1), dim=-1)
+            scaled_proj = torch.sum(
+                chunk * scales_xyz.unsqueeze(1) * direction_local.unsqueeze(1), dim=-1
+            )
+            orig_min = torch.minimum(orig_min, orig_proj.min(dim=1).values)
+            scaled_min = torch.minimum(scaled_min, scaled_proj.min(dim=1).values)
+        return orig_min - scaled_min
+
+    if local_bbox_center is None or local_bbox_half_extent is None:
+        return torch.zeros(quat_xyzw.shape[0], device=device, dtype=dtype)
+    center = local_bbox_center.to(device=device, dtype=dtype).unsqueeze(0)
+    half = local_bbox_half_extent.to(device=device, dtype=dtype).unsqueeze(0)
+    orig_min = torch.sum(center * direction_local, dim=-1) - torch.sum(
+        half * direction_local.abs(), dim=-1
+    )
+    scaled_min = torch.sum(center * scales_xyz * direction_local, dim=-1) - torch.sum(
+        half * scales_xyz * direction_local.abs(), dim=-1
+    )
+    return orig_min - scaled_min
+
+
 def get_object_support_min_z_from_points(
     quat_xyzw: torch.Tensor,
     local_support_points: torch.Tensor,
@@ -1359,6 +1417,14 @@ class MotionCommand(CommandTermBase):
         env_ids = self._ensure_index_tensor(env_ids)
         if env_ids.numel() == 0:
             return
+        if self.motion_cfg.adaptive_phase_zero:
+            if not hasattr(self, "_fastsac_phase_one"):
+                self._fastsac_phase_one = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+                self._fastsac_phase_zero_ready_counts = torch.zeros(
+                    self.num_envs, dtype=torch.long, device=self.device
+                )
+            self._fastsac_phase_one[env_ids] = False
+            self._fastsac_phase_zero_ready_counts[env_ids] = 0
 
         # 0. Sample clip-local timesteps to preserve clip boundaries.
         num_resets = env_ids.numel()
@@ -1547,6 +1613,91 @@ class MotionCommand(CommandTermBase):
                 )
                 target_obj_pos[:, 2] += grounding_offset_z
             target_obj_pos = target_obj_pos + (torch.rand(obj_pos.shape, device=self.device) - 0.5) * 2 * obj_pos_noise
+
+            # Preserve the reference robot-to-object *surface* distance when
+            # object scale changes. Without this correction, a larger object
+            # starts too close and a smaller object starts too far away even
+            # when their centers share the same reference pose.
+            support_points_by_actor = getattr(self._env, "object_local_support_points_by_actor", None) or {}
+            bbox_centers = getattr(self._env, "object_local_bbox_center_by_actor", None) or {}
+            bbox_half_extents = getattr(self._env, "object_local_bbox_half_extent_by_actor", None) or {}
+            center_delta = torch.zeros(len(env_ids), device=self.device, dtype=target_obj_pos.dtype)
+            direction_world = torch.zeros_like(target_obj_pos)
+            direction_world[:, :2] = target_obj_pos[:, :2] - target_root_pos[:, :2]
+            direction_world[:, 2] = 0.0
+            direction_world = direction_world / torch.linalg.norm(
+                direction_world, dim=-1, keepdim=True
+            ).clamp_min(1e-6)
+
+            def _apply_surface_distance_scale_correction(actor_name: str, mask: torch.Tensor) -> None:
+                if not torch.any(mask):
+                    return
+                actor_scales = self._get_actor_scale_factors(actor_name, env_ids[mask])
+                if actor_scales is None:
+                    return
+                delta = get_scaled_object_surface_distance_center_delta(
+                    quat_xyzw=obj_ori[mask],
+                    scales_xyz=actor_scales,
+                    direction_world=direction_world[mask],
+                    local_support_points=support_points_by_actor.get(actor_name),
+                    local_bbox_center=bbox_centers.get(actor_name),
+                    local_bbox_half_extent=bbox_half_extents.get(actor_name),
+                )
+                target_obj_pos[mask, :2] += delta.unsqueeze(1) * direction_world[mask, :2]
+                center_delta[mask] = delta
+
+            if self.object_name_to_indices and selected_object_type_ids is not None and all_keys is not None:
+                for object_key in all_keys:
+                    _apply_surface_distance_scale_correction(
+                        f"object_{object_key}",
+                        selected_object_type_ids == self.object_key_to_id[object_key],
+                    )
+            else:
+                _apply_surface_distance_scale_correction(
+                    self.object_name,
+                    torch.ones(len(env_ids), dtype=torch.bool, device=self.device),
+                )
+            if not hasattr(self._env, "object_scale_xy_center_delta"):
+                self._env.object_scale_xy_center_delta = torch.zeros(
+                    self.num_envs, device=self.device, dtype=target_obj_pos.dtype
+                )
+            self._env.object_scale_xy_center_delta[env_ids] = center_delta
+
+            sector_radius = self.init_pose_cfg.object_sector_radius
+            sector_half_angle_deg = float(self.init_pose_cfg.object_sector_half_angle_deg)
+            if len(sector_radius) != 2:
+                raise ValueError(f"object_sector_radius must contain [min, max], got {sector_radius}.")
+            radius_min, radius_max = (float(sector_radius[0]), float(sector_radius[1]))
+            if radius_min < 0.0 or radius_max < radius_min:
+                raise ValueError(f"Expected 0 <= sector radius min <= max, got {sector_radius}.")
+            if not 0.0 <= sector_half_angle_deg < 90.0:
+                raise ValueError(
+                    f"object_sector_half_angle_deg must be in [0, 90), got {sector_half_angle_deg}."
+                )
+            if radius_max > 0.0:
+                # Uniform over sector area rather than biased toward its center.
+                radius = torch.sqrt(
+                    torch.rand(len(env_ids), device=self.device) * (radius_max**2 - radius_min**2)
+                    + radius_min**2
+                )
+                half_angle = math.radians(sector_half_angle_deg)
+                angle = (torch.rand(len(env_ids), device=self.device) * 2.0 - 1.0) * half_angle
+                offset_robot = torch.zeros(len(env_ids), 3, device=self.device, dtype=target_obj_pos.dtype)
+                offset_robot[:, 0] = radius * torch.cos(angle)
+                offset_robot[:, 1] = radius * torch.sin(angle)
+                robot_yaw = yaw_quat(root_rot, w_last=True)
+                offset_world = quat_apply(robot_yaw, offset_robot, w_last=True)
+                target_obj_pos[:, :2] += offset_world[:, :2]
+
+                forward_robot = torch.zeros_like(offset_robot)
+                forward_robot[:, 0] = 1.0
+                forward_world = quat_apply(robot_yaw, forward_robot, w_last=True)
+                signed_front = torch.sum(
+                    (target_obj_pos[:, :2] - target_root_pos[:, :2]) * forward_world[:, :2], dim=-1
+                )
+                clearance = float(self.init_pose_cfg.object_sector_min_front_clearance)
+                correction = torch.clamp(clearance - signed_front, min=0.0)
+                target_obj_pos[:, :2] += correction[:, None] * forward_world[:, :2]
             support_points_by_actor = getattr(self._env, "object_local_support_points_by_actor", None)
             bbox_centers = getattr(self._env, "object_local_bbox_center_by_actor", None)
             bbox_half_extents = getattr(self._env, "object_local_bbox_half_extent_by_actor", None)
@@ -1652,6 +1803,14 @@ class MotionCommand(CommandTermBase):
         """called in _update_tasks_callback of the environment. (after compute_reward, before compute_observations)"""
         # 0. update time steps, all motion joint/body poses are updated automatically with the time steps.
         advance_mask = torch.ones_like(self.time_steps, dtype=torch.bool)
+        if self.motion_cfg.adaptive_phase_zero:
+            from holosoma.utils.task_phase import TwoPhaseSchedule  # noqa: PLC0415
+
+            schedule = getattr(self, "_fastsac_adaptive_phase_schedule", None)
+            if schedule is None:
+                schedule = TwoPhaseSchedule(self)
+                self._fastsac_adaptive_phase_schedule = schedule
+            advance_mask &= schedule.update_adaptive_phase(self)
 
         # Handle freeze_at_timestep_zero_prob: for envs at clip start, randomly decide whether to advance
         freeze_prob = self.motion_cfg.freeze_at_timestep_zero_prob
@@ -1950,6 +2109,10 @@ class MotionCommand(CommandTermBase):
     @property
     def simulator_object_lin_vel_w(self) -> torch.Tensor:
         return self._active_object_states_w()[:, 7:10]
+
+    @property
+    def simulator_object_ang_vel_w(self) -> torch.Tensor:
+        return self._active_object_states_w()[:, 10:13]
 
     #########################################################################################
     ## Methods that does not fit into setup/step/reset pattern

@@ -134,11 +134,26 @@ r1_student = replace(
             algo.dagger_student.config,
             num_learning_iterations=50000,
             num_steps_per_env=32,
-            num_updates_per_iteration=16,
+            num_updates_per_iteration=32,
             batch_size=4096,
             actor_learning_rate=3e-4,
-            save_interval=1000,
-            stack_buffer=262144,
+            value_learning_rate=1e-4,
+            q_learning_rate=3e-4,
+            teacher_mixture_start=1.0,
+            teacher_mixture_end=0.2,
+            teacher_mixture_decay_iterations=5000,
+            teacher_action_outlier_threshold=20.0,
+            actor_huber_delta=1.0,
+            student_action_clip=20.0,
+            value_target_tau=0.005,
+            q_target_tau=0.05,
+            save_interval=100,
+            stack_buffer=524288,
+            teacher_anchor_capacity=262144,
+            teacher_anchor_sampling_ratio=0.5,
+            buffer_device="gpu",
+            teacher_buffer_output="teacher_buffer.h5",
+            teacher_buffer_max_transitions=524288,
             module_dict=replace(
                 algo.dagger_student.config.module_dict,
                 actor=replace(
@@ -151,8 +166,29 @@ r1_student = replace(
             ),
         ),
     ),
-    observation=observation.r1_26dof_wbt_observation_w_object_multi_student,
+    # Match the DAgger student's deployable observation interface to the
+    # FastSAC actor: proprioception + object/task identity + velocity command
+    # + task phase, followed by the same frozen depth/proprioception latent.
+    # The privileged teacher_obs group remains unchanged for supervision.
+    observation=replace(
+        observation.r1_26dof_fastsac_observation,
+        groups={
+            **observation.r1_26dof_fastsac_observation.groups,
+            "critic_obs": replace(
+                observation.r1_student_privileged_critic_obs,
+                terms={
+                    **observation.r1_student_privileged_critic_obs.terms,
+                    "previous_action": replace(
+                        observation.r1_student_privileged_critic_obs.terms["previous_action"],
+                        func="holosoma.managers.observation.terms.wbt:actions",
+                    ),
+                },
+            ),
+        },
+    ),
     command=r1_student_command,
+    reward=reward.r1_26dof_fastsac_reward,
+    termination=termination.r1_26dof_fastsac_termination,
     simulator=replace(
         r1_teacher.simulator,
         config=replace(
@@ -162,4 +198,201 @@ r1_student = replace(
     ),
 )
 
-__all__ = ["r1_student", "r1_teacher"]
+# Retain the direct-IR fallback alongside the legacy latent observation.  The
+# config resolver activates exactly one of them based on whether an AE
+# checkpoint was supplied.
+r1_student = replace(
+    r1_student,
+    observation=replace(
+        r1_student.observation,
+        groups={
+            **r1_student.observation.groups,
+            "critic_obs": replace(
+                observation.r1_student_privileged_critic_obs,
+                terms={
+                    **observation.r1_student_privileged_critic_obs.terms,
+                    "previous_action": replace(
+                        observation.r1_student_privileged_critic_obs.terms["previous_action"],
+                        func="holosoma.managers.observation.terms.wbt:actions",
+                    ),
+                },
+            ),
+            "direct_ir_actor_obs": observation.r1_student_direct_ir_actor_obs,
+        },
+    ),
+)
+
+r1_fastsac = replace(
+    r1_student,
+    simulator=replace(
+        r1_student.simulator,
+        config=replace(
+            r1_student.simulator.config,
+            scene=replace(r1_student.simulator.config.scene, replicate_physics=False),
+        ),
+    ),
+    command=replace(
+        r1_student.command,
+        setup_terms={
+            **r1_student.command.setup_terms,
+            "motion_command": replace(
+                r1_student.command.setup_terms["motion_command"],
+                params={
+                    **r1_student.command.setup_terms["motion_command"].params,
+                    "motion_config": replace(
+                        r1_student.command.setup_terms["motion_command"].params["motion_config"],
+                        start_at_timestep_zero_prob=1.0,
+                        adaptive_phase_zero=True,
+                        phase_zero_position_threshold_m=0.15,
+                        phase_zero_yaw_threshold_rad=0.35,
+                        phase_zero_ready_hold_steps=8,
+                        phase_zero_linear_velocity_gain=1.5,
+                        phase_zero_angular_velocity_gain=1.5,
+                        phase_zero_max_linear_velocity=0.5,
+                        phase_zero_max_angular_velocity=0.6,
+                        noise_to_initial_pose=replace(
+                            r1_student.command.setup_terms["motion_command"]
+                            .params["motion_config"]
+                            .noise_to_initial_pose,
+                            object_sector_radius=[0.0, 0.50],
+                            object_sector_half_angle_deg=30.0,
+                            object_sector_min_front_clearance=0.05,
+                        ),
+                    ),
+                },
+            ),
+        },
+    ),
+    training=replace(
+        r1_student.training,
+        project="fastsac",
+        name="r1_fastsac",
+        num_envs=64,
+    ),
+    algo=replace(
+        algo.fast_sac,
+        config=replace(
+            algo.fast_sac.config,
+            num_learning_iterations=400000,
+            gamma=0.99,
+            num_steps=1,
+            num_updates=4,
+            policy_frequency=2,
+            alpha_init=0.001,
+            alpha_learning_rate=3e-4,
+            target_entropy_ratio=0.5,
+            tau=0.05,
+            use_symmetry=False,
+            actor_obs_keys=["actor_obs", "ae_latent"],
+            critic_obs_keys=["critic_obs"],
+        ),
+    ),
+    reward=reward.r1_26dof_fastsac_reward,
+    observation=replace(
+        observation.r1_26dof_fastsac_observation,
+        groups={
+            **observation.r1_26dof_fastsac_observation.groups,
+            # Without an AE checkpoint, resolve_observation_term_overrides
+            # swaps this private marker into actor_obs and switches FastSAC to
+            # actor_obs_keys=["actor_obs"].  This keeps no-AE student replay
+            # tensor-compatible with a no-AE r1-fastsac run.
+            "direct_ir_actor_obs": observation.r1_student_direct_ir_actor_obs,
+            "critic_obs": replace(
+                observation.r1_student_privileged_critic_obs,
+                terms={
+                    **observation.r1_student_privileged_critic_obs.terms,
+                    "previous_action": replace(
+                        observation.r1_student_privileged_critic_obs.terms["previous_action"],
+                        func="holosoma.managers.observation.terms.wbt:actions",
+                    ),
+                },
+            ),
+        },
+    ),
+    termination=termination.r1_26dof_fastsac_termination,
+    randomization=randomization.r1_26dof_fastsac_randomization,
+)
+
+r1_final_ppo = replace(
+    r1_fastsac,
+    object_scale_curriculum_level=0,
+    simulator=replace(
+        r1_fastsac.simulator,
+        config=replace(r1_fastsac.simulator.config, enable_robot_depth_camera=False),
+    ),
+    training=replace(
+        r1_fastsac.training,
+        project="final-ppo",
+        name="r1_final_ppo",
+        num_envs=256,
+    ),
+    algo=replace(
+        algo.ppo,
+        _target_="holosoma.agents.ppo.student_initialized_ppo.StudentInitializedPPO",
+        config=replace(
+            algo.ppo.config,
+            num_learning_iterations=100000,
+            num_steps_per_env=32,
+            num_learning_epochs=3,
+            num_mini_batches=8,
+            actor_learning_rate=1e-5,
+            critic_learning_rate=3e-4,
+            entropy_coef=0.001,
+            init_noise_std=0.1,
+            init_at_random_ep_len=False,
+            use_symmetry=False,
+            save_interval=1000,
+            module_dict=replace(
+                algo.ppo.config.module_dict,
+                actor=replace(
+                    algo.ppo.config.module_dict.actor,
+                    input_dim=["actor_obs"],
+                    layer_config=replace(
+                        algo.ppo.config.module_dict.actor.layer_config,
+                        hidden_dims=[512, 256, 128],
+                    ),
+                ),
+                critic=replace(
+                    algo.ppo.config.module_dict.critic,
+                    input_dim=["critic_obs"],
+                    layer_config=replace(
+                        algo.ppo.config.module_dict.critic.layer_config,
+                        hidden_dims=[512, 256, 128],
+                    ),
+                ),
+            ),
+        ),
+    ),
+    observation=replace(
+        observation.r1_student_direct_ir_observation,
+        groups={
+            "actor_obs": replace(
+                observation.r1_student_direct_ir_observation.groups["actor_obs"],
+                terms={
+                    **observation.r1_student_direct_ir_observation.groups["actor_obs"].terms,
+                    "previous_action": replace(
+                        observation.r1_student_direct_ir_observation.groups["actor_obs"].terms[
+                            "previous_action"
+                        ],
+                        func="holosoma.managers.observation.terms.wbt:actions",
+                    ),
+                },
+            ),
+            "critic_obs": replace(
+                observation.r1_student_direct_ir_observation.groups["critic_obs"],
+                terms={
+                    **observation.r1_student_direct_ir_observation.groups["critic_obs"].terms,
+                    "previous_action": replace(
+                        observation.r1_student_direct_ir_observation.groups["critic_obs"].terms[
+                            "previous_action"
+                        ],
+                        func="holosoma.managers.observation.terms.wbt:actions",
+                    ),
+                },
+            ),
+        },
+    ),
+    curriculum=curriculum.r1_26dof_final_ppo_curriculum,
+)
+
+__all__ = ["r1_fastsac", "r1_final_ppo", "r1_student", "r1_teacher"]
